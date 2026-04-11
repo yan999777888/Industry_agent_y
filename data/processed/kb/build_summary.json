@@ -1,0 +1,52 @@
+{
+  "knowledge_dir": "Knowledge_base",
+  "output_dir": "data/processed/kb",
+  "manual_count": 21,
+  "chunk_count": 4132,
+  "referenced_image_count": 958,
+  "disk_image_count": 2608,
+  "missing_image_count": 0,
+  "mismatch_count": 4,
+  "max_chunk_chars": 1200,
+  "sqlite": {
+    "db_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/data/processed/kb/index.sqlite",
+    "fts5_available": true,
+    "chunk_count": 4132,
+    "image_count": 2608,
+    "manual_count": 21
+  },
+  "warnings": [
+    {
+      "type": "pic_image_count_mismatch",
+      "manual_id": "发电机手册",
+      "pic_count": 102,
+      "image_count": 101,
+      "unmatched_pic_count": 1,
+      "extra_image_count": 0
+    },
+    {
+      "type": "pic_image_count_mismatch",
+      "manual_id": "可编程温控器手册",
+      "pic_count": 57,
+      "image_count": 58,
+      "unmatched_pic_count": 0,
+      "extra_image_count": 1
+    },
+    {
+      "type": "pic_image_count_mismatch",
+      "manual_id": "汇总英文手册",
+      "pic_count": 1783,
+      "image_count": 142,
+      "unmatched_pic_count": 1641,
+      "extra_image_count": 0
+    },
+    {
+      "type": "pic_image_count_mismatch",
+      "manual_id": "洗碗机手册",
+      "pic_count": 29,
+      "image_count": 30,
+      "unmatched_pic_count": 0,
+      "extra_image_count": 1
+    }
+  ]
+}
