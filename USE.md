@@ -39,6 +39,13 @@ curl http://localhost:11434/api/tags
 
 > **注意**：当前使用 `qwen3.5:2b` 进行测试。如需更好的效果，可拉取更大的模型（如 `qwen3:8b`），并修改 `src/industry_agent/agent/service.py` 中的 `OLLAMA_MODEL` 配置。
 
+当前版本也支持通过环境变量切换 Ollama 地址和模型：
+
+```bash
+export OLLAMA_BASE_URL=http://localhost:11434
+export OLLAMA_MODEL=qwen3.5:2b
+```
+
 ---
 
 ## 2. 构建知识库索引
@@ -101,14 +108,25 @@ Content-Type: application/json
     "answer": "根据参考资料，电钻电池的安装步骤如下……",
     "session_id": "s_a1b2c3d4",
     "image_ids": ["drill0_15", "Manual11_8"],
+    "images": [
+      {
+        "image_id": "drill0_15",
+        "file_name": "drill0_15.png",
+        "path": "Knowledge_base/插图/drill0_15.png",
+        "exists": true
+      }
+    ],
     "sources": ["电钻"],
     "references": [
       {
         "chunk_id": "chunk_22326ebfac83",
         "title": "钻孔（图7）",
-        "text_snippet": "# 钻孔（图7） 图7 注意：钻薄材料时……"
+        "text_snippet": "# 钻孔（图7） 图7 注意：钻薄材料时……",
+        "product_name": "电钻",
+        "score": "31.2"
       }
     ],
+    "confidence": 0.86,
     "timestamp": 1776137645
   }
 }
@@ -153,6 +171,32 @@ curl -X POST http://127.0.0.1:8000/chat \
 python3 src/industry_agent/agent/test_api.py
 ```
 
+### 5.1 批量评测 /chat
+
+启动 API 服务后，可以用内置小样例集批量请求 `/chat`：
+
+```bash
+python3 scripts/evaluate_chat.py
+```
+
+默认结果会保存到：
+
+```text
+data/processed/eval_chat_results.jsonl
+```
+
+也可以指定服务地址：
+
+```bash
+python3 scripts/evaluate_chat.py --base-url http://127.0.0.1:8000
+```
+
+如果你有自定义问题列表，可以创建一个每行一个问题的文本文件：
+
+```bash
+python3 scripts/evaluate_chat.py --questions docs/my_questions.txt
+```
+
 ---
 
 ## 6. 本地直接调用（不经过 HTTP）
@@ -165,7 +209,9 @@ agent = AgentService()
 resp = agent.chat(ChatRequest(question="洗碗机安装有什么要求？"))
 print(resp.answer)
 print(resp.image_ids)
+print(resp.images)
 print(resp.sources)
+print(resp.confidence)
 ```
 
 ---
@@ -176,19 +222,19 @@ print(resp.sources)
 用户问题
   │
   ▼
-关键词提取（中文 bigram + ASCII 合并）
+查询解析（产品别名 + 型号识别 + 中文关键词）
   │
   ▼
-SQLite LIKE 评分检索（产品名×5 + 标题×2 + 正文×1）
+SQLite LIKE 候选召回 + Python 侧重排
   │
   ▼
-Context 组装（top-5 chunks，截断 4000 字）
+证据筛选（低置信拒答 + 同产品过滤 + top chunks）
   │
   ▼
 Ollama qwen3.5:2b（think=false，原生 /api/chat）
   │
   ▼
-结构化返回（answer + image_ids + sources + references）
+结构化返回（answer + image_ids/images + sources + references + confidence）
 ```
 
 ### 关键文件
