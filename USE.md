@@ -162,6 +162,29 @@ curl -X POST http://127.0.0.1:8000/chat \
   -d '{"question": "充电时有什么注意事项？", "session_id": "s_xxx"}'
 ```
 
+当前版本的多轮对话管理已经支持：
+
+- 保存结构化会话状态，而不只是简单历史消息
+- 自动继承上一轮识别出的产品名和型号
+- 识别“这个”“它”“刚才那个”“还有呢”这类追问表达
+- 在检索前自动补全上下文，例如把“这个还有其他尺寸吗？”解析成带产品名的检索查询
+
+例如：
+
+```bash
+# 第一轮
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "我想更换健身追踪器的表带"}'
+
+# 第二轮：即使不再重复写产品名，也会自动继承上一轮上下文
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "这个还有其他尺寸吗？", "session_id": "s_xxx"}'
+```
+
+如果你想切换到新的产品主题，建议直接使用新的 `session_id`，避免沿用上一轮的产品上下文。
+
 ### 示例 4：复杂问题拆解
 
 当前系统已经支持把一次提问中的多个问题拆开后逐项回答，例如：
@@ -306,6 +329,21 @@ Ollama qwen3.5:2b（think=false，原生 /api/chat）
 结构化返回（answer + image_ids/images + sources + references + confidence）
 ```
 
+当前多轮链路补充为：
+
+```
+session_id
+  │
+  ▼
+结构化会话状态（current_product / current_models / dialog_summary / history）
+  │
+  ▼
+追问解析（产品继承 + 代词消解 + 多问题拆解）
+  │
+  ▼
+检索与回答生成
+```
+
 ### 关键文件
 
 | 文件 | 职责 |
@@ -313,6 +351,8 @@ Ollama qwen3.5:2b（think=false，原生 /api/chat）
 | `src/industry_agent/api/app.py` | FastAPI 路由与请求/响应模型 |
 | `src/industry_agent/agent/service.py` | Agent 编排：检索 → 组装 → LLM |
 | `src/industry_agent/agent/question_splitter.py` | 复杂问题拆解模块 |
+| `src/industry_agent/agent/session_store.py` | 结构化会话状态存储 |
+| `src/industry_agent/agent/context_manager.py` | 多轮上下文继承与追问解析 |
 | `src/industry_agent/rag/retriever.py` | 关键词提取 + SQLite 评分检索 |
 | `src/industry_agent/kb/build_index.py` | 知识库构建主流程 |
 | `src/industry_agent/kb/parser.py` | 手册解析与文本规范化 |

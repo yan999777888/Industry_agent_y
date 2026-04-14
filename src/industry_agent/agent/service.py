@@ -6,10 +6,11 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
+from industry_agent.agent.context_manager import ContextManager, TurnContext
 from industry_agent.agent.question_splitter import SubQuestion, split_complex_question
+from industry_agent.agent.session_store import InMemorySessionStore, SessionState
 from industry_agent.config import settings
 from industry_agent.rag.retriever import SQLiteRetriever
 
@@ -87,13 +88,6 @@ class ChatResponse:
     references: list[dict[str, str]] = field(default_factory=list)
     confidence: float = 0.0
     retrieval_debug: dict[str, Any] = field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# In-memory session store
-# ---------------------------------------------------------------------------
-
-_SESSION_STORE: dict[str, list[dict[str, str]]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +314,8 @@ class AgentService:
         self.retriever = retriever or SQLiteRetriever()
         self.model = model
         self.base_url = base_url.rstrip("/")
+        self.session_store = InMemorySessionStore(max_history_turns=MAX_HISTORY_TURNS)
+        self.context_manager = ContextManager(max_history_turns=MAX_HISTORY_TURNS)
         if httpx is None:
             raise RuntimeError("httpx is required to use AgentService with Ollama. Please install requirements.txt")
         self.http_client = httpx.Client(proxy=None, timeout=120.0)
@@ -329,24 +325,22 @@ class AgentService:
         self,
         sub_question: SubQuestion,
         original_question: str,
+        turn_context: TurnContext,
     ) -> str:
-        """Build a retrieval query for one sub-question.
+        """Build a retrieval query for one sub-question with session context."""
 
-        If the sub-question itself lacks product context but the original
-        question contains it, prefixing the original text improves retrieval.
-        """
-
-        if sub_question.text == original_question.strip():
-            return sub_question.normalized_text
-        if len(sub_question.normalized_text) < 10:
-            return f"{original_question.strip()} {sub_question.normalized_text}".strip()
-        return sub_question.normalized_text
+        return self.context_manager.build_subquestion_query(
+            sub_question=sub_question,
+            original_question=original_question,
+            turn_context=turn_context,
+        )
 
     def generate_response(
         self,
         query: str,
         history: list[dict[str, str]] | None = None,
         image_input: str | None = None,
+        dialog_summary: str | None = None,
     ) -> dict[str, Any]:
         # 1. Retrieve
         chunks = self.retriever.search(query, limit=RETRIEVAL_LIMIT)
@@ -376,6 +370,8 @@ class AgentService:
         # 3. Build messages
         system_msg = SYSTEM_TEMPLATE.format(context=context if context else "（未找到相关资料）")
         messages: list[dict[str, str]] = [{"role": "system", "content": system_msg}]
+        if dialog_summary:
+            messages.append({"role": "system", "content": f"【会话上下文】\n{dialog_summary}"})
 
         # Append conversation history (if any)
         if history:
@@ -427,7 +423,7 @@ class AgentService:
 
     def chat(self, request: ChatRequest) -> ChatResponse:
         """High-level chat with session memory."""
-        history = _SESSION_STORE.get(request.session_id or "", [])
+        session, turn_context = self._prepare_turn_context(request)
         sub_questions = split_complex_question(request.question)
         if not sub_questions:
             sub_questions = [
@@ -442,11 +438,21 @@ class AgentService:
 
         sub_results: list[dict[str, Any]] = []
         for sub_question in sub_questions:
-            result = self.generate_response(
-                query=self._build_subquestion_query(sub_question, request.question),
-                history=history,
-                image_input=request.images[0] if request.images else None,
+            resolved_query = self._build_subquestion_query(
+                sub_question=sub_question,
+                original_question=request.question,
+                turn_context=turn_context,
             )
+            result = self.generate_response(
+                query=resolved_query,
+                history=turn_context.history,
+                image_input=request.images[0] if request.images else None,
+                dialog_summary=turn_context.dialog_summary,
+            )
+            result["retrieval_debug"] = {
+                **result.get("retrieval_debug", {}),
+                "resolved_query": resolved_query,
+            }
             sub_results.append(result)
 
         merged_answer = self._merge_subquestion_answers(
@@ -478,6 +484,14 @@ class AgentService:
                 )
         merged_confidence = _merge_confidence([result["confidence"] for result in sub_results])
         merged_debug = {
+            "session": {
+                "session_id": request.session_id or "",
+                "is_follow_up": turn_context.is_follow_up,
+                "resolved_question": turn_context.resolved_question,
+                "inherited_product": turn_context.inherited_product,
+                "inherited_models": turn_context.inherited_models,
+                "dialog_summary": turn_context.dialog_summary,
+            },
             "sub_questions": [
                 {
                     "sub_question_id": sub_question.sub_question_id,
@@ -499,12 +513,21 @@ class AgentService:
         }
 
         # Update session
-        if request.session_id:
-            hist = _SESSION_STORE.setdefault(request.session_id, [])
-            hist.append({"role": "user", "content": request.question})
-            hist.append({"role": "assistant", "content": merged_answer})
-            if len(hist) > MAX_HISTORY_TURNS * 2:
-                _SESSION_STORE[request.session_id] = hist[-MAX_HISTORY_TURNS * 2 :]
+        if session is not None:
+            session = self.context_manager.update_session(
+                session=session,
+                question=request.question,
+                sub_questions=sub_questions,
+                image_ids=merged_image_ids,
+                sources=merged_sources,
+                answer=merged_answer,
+                turn_context=turn_context,
+            )
+            self.session_store.append_turn(
+                session,
+                user_question=request.question,
+                assistant_answer=merged_answer,
+            )
 
         return ChatResponse(
             answer=merged_answer,
@@ -515,6 +538,26 @@ class AgentService:
             confidence=merged_confidence,
             retrieval_debug=merged_debug,
         )
+
+    def _prepare_turn_context(
+        self,
+        request: ChatRequest,
+    ) -> tuple[SessionState | None, TurnContext]:
+        self._ensure_runtime_components()
+        session: SessionState | None = None
+        if request.session_id:
+            session = self.session_store.get_or_create(request.session_id)
+        turn_context = self.context_manager.resolve_turn(
+            question=request.question,
+            session=session,
+        )
+        return session, turn_context
+
+    def _ensure_runtime_components(self) -> None:
+        if not hasattr(self, "session_store"):
+            self.session_store = InMemorySessionStore(max_history_turns=MAX_HISTORY_TURNS)
+        if not hasattr(self, "context_manager"):
+            self.context_manager = ContextManager(max_history_turns=MAX_HISTORY_TURNS)
 
     # ------------------------------------------------------------------
     # LLM call — Ollama native /api/chat (supports think=false)

@@ -12,6 +12,8 @@ if str(SRC_DIR) not in sys.path:
 
 from industry_agent.agent.question_splitter import split_complex_question
 from industry_agent.agent.service import AgentService, ChatRequest
+from industry_agent.agent.context_manager import ContextManager
+from industry_agent.agent.session_store import InMemorySessionStore
 
 
 class DummyAgentService(AgentService):
@@ -22,9 +24,13 @@ class DummyAgentService(AgentService):
         self.model = "dummy"
         self.base_url = "http://dummy"
         self.http_client = None
+        self.session_store = InMemorySessionStore()
+        self.context_manager = ContextManager()
+        self.queries: list[str] = []
 
-    def generate_response(self, query: str, history=None, image_input=None):  # type: ignore[override]
-        image_id = "img_a" if "退换货" in query else "img_b" if "运费" in query else "img_c"
+    def generate_response(self, query: str, history=None, image_input=None, dialog_summary=None):  # type: ignore[override]
+        self.queries.append(query)
+        image_id = "img_b" if "运费" in query else "img_a" if "退换货" in query else "img_c"
         return {
             "answer": f"回答({query})",
             "image_ids": [image_id],
@@ -81,6 +87,25 @@ class AgentFlowTests(unittest.TestCase):
         self.assertIn("问题1", response.answer)
         self.assertEqual(response.image_ids, ["img_c"])
         self.assertEqual(len(response.retrieval_debug["sub_questions"]), 1)
+
+    def test_follow_up_inherits_product_context(self) -> None:
+        session_id = "s_drill"
+        self.agent.chat(ChatRequest(question="电钻的电池怎么充电？", session_id=session_id))
+        response = self.agent.chat(ChatRequest(question="充电时有什么注意事项？", session_id=session_id))
+
+        self.assertIn("电钻", self.agent.queries[-1])
+        self.assertTrue(response.retrieval_debug["session"]["is_follow_up"])
+        self.assertEqual(response.retrieval_debug["session"]["inherited_product"], "电钻")
+        self.assertIn("电钻", response.retrieval_debug["sub_results"][0]["retrieval_debug"]["resolved_query"])
+
+    def test_follow_up_resolves_pronoun_reference(self) -> None:
+        session_id = "s_tracker"
+        self.agent.chat(ChatRequest(question="我想更换健身追踪器的表带", session_id=session_id))
+        response = self.agent.chat(ChatRequest(question="这个还有其他尺寸吗？", session_id=session_id))
+
+        self.assertIn("健身追踪器", self.agent.queries[-1])
+        self.assertEqual(response.retrieval_debug["session"]["inherited_product"], "健身追踪器")
+        self.assertIn("健身追踪器", response.retrieval_debug["session"]["resolved_question"])
 
 
 if __name__ == "__main__":
