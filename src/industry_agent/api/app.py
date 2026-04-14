@@ -28,14 +28,25 @@ class ReferenceItem(BaseModel):
     chunk_id: str = ""
     title: str = ""
     text_snippet: str = ""
+    product_name: str = ""
+    score: str = ""
+
+
+class ImageItem(BaseModel):
+    image_id: str = ""
+    file_name: str = ""
+    path: str = ""
+    exists: bool = False
 
 
 class ResponseData(BaseModel):
     answer: str
     session_id: str
     image_ids: list[str] = Field(default_factory=list)
+    images: list[ImageItem] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
     references: list[ReferenceItem] = Field(default_factory=list)
+    confidence: float = 0.0
     timestamp: int
 
 
@@ -90,10 +101,14 @@ def create_app() -> FastAPI:
                 answer=resp.answer,
                 session_id=session_id,
                 image_ids=resp.image_ids,
+                images=[
+                    ImageItem(**image) for image in resp.images
+                ],
                 sources=resp.sources,
                 references=[
                     ReferenceItem(**ref) for ref in resp.references
                 ],
+                confidence=resp.confidence,
                 timestamp=int(time.time()),
             )
         )
