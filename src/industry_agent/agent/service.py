@@ -1,238 +1,268 @@
-"""Customer-service agent orchestration."""
+"""Agent orchestration: retrieve context -> build prompt -> call LLM."""
 
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
-from industry_agent.rag.retriever import SearchResponse, SearchResult, SQLiteRetriever
+import httpx
 
-SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?；;])\s+|\n+")
+from industry_agent.rag.retriever import SQLiteRetriever
 
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+RETRIEVAL_LIMIT = 5         # chunks to retrieve per query
+MAX_CONTEXT_CHARS = 4000    # truncate context to fit model window
+MAX_HISTORY_TURNS = 5       # keep last N turns per session
+
+OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_MODEL = "qwen3.5:2b"
+
+SYSTEM_TEMPLATE = """\
+你是一个专业的工业产品客服智能体。请严格遵守以下规则：
+
+1. **只基于下方【参考资料】回答**，不得编造任何信息。
+2. 如果参考资料不足以回答问题，请明确说明"根据现有资料无法回答此问题"。
+3. 回答要分点清晰、语言简洁、面向普通用户。
+4. 当参考资料中提到配图（如 图1、图2），请在回答中提示用户"请参考附图"。
+5. 直接给出回答，不要输出任何思考过程。
+
+【参考资料】
+{context}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
 
 @dataclass
 class ChatRequest:
     question: str
-    image_base64: str | None = None
+    images: list[str] | None = None
     session_id: str | None = None
-    top_k: int = 5
-
-
-@dataclass
-class SourceCitation:
-    manual_id: str
-    product_name: str
-    chunk_id: str
-    title: str
-    source_path: str
-    score: float
-
-    def to_record(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass
 class ChatResponse:
     answer: str
     image_ids: list[str]
-    sources: list[SourceCitation]
-    confidence: float
-    debug: dict[str, Any] = field(default_factory=dict)
+    sources: list[str]
+    references: list[dict[str, str]] = field(default_factory=list)
 
-    def to_record(self) -> dict[str, Any]:
+
+# ---------------------------------------------------------------------------
+# In-memory session store
+# ---------------------------------------------------------------------------
+
+_SESSION_STORE: dict[str, list[dict[str, str]]] = {}
+
+
+# ---------------------------------------------------------------------------
+# Helper functions (defined before the class that uses them)
+# ---------------------------------------------------------------------------
+
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
+_ANSWER_START_RE = re.compile(
+    r"^([\u4e00-\u9fff]|#{1,3}\s|根据|您好|以下|关于|\d+[\.、])"
+)
+
+
+def _strip_thinking(text: str) -> str:
+    """Remove thinking/reasoning blocks that some models (qwen3) emit.
+
+    Handles both:
+      - <think>...</think> XML blocks
+      - "Thinking Process:\n..." free-form prefix (stops at first Chinese or
+        markdown answer section)
+    """
+    # 1. Strip <think>...</think> blocks
+    text = _THINK_TAG_RE.sub("", text).strip()
+
+    # 2. Strip "Thinking Process:" free-form prefix
+    if text.startswith("Thinking"):
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped and _ANSWER_START_RE.match(stripped):
+                preceding = "\n".join(lines[:i])
+                if len(preceding) > 100:
+                    text = "\n".join(lines[i:]).strip()
+                    break
+
+    return text
+
+
+def _assemble_context(
+    chunks: list[dict[str, Any]],
+) -> tuple[str, list[str], list[str], list[dict[str, str]]]:
+    """Build context string, collect image IDs, sources, and references."""
+    parts: list[str] = []
+    all_image_ids: list[str] = []
+    seen_images: set[str] = set()
+    sources: list[str] = []
+    seen_sources: set[str] = set()
+    references: list[dict[str, str]] = []
+    total_chars = 0
+
+    for idx, chunk in enumerate(chunks, start=1):
+        product = chunk.get("product_name", "")
+        title = chunk.get("title", "")
+        text = chunk.get("text", "")
+
+        # Parse image_ids (stored as JSON string in SQLite)
+        raw_img = chunk.get("image_ids", "[]")
+        img_ids = _parse_json_list(raw_img)
+
+        # Collect unique image IDs
+        for img_id in img_ids:
+            if img_id and img_id not in seen_images:
+                seen_images.add(img_id)
+                all_image_ids.append(img_id)
+
+        # Collect unique sources
+        if product and product not in seen_sources:
+            seen_sources.add(product)
+            sources.append(product)
+
+        # Build context part
+        header = f"[参考{idx}] 产品：{product} | 章节：{title}"
+        body = text.strip()
+        if img_ids:
+            body += f"\n（相关配图：{', '.join(img_ids)}）"
+        part = f"{header}\n{body}"
+
+        if total_chars + len(part) > MAX_CONTEXT_CHARS:
+            remaining = MAX_CONTEXT_CHARS - total_chars
+            if remaining > 200:
+                parts.append(part[:remaining] + "……")
+            break
+        parts.append(part)
+        total_chars += len(part)
+
+        # Reference snippet for response metadata
+        references.append({
+            "chunk_id": chunk.get("chunk_id", ""),
+            "title": title,
+            "text_snippet": text[:100],
+        })
+
+    context = "\n\n".join(parts)
+    return context, all_image_ids, sources, references
+
+
+def _parse_json_list(value: Any) -> list[str]:
+    """Safely parse a JSON-encoded list or return as-is if already a list."""
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    try:
+        parsed = json.loads(value)
+        return [str(v) for v in parsed] if isinstance(parsed, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Agent service
+# ---------------------------------------------------------------------------
+
+class AgentService:
+    """Retrieve -> assemble context -> call Ollama LLM -> return answer."""
+
+    def __init__(
+        self,
+        retriever: SQLiteRetriever | None = None,
+        base_url: str = OLLAMA_BASE_URL,
+        model: str = OLLAMA_MODEL,
+    ) -> None:
+        self.retriever = retriever or SQLiteRetriever()
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.http_client = httpx.Client(proxy=None, timeout=120.0)
+
+    def generate_response(
+        self,
+        query: str,
+        history: list[dict[str, str]] | None = None,
+        image_input: str | None = None,
+    ) -> dict[str, Any]:
+        # 1. Retrieve
+        chunks = self.retriever.search(query, limit=RETRIEVAL_LIMIT)
+
+        # 2. Assemble context / collect metadata
+        context, image_ids, sources, references = _assemble_context(chunks)
+
+        # 3. Build messages
+        system_msg = SYSTEM_TEMPLATE.format(context=context if context else "（未找到相关资料）")
+        messages: list[dict[str, str]] = [{"role": "system", "content": system_msg}]
+
+        # Append conversation history (if any)
+        if history:
+            messages.extend(history[-MAX_HISTORY_TURNS * 2 :])
+
+        messages.append({"role": "user", "content": query})
+
+        # 4. Call LLM
+        answer = self._call_llm(messages)
+
         return {
-            "answer": self.answer,
-            "image_ids": self.image_ids,
-            "sources": [item.to_record() for item in self.sources],
-            "confidence": self.confidence,
-            "debug": self.debug,
+            "answer": answer,
+            "image_ids": image_ids,
+            "sources": sources,
+            "references": references,
         }
 
-
-class CustomerServiceAgent:
-    """Minimal orchestrator for retrieval-grounded customer service."""
-
-    def __init__(self, retriever: SQLiteRetriever | None = None) -> None:
-        self.retriever = retriever or SQLiteRetriever()
-
     def chat(self, request: ChatRequest) -> ChatResponse:
-        retrieval = self.retriever.retrieve(request.question, limit=max(request.top_k, 5))
-        filtered_results = self._select_consistent_results(retrieval.results)
+        """High-level chat with session memory."""
+        history = _SESSION_STORE.get(request.session_id or "", [])
 
-        if not filtered_results or self._should_clarify(retrieval, filtered_results):
-            return ChatResponse(
-                answer=(
-                    "我暂时没有在当前说明书知识库中找到足够明确的依据来回答这个问题。"
-                    "如果你能补充产品名称、型号、报错现象，或上传相关图片，我可以继续帮你查。"
-                ),
-                image_ids=[],
-                sources=[],
-                confidence=0.18,
-                debug={"query": retrieval.query.to_record(), "retrieved_count": 0},
-            )
-
-        answer = self._compose_answer(request.question, retrieval, filtered_results)
-        image_ids = _unique_in_order(
-            image_id for result in filtered_results[:3] for image_id in result.image_ids
-        )[:5]
-        sources = [
-            SourceCitation(
-                manual_id=result.manual_id,
-                product_name=result.product_name,
-                chunk_id=result.chunk_id,
-                title=result.title,
-                source_path=result.source_path,
-                score=result.score,
-            )
-            for result in filtered_results[:3]
-        ]
-        confidence = _estimate_confidence(filtered_results)
-        return ChatResponse(
-            answer=answer,
-            image_ids=image_ids,
-            sources=sources,
-            confidence=confidence,
-            debug={
-                "query": retrieval.query.to_record(),
-                "selected_chunk_ids": [item.chunk_id for item in filtered_results[:3]],
-            },
+        result = self.generate_response(
+            query=request.question,
+            history=history,
+            image_input=request.images[0] if request.images else None,
         )
 
-    def _select_consistent_results(self, results: list[SearchResult]) -> list[SearchResult]:
-        if not results:
-            return []
-        top_product = results[0].product_name
-        coherent = [item for item in results if item.product_name == top_product]
-        if coherent:
-            return coherent
-        return results
+        # Update session
+        if request.session_id:
+            hist = _SESSION_STORE.setdefault(request.session_id, [])
+            hist.append({"role": "user", "content": request.question})
+            hist.append({"role": "assistant", "content": result["answer"]})
+            if len(hist) > MAX_HISTORY_TURNS * 2:
+                _SESSION_STORE[request.session_id] = hist[-MAX_HISTORY_TURNS * 2 :]
 
-    def _should_clarify(self, retrieval: SearchResponse, results: list[SearchResult]) -> bool:
-        if not results:
-            return True
-        top = results[0]
-        has_strong_anchor = bool(retrieval.query.product_terms or retrieval.query.model_terms)
-        if top.score < 6.0:
-            return True
-        if not has_strong_anchor and top.score < 10.0:
-            return True
-        return False
+        return ChatResponse(
+            answer=result["answer"],
+            image_ids=result["image_ids"],
+            sources=result["sources"],
+            references=result["references"],
+        )
 
-    def _compose_answer(
-        self,
-        question: str,
-        retrieval: SearchResponse,
-        results: list[SearchResult],
-    ) -> str:
-        top = results[0]
-        question_text = question.strip()
+    # ------------------------------------------------------------------
+    # LLM call — Ollama native /api/chat (supports think=false)
+    # ------------------------------------------------------------------
 
-        if _contains_any(question_text, ["代表什么含义", "什么意思", "含义"]) and top.image_ids:
-            lines = _meaning_lines_from_text(top.text)
-            if lines:
-                answer_lines = [f"根据{top.product_name}说明书，这些指示含义如下："]
-                answer_lines.extend(f"{index}. {line}" for index, line in enumerate(lines, start=1))
-                answer_lines.append("相关示意图我一并附在结果中，便于你对照查看。")
-                return "\n".join(answer_lines)
-
-        if _contains_any(question_text, ["表带", "尺寸", "更换"]):
-            evidence = self._collect_best_sentences(question_text, results, max_sentences=4)
-            answer_lines = [f"根据{top.product_name}说明书，和表带相关的信息如下："]
-            answer_lines.extend(f"{index}. {line}" for index, line in enumerate(evidence, start=1))
-            if top.image_ids:
-                answer_lines.append("相关表带尺寸或更换示意图已一并返回，方便你对照。")
-            return "\n".join(answer_lines)
-
-        if _contains_any(question_text, ["安装"]):
-            evidence = self._collect_best_sentences(question_text, results, max_sentences=4)
-            answer_lines = [f"根据{top.product_name}说明书，安装要求如下："]
-            answer_lines.extend(f"{index}. {line}" for index, line in enumerate(evidence, start=1))
-            return "\n".join(answer_lines)
-
-        evidence = self._collect_best_sentences(question_text, results, max_sentences=4)
-        answer_lines = [f"根据{top.product_name}说明书，我查到的相关信息如下："]
-        answer_lines.extend(f"{index}. {line}" for index, line in enumerate(evidence, start=1))
-        if top.image_ids:
-            answer_lines.append("相关图片也已一起返回，方便你进一步核对。")
-        return "\n".join(answer_lines)
-
-    def _collect_best_sentences(
-        self,
-        question: str,
-        results: list[SearchResult],
-        *,
-        max_sentences: int,
-    ) -> list[str]:
-        keywords = self.retriever.analyze_query(question).keywords
-        selected: list[str] = []
-        for result in results[:3]:
-            sentences = _split_sentences(result.text)
-            scored = sorted(
-                ((self._sentence_score(sentence, keywords), sentence) for sentence in sentences),
-                key=lambda item: (item[0], len(item[1])),
-                reverse=True,
+    def _call_llm(self, messages: list[dict[str, str]]) -> str:
+        try:
+            resp = self.http_client.post(
+                f"{self.base_url}/api/chat",
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "stream": False,
+                    "think": False,           # disable qwen3 thinking mode
+                    "options": {
+                        "temperature": 0.3,
+                        "num_predict": 1024,  # max output tokens
+                    },
+                },
             )
-            for score, sentence in scored:
-                if score <= 0:
-                    continue
-                clean = _cleanup_sentence(sentence)
-                if not clean or clean in selected:
-                    continue
-                selected.append(clean)
-                if len(selected) >= max_sentences:
-                    return selected
-        if not selected:
-            return [_cleanup_sentence(results[0].text)]
-        return selected
-
-    def _sentence_score(self, sentence: str, keywords: list[str]) -> float:
-        normalized_sentence = sentence.lower()
-        score = 0.0
-        for keyword in keywords:
-            if keyword.lower() in normalized_sentence:
-                score += 2.0
-        if len(sentence) <= 60:
-            score += 0.5
-        return score
-
-
-def _meaning_lines_from_text(text: str) -> list[str]:
-    lines = [_cleanup_sentence(part) for part in text.splitlines()]
-    return [line for line in lines if line and not line.startswith("#")]
-
-
-def _split_sentences(text: str) -> list[str]:
-    return [item.strip() for item in SENTENCE_SPLIT_RE.split(text) if item.strip()]
-
-
-def _cleanup_sentence(text: str) -> str:
-    text = text.strip()
-    text = re.sub(r"^#\s*", "", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-def _estimate_confidence(results: list[SearchResult]) -> float:
-    if not results:
-        return 0.0
-    top_score = results[0].score
-    second_score = results[1].score if len(results) > 1 else 0.0
-    confidence = 0.35 + min(top_score / 20.0, 0.45) + min((top_score - second_score) / 20.0, 0.15)
-    return round(min(confidence, 0.98), 2)
-
-
-def _contains_any(text: str, terms: list[str]) -> bool:
-    return any(term in text for term in terms)
-
-
-def _unique_in_order(values: Any) -> list[str]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for value in values:
-        text = str(value)
-        if text in seen:
-            continue
-        seen.add(text)
-        ordered.append(text)
-    return ordered
+            resp.raise_for_status()
+            data = resp.json()
+            content = data.get("message", {}).get("content", "")
+            return content.strip() if content.strip() else "模型未返回有效回答。"
+        except Exception as exc:
+            return f"LLM 调用失败: {exc}"

@@ -167,6 +167,13 @@ def _insert_records(
 
 
 def _create_fts_index(conn: sqlite3.Connection, chunks: list[KnowledgeChunk]) -> bool:
+    """Create FTS5 index with character-level tokenizer for Chinese text.
+
+    SQLite FTS5 default tokenizer splits on whitespace/punctuation — useless
+    for Chinese.  ``tokenize='unicode61 tokenchars "。，、；：？！""''《》（）【】"'``
+    treats each Unicode codepoint as a token, which makes substring-style
+    MATCH queries work for CJK characters.
+    """
     try:
         conn.execute(
             """
@@ -175,7 +182,8 @@ def _create_fts_index(conn: sqlite3.Connection, chunks: list[KnowledgeChunk]) ->
               manual_id UNINDEXED,
               product_name,
               title,
-              text
+              text,
+              tokenize='unicode61 categories "L* N* Co"'
             )
             """
         )
