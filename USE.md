@@ -197,6 +197,54 @@ python3 scripts/evaluate_chat.py --base-url http://127.0.0.1:8000
 python3 scripts/evaluate_chat.py --questions docs/my_questions.txt
 ```
 
+### 5.2 生成平台提交文件
+
+启动 API 服务后，可以读取 `submission/question_public.csv` 并生成提交文件：
+
+```bash
+python3 scripts/generate_submission.py
+```
+
+默认输入：
+
+```text
+submission/question_public.csv
+```
+
+默认输出：
+
+```text
+submission/submission_generated.csv
+```
+
+同时会生成调试日志：
+
+```text
+submission/submission_generated_debug.jsonl
+```
+
+如果想先小批量试跑，例如只生成前 5 条：
+
+```bash
+python3 scripts/generate_submission.py --limit 5
+```
+
+如果 API 服务不是默认地址，可以指定：
+
+```bash
+python3 scripts/generate_submission.py --base-url http://127.0.0.1:8000
+```
+
+生成后的 `submission/submission_generated.csv` 格式为：
+
+```csv
+id,ret
+1,回答内容
+2,回答内容
+```
+
+该格式与 `submission/submission_example.csv` 保持一致，可用于提交到测试平台。
+
 ---
 
 ## 6. 本地直接调用（不经过 HTTP）
