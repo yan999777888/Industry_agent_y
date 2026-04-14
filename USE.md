@@ -46,6 +46,17 @@ export OLLAMA_BASE_URL=http://localhost:11434
 export OLLAMA_MODEL=qwen3.5:2b
 ```
 
+如果你希望真正启用“上传图片理解”，建议额外准备一个支持视觉输入的 Ollama 模型，并设置：
+
+```bash
+export OLLAMA_VISION_MODEL=llava:7b
+```
+
+说明：
+
+- 不设置 `OLLAMA_VISION_MODEL` 时，系统仍然可以接收 `images` 字段，但只会解析图片格式、尺寸、大小等元数据，不会做视觉内容描述。
+- 设置 `OLLAMA_VISION_MODEL` 后，系统会尝试调用该视觉模型，生成简短图片描述，并把描述注入检索链路。
+
 ---
 
 ## 2. 构建知识库索引
@@ -206,6 +217,46 @@ curl -X POST http://127.0.0.1:8000/chat \
 
 的形式组织，内部会先做子问题拆解，再分别检索和生成回答。
 
+### 示例 5：上传图片辅助理解
+
+当前 `/chat` 已支持接收 Base64 图片。推荐两种方式：
+
+1. 直接传纯 Base64 字符串
+2. 传 `data:image/...;base64,...` 形式的 Data URL
+
+例如：
+
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "这个指示灯是什么意思？",
+    "images": [
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/w8AAgMBgN8L1n4AAAAASUVORK5CYII="
+    ]
+  }'
+```
+
+图片理解链路的当前行为：
+
+- 会先解析上传图片是否为有效 Base64
+- 会提取格式、尺寸、文件大小等元数据
+- 如果配置了 `OLLAMA_VISION_MODEL`，会额外生成图片内容摘要
+- 图片摘要会参与当前轮检索和回答生成
+- 相关调试信息当前保存在服务层 `retrieval_debug` 中，后续如果需要，也可以继续透出到 HTTP 响应
+
+适合当前版本的图片类型：
+
+- 设备局部照片
+- 指示灯、按钮、接口、屏幕界面
+- 安装位置、损坏现象、零部件近景
+
+当前仍不建议完全依赖图片输入来替代文字问题，最好同时提供：
+
+- 产品名
+- 型号
+- 故障现象或想咨询的具体问题
+
 ---
 
 ## 5. 运行测试脚本
@@ -344,6 +395,21 @@ session_id
 检索与回答生成
 ```
 
+当前多模态补充链路为：
+
+```
+用户上传 Base64 图片
+  │
+  ▼
+图片解析（格式 / 尺寸 / 大小）
+  │
+  ▼
+可选视觉描述（OLLAMA_VISION_MODEL）
+  │
+  ▼
+图片线索注入检索查询与回答上下文
+```
+
 ### 关键文件
 
 | 文件 | 职责 |
@@ -353,6 +419,7 @@ session_id
 | `src/industry_agent/agent/question_splitter.py` | 复杂问题拆解模块 |
 | `src/industry_agent/agent/session_store.py` | 结构化会话状态存储 |
 | `src/industry_agent/agent/context_manager.py` | 多轮上下文继承与追问解析 |
+| `src/industry_agent/agent/image_understanding.py` | 上传图片解析与可选视觉描述 |
 | `src/industry_agent/rag/retriever.py` | 关键词提取 + SQLite 评分检索 |
 | `src/industry_agent/kb/build_index.py` | 知识库构建主流程 |
 | `src/industry_agent/kb/parser.py` | 手册解析与文本规范化 |

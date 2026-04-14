@@ -56,7 +56,11 @@ Industry_Agent/
 │       ├── config.py
 │       ├── agent/
 │       │   ├── __init__.py
-│       │   └── service.py
+│       │   ├── context_manager.py
+│       │   ├── image_understanding.py
+│       │   ├── question_splitter.py
+│       │   ├── service.py
+│       │   └── session_store.py
 │       ├── api/
 │       │   ├── __init__.py
 │       │   └── app.py
@@ -95,7 +99,11 @@ Industry_Agent/
 - `src/industry_agent/kb/index_store.py`：将清洗结果写入 JSON、JSONL 和 SQLite 索引。
 - `src/industry_agent/kb/build_index.py`：知识库清洗、切分、索引构建主流程。
 - `src/industry_agent/rag/retriever.py`：当前的 SQLite 检索器，后续会扩展为混合检索。
-- `src/industry_agent/agent/service.py`：客服智能体编排层预留位置。
+- `src/industry_agent/agent/service.py`：客服智能体主编排层，负责检索、对话状态、图片理解结果注入和回答生成。
+- `src/industry_agent/agent/question_splitter.py`：复杂问题拆解模块。
+- `src/industry_agent/agent/session_store.py`：结构化多轮会话状态存储。
+- `src/industry_agent/agent/context_manager.py`：多轮上下文继承、产品补全和追问解析。
+- `src/industry_agent/agent/image_understanding.py`：用户上传图片的 Base64 解析、元数据抽取和可选视觉描述。
 - `src/industry_agent/api/app.py`：FastAPI 应用入口，目前已提供 `/health` 和 `/chat` 脚手架。
 - `tests/`：后续单元测试、检索测试和接口测试目录。
 - `TASK.md`：比赛任务说明。
@@ -109,8 +117,10 @@ Industry_Agent/
 
 - `setuptools`：用于本地项目安装与打包。
 - `wheel`：用于构建 Python wheel 包。
-- `fastapi`：后续 `/chat` RESTful API 服务框架。
+- `fastapi`：`/chat` RESTful API 服务框架。
 - `uvicorn[standard]`：FastAPI 的 ASGI 运行服务。
+- `httpx`：访问 Ollama 文本模型和可选视觉模型。
+- `pillow`：解析上传图片的尺寸、格式等元数据。
 
 ## 构建知识库索引
 

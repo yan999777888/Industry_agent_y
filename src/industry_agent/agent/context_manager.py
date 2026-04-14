@@ -113,6 +113,7 @@ class ContextManager:
         sources: list[str],
         answer: str,
         turn_context: TurnContext,
+        uploaded_image_summary: str = "",
     ) -> SessionState:
         analysis = turn_context.analysis
         if analysis.products:
@@ -134,6 +135,8 @@ class ContextManager:
             if sub_question.normalized_text
         )
         session.recent_image_ids = _merge_unique(session.recent_image_ids, image_ids)
+        if uploaded_image_summary:
+            session.recent_user_image_summaries.append(uploaded_image_summary)
         session.dialog_summary = self._build_dialog_summary(session, answer=answer)
         return session
 
@@ -172,6 +175,8 @@ class ContextManager:
             parts.append(f"最近问题：{'；'.join(session.recent_sub_questions[-3:])}")
         if session.recent_image_ids:
             parts.append(f"最近相关图片：{', '.join(session.recent_image_ids[-3:])}")
+        if session.recent_user_image_summaries:
+            parts.append(f"最近上传图片：{session.recent_user_image_summaries[-1][:120]}")
         if answer.strip():
             parts.append(f"上一轮回答摘要：{answer.strip()[:120]}")
         return "；".join(parts)

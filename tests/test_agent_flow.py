@@ -13,7 +13,39 @@ if str(SRC_DIR) not in sys.path:
 from industry_agent.agent.question_splitter import split_complex_question
 from industry_agent.agent.service import AgentService, ChatRequest
 from industry_agent.agent.context_manager import ContextManager
+from industry_agent.agent.image_understanding import ImageObservation, ImageUnderstandingResult, ImageUnderstander
 from industry_agent.agent.session_store import InMemorySessionStore
+
+ONE_BY_ONE_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+    "/w8AAgMBgN8L1n4AAAAASUVORK5CYII="
+)
+
+
+class StubImageUnderstander:
+    def analyze_images(self, images, *, question=""):
+        has_image_input = bool(images)
+        if not has_image_input:
+            return ImageUnderstandingResult(has_image_input=False)
+        return ImageUnderstandingResult(
+            has_image_input=True,
+            observations=[
+                ImageObservation(
+                    image_index=1,
+                    format="PNG",
+                    mime_type="image/png",
+                    file_size=68,
+                    width=1,
+                    height=1,
+                    summary="上传图片1：格式 PNG（image/png），尺寸 1x1，大小 68B",
+                    visual_summary="图片里是设备指示灯区域，红灯闪烁",
+                    source="stub",
+                )
+            ],
+            combined_summary="上传图片1：格式 PNG（image/png），尺寸 1x1，大小 68B。视觉描述：图片里是设备指示灯区域，红灯闪烁",
+            retrieval_hint="指示灯 红灯 闪烁",
+            used_vision_model="stub-vision",
+        )
 
 
 class DummyAgentService(AgentService):
@@ -26,9 +58,10 @@ class DummyAgentService(AgentService):
         self.http_client = None
         self.session_store = InMemorySessionStore()
         self.context_manager = ContextManager()
+        self.image_understander = ImageUnderstander(base_url=self.base_url, http_client=None, vision_model="")
         self.queries: list[str] = []
 
-    def generate_response(self, query: str, history=None, image_input=None, dialog_summary=None):  # type: ignore[override]
+    def generate_response(self, query: str, history=None, image_input=None, dialog_summary=None, image_context=None):  # type: ignore[override]
         self.queries.append(query)
         image_id = "img_b" if "运费" in query else "img_a" if "退换货" in query else "img_c"
         return {
@@ -106,6 +139,44 @@ class AgentFlowTests(unittest.TestCase):
         self.assertIn("健身追踪器", self.agent.queries[-1])
         self.assertEqual(response.retrieval_debug["session"]["inherited_product"], "健身追踪器")
         self.assertIn("健身追踪器", response.retrieval_debug["session"]["resolved_question"])
+
+    def test_agent_uses_uploaded_image_hint(self) -> None:
+        self.agent.image_understander = StubImageUnderstander()
+        response = self.agent.chat(
+            ChatRequest(
+                question="这个指示灯是什么意思？",
+                images=[ONE_BY_ONE_PNG_BASE64],
+            )
+        )
+
+        self.assertIn("指示灯", self.agent.queries[-1])
+        self.assertIn("红灯", self.agent.queries[-1])
+        self.assertTrue(response.retrieval_debug["session"]["image_understanding"]["has_image_input"])
+        self.assertEqual(
+            response.retrieval_debug["session"]["image_understanding"]["used_vision_model"],
+            "stub-vision",
+        )
+
+
+class ImageUnderstandingTests(unittest.TestCase):
+    def test_image_understander_parses_png_base64(self) -> None:
+        understander = ImageUnderstander(base_url="http://dummy", http_client=None, vision_model="")
+        result = understander.analyze_images([ONE_BY_ONE_PNG_BASE64], question="这是什么部件？")
+
+        self.assertTrue(result.has_image_input)
+        self.assertEqual(len(result.observations), 1)
+        self.assertEqual(result.observations[0].format, "PNG")
+        self.assertEqual(result.observations[0].width, 1)
+        self.assertEqual(result.observations[0].height, 1)
+        self.assertIn("上传图片1", result.combined_summary)
+        self.assertEqual(result.retrieval_hint, "")
+
+    def test_image_understander_accepts_data_url(self) -> None:
+        understander = ImageUnderstander(base_url="http://dummy", http_client=None, vision_model="")
+        result = understander.analyze_images([f"data:image/png;base64,{ONE_BY_ONE_PNG_BASE64}"])
+
+        self.assertTrue(result.has_image_input)
+        self.assertEqual(result.observations[0].mime_type, "image/png")
 
 
 if __name__ == "__main__":

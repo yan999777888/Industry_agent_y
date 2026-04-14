@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from industry_agent.agent.context_manager import ContextManager, TurnContext
+from industry_agent.agent.image_understanding import ImageUnderstandingResult, ImageUnderstander
 from industry_agent.agent.question_splitter import SubQuestion, split_complex_question
 from industry_agent.agent.session_store import InMemorySessionStore, SessionState
 from industry_agent.config import settings
@@ -319,6 +320,10 @@ class AgentService:
         if httpx is None:
             raise RuntimeError("httpx is required to use AgentService with Ollama. Please install requirements.txt")
         self.http_client = httpx.Client(proxy=None, timeout=120.0)
+        self.image_understander = ImageUnderstander(
+            base_url=self.base_url,
+            http_client=self.http_client,
+        )
         self.image_index = _load_image_index()
 
     def _build_subquestion_query(
@@ -341,6 +346,7 @@ class AgentService:
         history: list[dict[str, str]] | None = None,
         image_input: str | None = None,
         dialog_summary: str | None = None,
+        image_context: str | None = None,
     ) -> dict[str, Any]:
         # 1. Retrieve
         chunks = self.retriever.search(query, limit=RETRIEVAL_LIMIT)
@@ -372,6 +378,8 @@ class AgentService:
         messages: list[dict[str, str]] = [{"role": "system", "content": system_msg}]
         if dialog_summary:
             messages.append({"role": "system", "content": f"【会话上下文】\n{dialog_summary}"})
+        if image_context:
+            messages.append({"role": "system", "content": f"【用户上传图片信息】\n{image_context}"})
 
         # Append conversation history (if any)
         if history:
@@ -424,6 +432,7 @@ class AgentService:
     def chat(self, request: ChatRequest) -> ChatResponse:
         """High-level chat with session memory."""
         session, turn_context = self._prepare_turn_context(request)
+        image_result = self._analyze_uploaded_images(request)
         sub_questions = split_complex_question(request.question)
         if not sub_questions:
             sub_questions = [
@@ -443,15 +452,19 @@ class AgentService:
                 original_question=request.question,
                 turn_context=turn_context,
             )
+            if image_result.retrieval_hint:
+                resolved_query = f"{resolved_query} {image_result.retrieval_hint}".strip()
             result = self.generate_response(
                 query=resolved_query,
                 history=turn_context.history,
                 image_input=request.images[0] if request.images else None,
                 dialog_summary=turn_context.dialog_summary,
+                image_context=image_result.combined_summary,
             )
             result["retrieval_debug"] = {
                 **result.get("retrieval_debug", {}),
                 "resolved_query": resolved_query,
+                "image_understanding": image_result.to_debug_dict(),
             }
             sub_results.append(result)
 
@@ -491,6 +504,7 @@ class AgentService:
                 "inherited_product": turn_context.inherited_product,
                 "inherited_models": turn_context.inherited_models,
                 "dialog_summary": turn_context.dialog_summary,
+                "image_understanding": image_result.to_debug_dict(),
             },
             "sub_questions": [
                 {
@@ -522,6 +536,7 @@ class AgentService:
                 sources=merged_sources,
                 answer=merged_answer,
                 turn_context=turn_context,
+                uploaded_image_summary=image_result.combined_summary,
             )
             self.session_store.append_turn(
                 session,
@@ -558,6 +573,18 @@ class AgentService:
             self.session_store = InMemorySessionStore(max_history_turns=MAX_HISTORY_TURNS)
         if not hasattr(self, "context_manager"):
             self.context_manager = ContextManager(max_history_turns=MAX_HISTORY_TURNS)
+        if not hasattr(self, "image_understander"):
+            self.image_understander = ImageUnderstander(
+                base_url=self.base_url,
+                http_client=getattr(self, "http_client", None),
+            )
+
+    def _analyze_uploaded_images(self, request: ChatRequest) -> ImageUnderstandingResult:
+        self._ensure_runtime_components()
+        return self.image_understander.analyze_images(
+            request.images or [],
+            question=request.question,
+        )
 
     # ------------------------------------------------------------------
     # LLM call — Ollama native /api/chat (supports think=false)

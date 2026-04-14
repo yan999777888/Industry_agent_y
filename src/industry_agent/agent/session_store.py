@@ -16,6 +16,7 @@ class SessionState:
     recent_questions: list[str] = field(default_factory=list)
     recent_sub_questions: list[str] = field(default_factory=list)
     recent_image_ids: list[str] = field(default_factory=list)
+    recent_user_image_summaries: list[str] = field(default_factory=list)
     dialog_summary: str = ""
     history: list[dict[str, str]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
@@ -34,12 +35,14 @@ class InMemorySessionStore:
         max_recent_questions: int = 6,
         max_recent_sub_questions: int = 10,
         max_recent_images: int = 10,
+        max_recent_user_image_summaries: int = 4,
     ) -> None:
         self.max_history_turns = max_history_turns
         self.ttl_seconds = ttl_seconds
         self.max_recent_questions = max_recent_questions
         self.max_recent_sub_questions = max_recent_sub_questions
         self.max_recent_images = max_recent_images
+        self.max_recent_user_image_summaries = max_recent_user_image_summaries
         self._sessions: dict[str, SessionState] = {}
 
     def get(self, session_id: str) -> SessionState | None:
@@ -105,3 +108,5 @@ class InMemorySessionStore:
             session.recent_sub_questions = session.recent_sub_questions[-self.max_recent_sub_questions:]
         if len(session.recent_image_ids) > self.max_recent_images:
             session.recent_image_ids = session.recent_image_ids[-self.max_recent_images:]
+        if len(session.recent_user_image_summaries) > self.max_recent_user_image_summaries:
+            session.recent_user_image_summaries = session.recent_user_image_summaries[-self.max_recent_user_image_summaries:]
