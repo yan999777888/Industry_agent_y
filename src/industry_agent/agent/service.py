@@ -9,10 +9,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import httpx
-
+from industry_agent.agent.question_splitter import SubQuestion, split_complex_question
 from industry_agent.config import settings
 from industry_agent.rag.retriever import SQLiteRetriever
+
+try:
+    import httpx
+except ImportError:  # pragma: no cover - optional for test environments
+    httpx = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -44,6 +48,22 @@ SYSTEM_TEMPLATE = """\
 
 【参考资料】
 {context}
+"""
+
+SUBQUESTION_MERGE_TEMPLATE = """\
+请将下面多个子问题的回答合并成一个最终客服回复。要求：
+
+1. 按“问题1 / 问题2 / 问题3”依次输出。
+2. 每个问题都先直接回答，再补充必要说明。
+3. 不要编造没有出现过的事实。
+4. 如果某个子问题资料不足，就保留“根据现有资料无法回答此问题”。
+5. 直接输出最终答案，不要输出思考过程。
+
+【原始问题】
+{original_question}
+
+【子问题回答】
+{sub_answers}
 """
 
 
@@ -142,6 +162,12 @@ def _confidence_from_chunks(chunks: list[dict[str, Any]]) -> float:
     second_score = float(chunks[1].get("_score", 0.0)) if len(chunks) > 1 else 0.0
     confidence = 0.35 + min(top_score / 50.0, 0.45) + min(max(top_score - second_score, 0.0) / 40.0, 0.15)
     return round(min(confidence, 0.95), 2)
+
+
+def _merge_confidence(confidences: list[float]) -> float:
+    if not confidences:
+        return 0.15
+    return round(sum(confidences) / len(confidences), 2)
 
 
 def _assemble_context(
@@ -255,6 +281,29 @@ def _image_details(image_ids: list[str], image_index: dict[str, dict[str, str | 
     return details
 
 
+def _unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def _merge_images(image_groups: list[list[dict[str, str | bool]]]) -> list[dict[str, str | bool]]:
+    merged: list[dict[str, str | bool]] = []
+    seen: set[str] = set()
+    for group in image_groups:
+        for image in group:
+            image_id = str(image.get("image_id", ""))
+            if not image_id or image_id in seen:
+                continue
+            seen.add(image_id)
+            merged.append(image)
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # Agent service
 # ---------------------------------------------------------------------------
@@ -271,8 +320,27 @@ class AgentService:
         self.retriever = retriever or SQLiteRetriever()
         self.model = model
         self.base_url = base_url.rstrip("/")
+        if httpx is None:
+            raise RuntimeError("httpx is required to use AgentService with Ollama. Please install requirements.txt")
         self.http_client = httpx.Client(proxy=None, timeout=120.0)
         self.image_index = _load_image_index()
+
+    def _build_subquestion_query(
+        self,
+        sub_question: SubQuestion,
+        original_question: str,
+    ) -> str:
+        """Build a retrieval query for one sub-question.
+
+        If the sub-question itself lacks product context but the original
+        question contains it, prefixing the original text improves retrieval.
+        """
+
+        if sub_question.text == original_question.strip():
+            return sub_question.normalized_text
+        if len(sub_question.normalized_text) < 10:
+            return f"{original_question.strip()} {sub_question.normalized_text}".strip()
+        return sub_question.normalized_text
 
     def generate_response(
         self,
@@ -334,32 +402,118 @@ class AgentService:
             },
         }
 
+    def _merge_subquestion_answers(
+        self,
+        *,
+        original_question: str,
+        sub_questions: list[SubQuestion],
+        sub_results: list[dict[str, Any]],
+    ) -> str:
+        """Merge several per-sub-question answers into one final reply."""
+
+        if len(sub_results) == 1:
+            return str(sub_results[0]["answer"])
+
+        sub_answer_blocks = []
+        for index, (sub_question, result) in enumerate(zip(sub_questions, sub_results), start=1):
+            sub_answer_blocks.append(
+                f"问题{index}：{sub_question.normalized_text}\n回答：{result['answer']}"
+            )
+        system_msg = SUBQUESTION_MERGE_TEMPLATE.format(
+            original_question=original_question,
+            sub_answers="\n\n".join(sub_answer_blocks),
+        )
+        return self._call_llm([{"role": "system", "content": system_msg}])
+
     def chat(self, request: ChatRequest) -> ChatResponse:
         """High-level chat with session memory."""
         history = _SESSION_STORE.get(request.session_id or "", [])
+        sub_questions = split_complex_question(request.question)
+        if not sub_questions:
+            sub_questions = [
+                SubQuestion(
+                    sub_question_id="q1",
+                    text=request.question.strip(),
+                    normalized_text=request.question.strip(),
+                    intent="general",
+                    depends_on_previous=False,
+                )
+            ]
 
-        result = self.generate_response(
-            query=request.question,
-            history=history,
-            image_input=request.images[0] if request.images else None,
+        sub_results: list[dict[str, Any]] = []
+        for sub_question in sub_questions:
+            result = self.generate_response(
+                query=self._build_subquestion_query(sub_question, request.question),
+                history=history,
+                image_input=request.images[0] if request.images else None,
+            )
+            sub_results.append(result)
+
+        merged_answer = self._merge_subquestion_answers(
+            original_question=request.question,
+            sub_questions=sub_questions,
+            sub_results=sub_results,
         )
+        merged_image_ids = _unique([
+            image_id
+            for result in sub_results
+            for image_id in result["image_ids"]
+        ])
+        merged_images = _merge_images([result["images"] for result in sub_results])
+        merged_sources = _unique([
+            source
+            for result in sub_results
+            for source in result["sources"]
+        ])
+        merged_references: list[dict[str, str]] = []
+        for index, (sub_question, result) in enumerate(zip(sub_questions, sub_results), start=1):
+            for reference in result["references"]:
+                merged_references.append(
+                    {
+                        **reference,
+                        "sub_question_id": sub_question.sub_question_id,
+                        "sub_question_text": sub_question.normalized_text,
+                        "sub_question_index": str(index),
+                    }
+                )
+        merged_confidence = _merge_confidence([result["confidence"] for result in sub_results])
+        merged_debug = {
+            "sub_questions": [
+                {
+                    "sub_question_id": sub_question.sub_question_id,
+                    "text": sub_question.text,
+                    "normalized_text": sub_question.normalized_text,
+                    "intent": sub_question.intent,
+                    "depends_on_previous": sub_question.depends_on_previous,
+                }
+                for sub_question in sub_questions
+            ],
+            "sub_results": [
+                {
+                    "sub_question_id": sub_question.sub_question_id,
+                    "confidence": result["confidence"],
+                    "retrieval_debug": result["retrieval_debug"],
+                }
+                for sub_question, result in zip(sub_questions, sub_results)
+            ],
+        }
 
         # Update session
         if request.session_id:
             hist = _SESSION_STORE.setdefault(request.session_id, [])
             hist.append({"role": "user", "content": request.question})
-            hist.append({"role": "assistant", "content": result["answer"]})
+            hist.append({"role": "assistant", "content": merged_answer})
             if len(hist) > MAX_HISTORY_TURNS * 2:
                 _SESSION_STORE[request.session_id] = hist[-MAX_HISTORY_TURNS * 2 :]
 
         return ChatResponse(
-            answer=result["answer"],
-            image_ids=result["image_ids"],
-            images=result["images"],
-            sources=result["sources"],
-            references=result["references"],
-            confidence=result["confidence"],
-            retrieval_debug=result["retrieval_debug"],
+            answer=merged_answer,
+            image_ids=merged_image_ids,
+            images=merged_images,
+            sources=merged_sources,
+            references=merged_references,
+            confidence=merged_confidence,
+            retrieval_debug=merged_debug,
         )
 
     # ------------------------------------------------------------------

@@ -162,6 +162,27 @@ curl -X POST http://127.0.0.1:8000/chat \
   -d '{"question": "充电时有什么注意事项？", "session_id": "s_xxx"}'
 ```
 
+### 示例 4：复杂问题拆解
+
+当前系统已经支持把一次提问中的多个问题拆开后逐项回答，例如：
+
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "\"请问你们家的商品支持7天无理由退换货吗？\",\n\"需要自己承担运费吗？\""
+  }'
+```
+
+返回答案会尽量按：
+
+```text
+问题1：...
+问题2：...
+```
+
+的形式组织，内部会先做子问题拆解，再分别检索和生成回答。
+
 ---
 
 ## 5. 运行测试脚本
@@ -291,6 +312,7 @@ Ollama qwen3.5:2b（think=false，原生 /api/chat）
 |------|------|
 | `src/industry_agent/api/app.py` | FastAPI 路由与请求/响应模型 |
 | `src/industry_agent/agent/service.py` | Agent 编排：检索 → 组装 → LLM |
+| `src/industry_agent/agent/question_splitter.py` | 复杂问题拆解模块 |
 | `src/industry_agent/rag/retriever.py` | 关键词提取 + SQLite 评分检索 |
 | `src/industry_agent/kb/build_index.py` | 知识库构建主流程 |
 | `src/industry_agent/kb/parser.py` | 手册解析与文本规范化 |
