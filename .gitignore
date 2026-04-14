@@ -1,0 +1,7 @@
+cat >> .gitignore <<'EOF'
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+EOF
