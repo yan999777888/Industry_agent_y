@@ -21,7 +21,11 @@ from industry_agent.agent.context_manager import ContextManager
 from industry_agent.agent.customer_service_policy import CustomerServicePolicy
 from industry_agent.agent.image_understanding import ImageObservation, ImageUnderstandingResult, ImageUnderstander
 from industry_agent.agent.question_router import QuestionRouter
-from industry_agent.agent.response_formatter import format_customer_service_answer, format_manual_answer
+from industry_agent.agent.response_formatter import (
+    format_customer_service_answer,
+    format_manual_answer,
+    format_multi_question_answer,
+)
 from industry_agent.agent.session_store import InMemorySessionStore
 
 ONE_BY_ONE_PNG_BASE64 = (
@@ -179,6 +183,27 @@ class AgentFlowTests(unittest.TestCase):
         )
         self.assertIn("customer_service_policy", response.sources)
 
+    def test_customer_service_follow_up_inherits_policy_context(self) -> None:
+        session_id = "s_policy_followup"
+        self.agent.chat(ChatRequest(question="我想退款，退款多久能到账？", session_id=session_id))
+        query_count = len(self.agent.queries)
+        response = self.agent.chat(ChatRequest(question="那需要准备什么材料？", session_id=session_id))
+
+        self.assertIn("订单号", response.answer)
+        self.assertIn("customer_service_policy", response.sources)
+        self.assertEqual(len(self.agent.queries), query_count)
+        self.assertEqual(
+            response.retrieval_debug["sub_results"][0]["retrieval_debug"]["route_decision"]["reason"],
+            "inherit_customer_service_context",
+        )
+
+    def test_expanded_customer_service_topic_address_change(self) -> None:
+        response = self.agent.chat(ChatRequest(question="我想修改收货地址，还来得及吗？"))
+
+        self.assertIn("新地址", response.answer)
+        self.assertEqual(response.image_ids, [])
+        self.assertIn("customer_service_policy", response.sources)
+
     def test_mixed_question_uses_different_routes_per_subquestion(self) -> None:
         response = self.agent.chat(
             ChatRequest(question='"请问支持退款吗？",\n"电钻怎么充电？"')
@@ -215,6 +240,38 @@ class AgentFlowTests(unittest.TestCase):
         self.assertIn("健身追踪器", self.agent.queries[-1])
         self.assertEqual(response.retrieval_debug["session"]["inherited_product"], "健身追踪器")
         self.assertIn("健身追踪器", response.retrieval_debug["session"]["resolved_question"])
+
+    def test_session_reset_clears_inherited_context(self) -> None:
+        session_id = "s_reset"
+        self.agent.chat(ChatRequest(question="电钻的电池怎么充电？", session_id=session_id))
+        reset_response = self.agent.chat(ChatRequest(question="清空上下文", session_id=session_id))
+        response = self.agent.chat(ChatRequest(question="充电时有什么注意事项？", session_id=session_id))
+
+        self.assertIn("已清空", reset_response.answer)
+        self.assertEqual(reset_response.retrieval_debug["route"], "session_control")
+        self.assertNotIn("电钻", self.agent.queries[-1])
+        self.assertFalse(response.retrieval_debug["session"]["is_follow_up"])
+
+    def test_unresolved_topic_switch_asks_for_product_name(self) -> None:
+        session_id = "s_switch_unknown"
+        self.agent.chat(ChatRequest(question="电钻的电池怎么充电？", session_id=session_id))
+        query_count = len(self.agent.queries)
+        response = self.agent.chat(ChatRequest(question="换个产品怎么安装？", session_id=session_id))
+
+        self.assertIn("请补充新的产品名称或型号", response.answer)
+        self.assertEqual(response.retrieval_debug["route"], "clarification")
+        self.assertEqual(len(self.agent.queries), query_count)
+
+    def test_explicit_topic_switch_updates_session_product(self) -> None:
+        session_id = "s_switch_explicit"
+        self.agent.chat(ChatRequest(question="电钻的电池怎么充电？", session_id=session_id))
+        response = self.agent.chat(ChatRequest(question="换个产品，洗碗机安装有什么要求？", session_id=session_id))
+        session = self.agent.session_store.get(session_id)
+
+        self.assertIn("洗碗机", self.agent.queries[-1])
+        self.assertTrue(response.retrieval_debug["session"]["topic_switched"])
+        self.assertIsNotNone(session)
+        self.assertEqual(session.current_product, "洗碗机")
 
     def test_agent_uses_uploaded_image_hint(self) -> None:
         self.agent.image_understander = StubImageUnderstander()
@@ -328,6 +385,56 @@ class ResponseFormatterTests(unittest.TestCase):
         self.assertIn("操作/说明：", answer)
         self.assertIn("注意事项：", answer)
         self.assertIn("相关图片：\n- img_1", answer)
+
+    def test_format_multi_question_answer_merges_without_rewriting(self) -> None:
+        answer = format_multi_question_answer(
+            [
+                ("电钻怎么充电？", "结论：\n- 使用充电器。"),
+                ("有哪些注意事项？", "回答：注意事项：\n- 请勿潮湿操作。"),
+            ]
+        )
+        self.assertIn("问题1：电钻怎么充电？", answer)
+        self.assertIn("结论：\n- 使用充电器。", answer)
+        self.assertIn("问题2：有哪些注意事项？", answer)
+        self.assertNotIn("回答：", answer)
+
+
+class CustomerServicePolicyTests(unittest.TestCase):
+    def test_policy_uses_context_topics_for_short_follow_up(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("那需要准备什么材料？", context_topics=["refund_exchange"])
+
+        self.assertIn("订单号", response.answer)
+        self.assertIn("refund_exchange", response.matched_topics)
+
+    def test_policy_covers_price_protection(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("刚买完就降价了，可以申请价保吗？")
+
+        self.assertIn("价保", response.answer)
+        self.assertIn("price_protection", response.matched_topics)
+
+    def test_policy_answers_materials_intent_with_topic_specific_materials(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("修改收货地址需要准备什么材料？")
+
+        self.assertIn("订单号", response.answer)
+        self.assertIn("新地址", response.answer)
+        self.assertIn("address_change", response.matched_topics)
+
+    def test_policy_answers_timeline_intent_with_timing_hint(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("催发货一般多久能处理？")
+
+        self.assertIn("时效", response.answer)
+        self.assertIn("delivery_delay", response.matched_topics)
+
+    def test_policy_answers_fee_intent_with_fee_hint(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("上门安装需要收费吗？")
+
+        self.assertIn("收费", response.answer)
+        self.assertIn("installation_service", response.matched_topics)
 
 
 class RetrievalFusionTests(unittest.TestCase):

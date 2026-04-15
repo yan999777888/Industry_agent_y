@@ -13,7 +13,11 @@ from industry_agent.agent.customer_service_policy import CustomerServicePolicy
 from industry_agent.agent.image_understanding import ImageUnderstandingResult, ImageUnderstander
 from industry_agent.agent.question_splitter import SubQuestion, split_complex_question
 from industry_agent.agent.question_router import QuestionRouter, RouteDecision
-from industry_agent.agent.response_formatter import format_customer_service_answer, format_manual_answer
+from industry_agent.agent.response_formatter import (
+    format_customer_service_answer,
+    format_manual_answer,
+    format_multi_question_answer,
+)
 from industry_agent.agent.session_store import InMemorySessionStore, SessionState
 from industry_agent.config import settings
 from industry_agent.rag.retriever import SQLiteRetriever, analyze_query
@@ -121,6 +125,11 @@ _SMALLTALK_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
         re.compile(r"^(再见|拜拜|bye|goodbye|回头见)$", flags=re.IGNORECASE),
         "再见。如果之后还有产品使用、安装、故障或配件相关问题，随时可以再来问我。",
     ),
+)
+_SERVICE_FOLLOW_UP_TERMS: tuple[str, ...] = (
+    "那", "还", "还有", "需要", "准备", "材料", "多久", "几天", "怎么办",
+    "可以吗", "能不能", "怎么申请", "怎么处理", "流程", "凭证", "证明",
+    "谁承担", "联系谁", "审核", "下一步", "然后呢",
 )
 
 
@@ -693,24 +702,24 @@ class AgentService:
         if len(sub_results) == 1:
             return str(sub_results[0]["answer"])
 
-        sub_answer_blocks = []
-        for index, (sub_question, result) in enumerate(zip(sub_questions, sub_results), start=1):
-            sub_answer_blocks.append(
-                f"问题{index}：{sub_question.normalized_text}\n回答：{result['answer']}"
-            )
-        system_msg = SUBQUESTION_MERGE_TEMPLATE.format(
-            original_question=original_question,
-            sub_answers="\n\n".join(sub_answer_blocks),
+        return format_multi_question_answer(
+            [
+                (sub_question.normalized_text, str(result["answer"]))
+                for sub_question, result in zip(sub_questions, sub_results)
+            ]
         )
-        return self._call_llm([{"role": "system", "content": system_msg}])
 
     def _generate_customer_service_response(
         self,
         *,
         question: str,
         route_decision: RouteDecision,
+        context_topics: list[str] | None = None,
     ) -> dict[str, Any]:
-        policy_response = self.customer_service_policy.answer(question)
+        policy_response = self.customer_service_policy.answer(
+            question,
+            context_topics=context_topics,
+        )
         return {
             "answer": format_customer_service_answer(policy_response.answer),
             "image_ids": [],
@@ -754,6 +763,42 @@ class AgentService:
             )
 
         session, turn_context = self._prepare_turn_context(request)
+        if turn_context.context_reset_requested:
+            if request.session_id:
+                self.session_store.clear(request.session_id)
+            return ChatResponse(
+                answer="已清空本次会话上下文。你可以重新告诉我产品名称、型号、问题现象，或上传图片继续查询。",
+                image_ids=[],
+                images=[],
+                sources=[],
+                references=[],
+                confidence=0.99,
+                retrieval_debug={
+                    "route": "session_control",
+                    "action": "clear_context",
+                    "session_id": request.session_id or "",
+                },
+            )
+
+        if turn_context.needs_clarification:
+            return ChatResponse(
+                answer="我理解你可能想切换到另一个产品。请补充新的产品名称或型号后再问，我会避免沿用上一轮产品上下文。",
+                image_ids=[],
+                images=[],
+                sources=[],
+                references=[],
+                confidence=0.55,
+                retrieval_debug={
+                    "route": "clarification",
+                    "reason": turn_context.clarification_reason,
+                    "session": {
+                        "session_id": request.session_id or "",
+                        "previous_product": session.current_product if session is not None else "",
+                        "resolved_question": turn_context.resolved_question,
+                    },
+                },
+            )
+
         image_result = self._analyze_uploaded_images(request)
         sub_questions = split_complex_question(request.question)
         if not sub_questions:
@@ -769,11 +814,15 @@ class AgentService:
 
         sub_results: list[dict[str, Any]] = []
         for sub_question in sub_questions:
-            route_decision = self.question_router.route(sub_question.normalized_text)
+            route_decision = self._resolve_route_decision(
+                question=sub_question.normalized_text,
+                session=session,
+            )
             if route_decision.route == "customer_service":
                 result = self._generate_customer_service_response(
                     question=sub_question.normalized_text,
                     route_decision=route_decision,
+                    context_topics=session.current_service_topics if session is not None else [],
                 )
                 resolved_query = sub_question.normalized_text
             else:
@@ -845,6 +894,7 @@ class AgentService:
                 "inherited_models": turn_context.inherited_models,
                 "dialog_summary": turn_context.dialog_summary,
                 "image_understanding": image_result.to_debug_dict(),
+                "topic_switched": turn_context.topic_switched,
             },
             "sub_questions": [
                 {
@@ -878,6 +928,7 @@ class AgentService:
                 turn_context=turn_context,
                 uploaded_image_summary=image_result.combined_summary,
             )
+            self._update_session_route_state(session=session, sub_results=sub_results)
             self.session_store.append_turn(
                 session,
                 user_question=request.question,
@@ -907,6 +958,66 @@ class AgentService:
             session=session,
         )
         return session, turn_context
+
+    def _resolve_route_decision(
+        self,
+        *,
+        question: str,
+        session: SessionState | None,
+    ) -> RouteDecision:
+        route_decision = self.question_router.route(question)
+        if route_decision.route == "customer_service":
+            return route_decision
+        if session is None or session.current_route not in {"customer_service", "mixed"}:
+            return route_decision
+        if not session.current_service_topics:
+            return route_decision
+        analysis = analyze_query(question)
+        if analysis.products or analysis.models:
+            return route_decision
+        if not self._looks_like_customer_service_follow_up(question):
+            return route_decision
+        return RouteDecision(
+            route="customer_service",
+            confidence=max(route_decision.confidence, 0.72),
+            matched_terms=session.current_service_topics[:3],
+            manual_score=route_decision.manual_score,
+            service_score=max(route_decision.service_score, 2),
+            reason="inherit_customer_service_context",
+        )
+
+    def _looks_like_customer_service_follow_up(self, question: str) -> bool:
+        normalized = re.sub(r"\s+", "", question.strip())
+        if not normalized:
+            return False
+        if len(normalized) <= 14:
+            return True
+        return any(term in normalized for term in _SERVICE_FOLLOW_UP_TERMS)
+
+    def _update_session_route_state(
+        self,
+        *,
+        session: SessionState,
+        sub_results: list[dict[str, Any]],
+    ) -> None:
+        route_names = [
+            str(result.get("retrieval_debug", {}).get("route_decision", {}).get("route", ""))
+            for result in sub_results
+        ]
+        service_topics = _unique(
+            [
+                topic
+                for result in sub_results
+                for topic in result.get("retrieval_debug", {}).get("matched_policy_topics", [])
+            ]
+        )
+        if service_topics:
+            session.current_route = "customer_service" if all(route == "customer_service" for route in route_names) else "mixed"
+            session.current_service_topics = service_topics[:5]
+            return
+        if any(route == "manual_rag" for route in route_names):
+            session.current_route = "manual_rag"
+            session.current_service_topics = []
 
     def _ensure_runtime_components(self) -> None:
         if not hasattr(self, "session_store"):

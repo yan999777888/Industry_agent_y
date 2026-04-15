@@ -13,6 +13,8 @@ class SessionState:
     session_id: str
     current_product: str = ""
     current_models: list[str] = field(default_factory=list)
+    current_route: str = ""
+    current_service_topics: list[str] = field(default_factory=list)
     recent_questions: list[str] = field(default_factory=list)
     recent_sub_questions: list[str] = field(default_factory=list)
     recent_image_ids: list[str] = field(default_factory=list)
@@ -76,6 +78,11 @@ class InMemorySessionStore:
         self._touch(session, update_timestamp=True)
         self._sessions[session.session_id] = session
         return session
+
+    def clear(self, session_id: str) -> None:
+        if not session_id:
+            return
+        self._sessions.pop(session_id, None)
 
     def append_turn(self, session: SessionState, *, user_question: str, assistant_answer: str) -> SessionState:
         session.history.append({"role": "user", "content": user_question})

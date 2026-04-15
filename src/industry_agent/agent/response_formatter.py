@@ -46,6 +46,17 @@ def format_customer_service_answer(answer: str) -> str:
     return text
 
 
+def format_multi_question_answer(sub_answers: list[tuple[str, str]]) -> str:
+    """Merge per-sub-question answers without asking the LLM to rewrite evidence."""
+
+    blocks: list[str] = []
+    for index, (question, answer) in enumerate(sub_answers, start=1):
+        clean_question = re.sub(r"\s+", " ", _strip_markdown(question)).strip(" ：:")
+        clean_answer = _normalize_answer_block(answer)
+        blocks.append(f"问题{index}：{clean_question}\n{clean_answer}")
+    return "\n\n".join(blocks).strip()
+
+
 def _format_manual_fallback() -> str:
     return (
         "结论：\n"
@@ -64,6 +75,26 @@ def _strip_markdown(text: str) -> str:
     cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned
+
+
+def _normalize_answer_block(text: str) -> str:
+    cleaned = _strip_markdown(text)
+    cleaned = re.sub(r"^回答\s*[:：]\s*", "", cleaned.strip())
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    lines = []
+    previous = ""
+    for raw_line in cleaned.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            if previous:
+                lines.append("")
+                previous = ""
+            continue
+        if line == previous:
+            continue
+        lines.append(line)
+        previous = line
+    return "\n".join(lines).strip() or "根据现有资料无法准确回答此问题。"
 
 
 def _normalize_section_labels(text: str) -> str:

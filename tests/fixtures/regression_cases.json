@@ -81,6 +81,64 @@
     "max_image_ids": 0
   },
   {
+    "id": "customer_service_followup_turn1",
+    "session_id": "reg_policy_session",
+    "question": "我想退款，退款多久能到账？",
+    "expect_contains": ["订单号"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_followup_turn2",
+    "session_id": "reg_policy_session",
+    "question": "那需要准备什么材料？",
+    "expect_contains": ["订单号"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_address_change",
+    "question": "我想修改收货地址，还来得及吗？",
+    "expect_contains": ["新地址"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_price_protection",
+    "question": "刚买完就降价了，可以申请价保吗？",
+    "expect_contains": ["价保"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_installation_fee",
+    "question": "上门安装需要收费吗？",
+    "expect_contains": ["收费"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_payment_issue",
+    "question": "支付失败但是好像扣款了，这种怎么处理？",
+    "expect_contains": ["支付方式"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_delivery_delay",
+    "question": "一直不发货，我想催发货，这种一般多久能处理？",
+    "expect_contains": ["订单号"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "session_context_reset",
+    "session_id": "reg_reset_session",
+    "question": "清空上下文",
+    "expect_contains": ["已清空"],
+    "max_image_ids": 0
+  },
+  {
     "id": "empty_question_bad_request",
     "question": "   ",
     "expect_http_status": 400,

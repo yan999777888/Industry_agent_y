@@ -15,6 +15,14 @@ _FOLLOW_UP_TERMS = (
     "继续", "另外", "还有", "那", "那它", "那这个", "那么", "然后", "接着",
 )
 _SHORT_FOLLOW_UP_RE = re.compile(r"^(那|这|它|继续|还有|另外)")
+_CONTEXT_RESET_TERMS = (
+    "清空上下文", "清除上下文", "重置上下文", "重新开始", "从头开始",
+    "新会话", "忘掉刚才", "不用刚才", "不要参考上文",
+)
+_UNRESOLVED_TOPIC_SWITCH_TERMS = (
+    "换个产品", "换一个产品", "另一个产品", "其他产品", "别的产品",
+    "不是这个", "不是刚才", "不问这个", "不问刚才", "换个设备", "换一台设备",
+)
 
 
 @dataclass(frozen=True)
@@ -29,6 +37,10 @@ class TurnContext:
     inherited_models: list[str] = field(default_factory=list)
     history: list[dict[str, str]] = field(default_factory=list)
     dialog_summary: str = ""
+    needs_clarification: bool = False
+    clarification_reason: str = ""
+    context_reset_requested: bool = False
+    topic_switched: bool = False
 
 
 class ContextManager:
@@ -40,6 +52,15 @@ class ContextManager:
     def resolve_turn(self, *, question: str, session: SessionState | None) -> TurnContext:
         cleaned_question = question.strip()
         analysis = analyze_query(cleaned_question)
+        if self._is_context_reset(cleaned_question):
+            return TurnContext(
+                raw_question=cleaned_question,
+                resolved_question=cleaned_question,
+                analysis=analysis,
+                is_follow_up=False,
+                context_reset_requested=True,
+                clarification_reason="context_reset_requested",
+            )
         if session is None or not session.history:
             return TurnContext(
                 raw_question=cleaned_question,
@@ -49,11 +70,23 @@ class ContextManager:
             )
 
         is_follow_up = self._is_follow_up(cleaned_question, analysis, session)
+        topic_switched = bool(
+            analysis.products
+            and session.current_product
+            and analysis.products[0] != session.current_product
+        )
+        needs_clarification = (
+            self._is_unresolved_topic_switch(cleaned_question)
+            and not analysis.products
+            and not analysis.models
+        )
         inherited_product = ""
         inherited_models: list[str] = []
         resolved_question = cleaned_question
 
-        if is_follow_up:
+        if needs_clarification:
+            is_follow_up = False
+        elif is_follow_up and not topic_switched:
             if not analysis.products and session.current_product:
                 inherited_product = session.current_product
             if not analysis.models and session.current_models and (inherited_product or self._contains_follow_up_reference(cleaned_question)):
@@ -73,6 +106,9 @@ class ContextManager:
             inherited_models=inherited_models,
             history=session.history[-self.max_history_turns * 2 :],
             dialog_summary=session.dialog_summary,
+            needs_clarification=needs_clarification,
+            clarification_reason="unresolved_topic_switch" if needs_clarification else "",
+            topic_switched=topic_switched,
         )
 
     def build_subquestion_query(
@@ -151,6 +187,14 @@ class ContextManager:
         if not analysis.products and not analysis.models and session.current_product:
             return True
         return False
+
+    def _is_context_reset(self, question: str) -> bool:
+        normalized = _normalize(question)
+        return any(_normalize(term) in normalized for term in _CONTEXT_RESET_TERMS)
+
+    def _is_unresolved_topic_switch(self, question: str) -> bool:
+        normalized = _normalize(question)
+        return any(_normalize(term) in normalized for term in _UNRESOLVED_TOPIC_SWITCH_TERMS)
 
     def _contains_follow_up_reference(self, question: str) -> bool:
         normalized = _normalize(question)
