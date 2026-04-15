@@ -121,6 +121,23 @@ class AgentFlowTests(unittest.TestCase):
         self.assertEqual(response.image_ids, ["img_c"])
         self.assertEqual(len(response.retrieval_debug["sub_questions"]), 1)
 
+    def test_smalltalk_bypasses_retrieval(self) -> None:
+        response = self.agent.chat(ChatRequest(question="你好"))
+
+        self.assertIn("工业产品客服智能体", response.answer)
+        self.assertEqual(response.image_ids, [])
+        self.assertEqual(response.sources, [])
+        self.assertEqual(response.retrieval_debug["route"], "smalltalk")
+        self.assertEqual(self.agent.queries, [])
+
+    def test_english_smalltalk_bypasses_retrieval(self) -> None:
+        response = self.agent.chat(ChatRequest(question="hello"))
+
+        self.assertIn("工业产品客服智能体", response.answer)
+        self.assertEqual(response.image_ids, [])
+        self.assertEqual(response.retrieval_debug["intent"], "greeting")
+        self.assertEqual(self.agent.queries, [])
+
     def test_follow_up_inherits_product_context(self) -> None:
         session_id = "s_drill"
         self.agent.chat(ChatRequest(question="电钻的电池怎么充电？", session_id=session_id))

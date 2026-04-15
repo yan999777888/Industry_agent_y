@@ -99,6 +99,24 @@ _THINK_TAG_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
 _ANSWER_START_RE = re.compile(
     r"^([\u4e00-\u9fff]|#{1,3}\s|根据|您好|以下|关于|\d+[\.、])"
 )
+_NON_WORD_RE = re.compile(r"[\W_]+", flags=re.UNICODE)
+_SMALLTALK_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    (
+        "greeting",
+        re.compile(r"^(你好|您好|hello|hi|hey|哈喽|嗨|早上好|中午好|下午好|晚上好)$", flags=re.IGNORECASE),
+        "你好，我是工业产品客服智能体。你可以告诉我产品名称、型号、故障现象，或直接上传图片，我会尽量基于说明书资料帮你查询。",
+    ),
+    (
+        "thanks",
+        re.compile(r"^(谢谢|thanks|thankyou|thankyouverymuch|多谢|谢了)$", flags=re.IGNORECASE),
+        "不客气。如果你愿意，可以继续告诉我具体的产品名称、型号、问题现象或上传图片，我来继续帮你查。",
+    ),
+    (
+        "farewell",
+        re.compile(r"^(再见|拜拜|bye|goodbye|回头见)$", flags=re.IGNORECASE),
+        "再见。如果之后还有产品使用、安装、故障或配件相关问题，随时可以再来问我。",
+    ),
+)
 
 
 def _strip_thinking(text: str) -> str:
@@ -124,6 +142,20 @@ def _strip_thinking(text: str) -> str:
                     break
 
     return text
+
+
+def _normalize_for_smalltalk(text: str) -> str:
+    return _NON_WORD_RE.sub("", text.strip().lower())
+
+
+def _match_smalltalk_reply(question: str) -> tuple[str, str] | None:
+    normalized = _normalize_for_smalltalk(question)
+    if not normalized:
+        return None
+    for intent, pattern, reply in _SMALLTALK_PATTERNS:
+        if pattern.fullmatch(normalized):
+            return intent, reply
+    return None
 
 
 def _filter_evidence(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -431,6 +463,22 @@ class AgentService:
 
     def chat(self, request: ChatRequest) -> ChatResponse:
         """High-level chat with session memory."""
+        smalltalk = _match_smalltalk_reply(request.question)
+        if smalltalk is not None:
+            intent, reply = smalltalk
+            return ChatResponse(
+                answer=reply,
+                image_ids=[],
+                images=[],
+                sources=[],
+                references=[],
+                confidence=0.99,
+                retrieval_debug={
+                    "route": "smalltalk",
+                    "intent": intent,
+                },
+            )
+
         session, turn_context = self._prepare_turn_context(request)
         image_result = self._analyze_uploaded_images(request)
         sub_questions = split_complex_question(request.question)
