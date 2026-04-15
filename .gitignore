@@ -1,7 +1,18 @@
-cat >> .gitignore <<'EOF'
-
 # Python cache
 __pycache__/
 *.py[cod]
 *$py.class
-EOF
+
+# Virtual environments
+.venv/
+venv/
+
+# Local IDE / tool files
+.vscode/
+
+# Local processed artifacts
+data/processed/index.sqlite
+data/processed/eval_chat_results.jsonl
+data/processed/quality_observation_report.json
+submission/submission_generated.csv
+submission/submission_generated_debug.jsonl

@@ -457,6 +457,58 @@ class CustomerServicePolicyTests(unittest.TestCase):
         self.assertIn("人工客服", response.answer)
         self.assertIn("invoice", response.matched_topics)
 
+    def test_policy_refines_refund_reason_for_quality_issue(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("这个商品有质量问题，我想退款，需要我承担运费吗？")
+
+        self.assertIn("质量问题", response.answer)
+        self.assertIn("商家或平台承担", response.answer)
+        self.assertIn("refund_exchange", response.matched_topics)
+
+    def test_policy_refines_shipping_status_for_signed_but_missing(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("物流显示已签收但我没收到，这种情况应该怎么处理？")
+
+        self.assertIn("已签收但实际未收到", response.answer)
+        self.assertIn("承运商", response.answer)
+        self.assertIn("shipping", response.matched_topics)
+
+    def test_policy_refines_after_sales_for_human_damage(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("设备进水了，还能走保修吗？")
+
+        self.assertIn("人为损坏", response.answer)
+        self.assertIn("付费维修", response.answer)
+        self.assertIn("after_sales", response.matched_topics)
+
+    def test_policy_refines_refund_rejected_status(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("我的退款申请被驳回了，我现在该怎么办？")
+
+        self.assertIn("驳回原因", response.answer)
+        self.assertIn("refund_exchange", response.matched_topics)
+
+    def test_policy_refines_invoice_reissue_status(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("发票抬头填错了，而且已经开出来了，还能重开吗？")
+
+        self.assertIn("重开", response.answer)
+        self.assertIn("invoice", response.matched_topics)
+
+    def test_policy_refines_installation_reschedule_status(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("上门安装已经约好了，但是师傅没来，可以改约吗？")
+
+        self.assertIn("改约", response.answer)
+        self.assertIn("installation_service", response.matched_topics)
+
+    def test_policy_refines_accessory_rejected_status(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("我申请补寄配件被驳回了，还能重新提交吗？")
+
+        self.assertIn("驳回", response.answer)
+        self.assertIn("accessory_request", response.matched_topics)
+
 
 class RetrievalFusionTests(unittest.TestCase):
     def test_merge_retrieval_candidates_prefers_multi_variant_hits(self) -> None:

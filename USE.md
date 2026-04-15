@@ -9,7 +9,7 @@
 ### 1.1 Python 环境
 
 ```bash
-cd /mnt/i/Industry_agent/Industry_Agent   # 项目根目录
+cd ./Industry_Agent   # 如果当前位于项目上级目录
 python3 -m venv .venv
 source .venv/bin/activate
 ```
@@ -32,6 +32,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 
 # 拉取当前使用的模型
 ollama pull qwen3.5:2b
+ollama pull llava-phi3
 
 # 确认 Ollama 服务已启动（默认端口 11434）
 curl http://localhost:11434/api/tags
@@ -45,12 +46,6 @@ curl http://localhost:11434/api/tags
 export OLLAMA_BASE_URL=http://localhost:11434
 export OLLAMA_MODEL=qwen3.5:2b
 export OLLAMA_VISION_MODEL=llava-phi3
-```
-
-如果你希望真正启用“上传图片理解”，建议额外准备一个支持视觉输入的 Ollama 模型，并设置：
-
-```bash
-export OLLAMA_VISION_MODEL=moondream
 ```
 
 说明：
@@ -154,6 +149,43 @@ Content-Type: application/json
     "confidence": 0.86,
     "timestamp": 1776137645
   }
+}
+```
+
+### 错误码说明
+
+当前 `/chat` 的成功响应固定为：
+
+- HTTP `200`
+- 业务字段：`code=0`、`msg=success`
+
+当前常见错误响应如下：
+
+| HTTP 状态码 | 场景 | 返回形式 |
+|------|------|------|
+| `400` | 请求参数错误，例如 `question` 为空 | `{"detail": "question must not be empty"}` |
+| `500` | 服务内部异常，例如对话编排或模型调用失败 | `{"detail": "chat failed: ... "}` |
+| `503` | 依赖不可用，例如索引缺失、知识库未构建 | `{"detail": "..."}`
+
+说明：
+
+- 当前错误响应仍沿用 FastAPI 默认 `detail` 字段。
+- `/docs` 中已经同步标注了这些错误码及说明。
+- `/health` 主要用于启动后检查依赖状态；若关键依赖缺失，服务通常会在启动阶段直接失败，而不是等到 `/chat` 才报错。
+
+### 错误请求示例
+
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "   "}'
+```
+
+预期返回：
+
+```json
+{
+  "detail": "question must not be empty"
 }
 ```
 
@@ -376,7 +408,7 @@ Phase A 检索质量专项优化当前已经覆盖以下能力：
 如需只验证检索层，不依赖 Ollama 和 API，可以直接运行：
 
 ```bash
-python3 -m unittest tests.test_retriever
+python3 -m unittest discover -s tests -p 'test_retriever.py'
 ```
 
 当前这组测试主要覆盖：
@@ -402,7 +434,7 @@ Phase B 第一批多模态融合优化当前已经接入主链路，核心变化
 如果想重点验证多模态融合，可以运行：
 
 ```bash
-python3 -m unittest tests.test_agent_flow
+python3 -m unittest discover -s tests -p 'test_agent_flow.py'
 ```
 
 当前已覆盖的多模态测试包括：
@@ -433,7 +465,7 @@ Phase C 第一批回答自然度与模板优化当前已经完成这些改进：
 如果想重点验证格式层，可以运行：
 
 ```bash
-python3 -m unittest tests.test_agent_flow
+python3 -m unittest discover -s tests -p 'test_agent_flow.py'
 ```
 
 当前已覆盖的格式化测试包括：
@@ -460,7 +492,7 @@ Phase D 第一批多轮鲁棒性优化当前已经完成这些改进：
 如果想重点验证多轮鲁棒性，可以运行：
 
 ```bash
-python3 -m unittest tests.test_agent_flow
+python3 -m unittest discover -s tests -p 'test_agent_flow.py'
 ```
 
 当前已覆盖的多轮鲁棒性测试包括：
@@ -492,7 +524,7 @@ Phase E 第一批客服策略知识扩展当前新增覆盖：
 如果想重点验证客服策略，可以运行：
 
 ```bash
-python3 -m unittest tests.test_agent_flow
+python3 -m unittest discover -s tests -p 'test_agent_flow.py'
 ```
 
 也可以启动 API 后用固定回归集验证：
@@ -520,6 +552,26 @@ Phase E 第二批进一步增强了“主题内追问”能力：
 - `支付失败但是扣款了，应该怎么申请核查？`
 - `发票抬头填错了，这种情况应该联系谁处理？`
 
+本轮又继续补齐了“同一主题下不同业务状态”的场景模板，重点包括：
+
+- 退款原因细分：`7天无理由`、`质量问题退款`、`已拆封/已使用`
+- 物流状态细分：`物流停滞`、`已签收但未收到`、`改派/送错地址`
+- 保修审核细分：`在保`、`过保`、`人为损坏`
+- 退款状态细分：`退款/退货申请被驳回`
+- 发票状态细分：`发票已开具但信息填写错误，需重开或更正`
+- 安装状态细分：`安装改约`、`师傅爽约/未按约上门`
+- 补件状态细分：`补寄配件申请被驳回`
+
+例如下面这些问法，会比之前更接近真实客服的处理路径：
+
+- `这个商品有质量问题，我想退款，需要我承担运费吗？`
+- `物流显示已签收但我没收到，这种情况应该怎么处理？`
+- `设备进水了，还能走保修吗？`
+- `我的退款申请被驳回了，我现在该怎么办？`
+- `发票抬头填错了，而且已经开出来了，还能重开吗？`
+- `上门安装已经约好了，但是师傅没来，可以改约吗？`
+- `我申请补寄配件被驳回了，还能重新提交吗？`
+
 ---
 
 ### 5.8 回归验证集
@@ -535,6 +587,10 @@ Phase F 已经把固定回归验证集继续扩展到了这些新增场景：
 - 价保条件追问
 - 支付异常流程追问
 - 发票联系对象追问
+- 退款申请驳回
+- 发票重开
+- 安装改约
+- 补寄配件驳回
 - 会话重置
 
 固定回归集位置：
@@ -552,7 +608,55 @@ python3 scripts/run_regression_suite.py
 如果只想检查脚本本身和样例结构是否正常，可以执行：
 
 ```bash
-python3 -m unittest tests.test_regression_suite
+python3 -m unittest discover -s tests -p 'test_regression_suite.py'
+```
+
+### 5.9 端到端质量观察
+
+除了固定回归集之外，当前项目还补了一套“观察型”样例，用于查看不同类别请求的整体表现和失败类型分桶。
+
+样例文件：
+
+```text
+tests/fixtures/quality_observation_cases.json
+```
+
+启动 API 后执行：
+
+```bash
+python3 scripts/observe_chat_quality.py
+```
+
+默认会输出到：
+
+```text
+data/processed/quality_observation_report.json
+```
+
+这个脚本更适合做端到端质量观察，而不是硬性回归拦截。它会按类别统计：
+
+- `smalltalk`
+- `manual_rag`
+- `multimodal`
+- `customer_service`
+- `multiturn`
+- `mixed`
+- `fallback`
+- `api_error`
+
+同时还会把问题大致分桶到这些失败类型：
+
+- `answer_alignment`
+- `source_routing`
+- `image_binding`
+- `low_confidence`
+- `http_status`
+- `error_detail`
+
+如果只想验证观察脚本本身，可以执行：
+
+```bash
+python3 -m unittest discover -s tests -p 'test_quality_observation.py'
 ```
 
 ---

@@ -153,6 +153,55 @@
     "max_image_ids": 0
   },
   {
+    "id": "customer_service_refund_quality_reason",
+    "question": "这个商品有质量问题，我想退款，需要我承担运费吗？",
+    "expect_contains": ["质量问题", "运费"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_shipping_signed_missing",
+    "question": "物流显示已签收但我没收到，这种情况应该怎么处理？",
+    "expect_contains": ["已签收", "承运商"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_warranty_human_damage",
+    "question": "设备进水了，还能走保修吗？",
+    "expect_contains": ["人为损坏", "保修"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_refund_rejected",
+    "question": "我的退款申请被驳回了，我现在该怎么办？",
+    "expect_contains": ["驳回原因"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_invoice_reissue",
+    "question": "发票抬头填错了，而且已经开出来了，还能重开吗？",
+    "expect_contains": ["重开"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_installation_reschedule",
+    "question": "上门安装已经约好了，但是师傅没来，可以改约吗？",
+    "expect_contains": ["改约"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_accessory_rejected",
+    "question": "我申请补寄配件被驳回了，还能重新提交吗？",
+    "expect_contains": ["驳回"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
     "id": "session_context_reset",
     "session_id": "reg_reset_session",
     "question": "清空上下文",

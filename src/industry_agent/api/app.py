@@ -26,6 +26,10 @@ class ChatRequest(BaseModel):
     session_id: str | None = Field(default=None, description="会话 ID，用于多轮对话")
 
 
+class ErrorResponse(BaseModel):
+    detail: str = Field(..., description="错误详情")
+
+
 class ReferenceItem(BaseModel):
     chunk_id: str = ""
     title: str = ""
@@ -61,7 +65,15 @@ class ChatResponse(BaseModel):
 # ── App factory ──────────────────────────────────────────────────────────
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Industry Agent", version="0.1.0")
+    app = FastAPI(
+        title="Industry Agent",
+        version="0.1.0",
+        description=(
+            "面向工业产品客服场景的多模态问答服务。"
+            "当前提供 `/health` 健康检查和 `/chat` 问答接口，"
+            "支持说明书检索问答、轻量客服策略、多轮对话和图片理解。"
+        ),
+    )
 
     @app.on_event("startup")
     def startup_event():
@@ -80,14 +92,40 @@ def create_app() -> FastAPI:
         app.state.agent = AgentService(retriever=app.state.retriever)
         print("Ready.")
 
-    @app.get("/health")
+    @app.get(
+        "/health",
+        summary="健康检查",
+        description="返回索引、Ollama 服务、文本模型和视觉模型的启动检查结果。",
+    )
     def health() -> dict:
         report = getattr(app.state, "health_report", None)
         if report is None:
             return {"status": "unknown"}
         return report.to_dict()
 
-    @app.post("/chat", response_model=ChatResponse)
+    @app.post(
+        "/chat",
+        response_model=ChatResponse,
+        summary="客服问答",
+        description=(
+            "接收一个问题和可选图片，返回结构化答案、相关图片、来源和置信度。"
+            "接口同时支持说明书 RAG、客服策略路由、多轮上下文继承和图片辅助理解。"
+        ),
+        responses={
+            400: {
+                "model": ErrorResponse,
+                "description": "请求参数错误，例如 question 为空。",
+            },
+            500: {
+                "model": ErrorResponse,
+                "description": "服务内部异常，例如对话编排或模型调用失败。",
+            },
+            503: {
+                "model": ErrorResponse,
+                "description": "依赖不可用，例如知识库索引不存在或启动检查未通过。",
+            },
+        },
+    )
     def chat(body: ChatRequest) -> ChatResponse:
         if not body.question.strip():
             raise HTTPException(status_code=400, detail="question must not be empty")

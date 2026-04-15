@@ -1,0 +1,131 @@
+[
+  {
+    "id": "obs_smalltalk",
+    "category": "smalltalk",
+    "question": "你好",
+    "expect_contains": ["工业产品客服智能体"],
+    "max_image_ids": 0,
+    "min_confidence": 0.9
+  },
+  {
+    "id": "obs_manual_rag",
+    "category": "manual_rag",
+    "question": "电钻怎么充电？",
+    "expect_contains": ["结论", "操作/说明"],
+    "min_confidence": 0.7
+  },
+  {
+    "id": "obs_multimodal_image",
+    "category": "multimodal",
+    "question": "请结合图片判断这个部件或指示灯相关的使用注意事项是什么？",
+    "image_paths": ["Knowledge_base/插图/drill0_17.png"],
+    "expect_contains": ["结论", "注意事项"],
+    "min_image_ids": 1,
+    "min_confidence": 0.7
+  },
+  {
+    "id": "obs_customer_refund_quality",
+    "category": "customer_service",
+    "question": "这个商品有质量问题，我想退款，需要我承担运费吗？",
+    "expect_contains": ["质量问题", "运费"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0,
+    "min_confidence": 0.6
+  },
+  {
+    "id": "obs_customer_shipping_signed_missing",
+    "category": "customer_service",
+    "question": "物流显示已签收但我没收到，这种情况应该怎么处理？",
+    "expect_contains": ["已签收", "承运商"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0,
+    "min_confidence": 0.6
+  },
+  {
+    "id": "obs_customer_warranty_human_damage",
+    "category": "customer_service",
+    "question": "设备进水了，还能走保修吗？",
+    "expect_contains": ["人为损坏", "保修"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0,
+    "min_confidence": 0.6
+  },
+  {
+    "id": "obs_customer_refund_rejected",
+    "category": "customer_service",
+    "question": "我的退款申请被驳回了，我现在该怎么办？",
+    "expect_contains": ["驳回原因"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0,
+    "min_confidence": 0.6
+  },
+  {
+    "id": "obs_customer_invoice_reissue",
+    "category": "customer_service",
+    "question": "发票抬头填错了，而且已经开出来了，还能重开吗？",
+    "expect_contains": ["重开"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0,
+    "min_confidence": 0.6
+  },
+  {
+    "id": "obs_customer_installation_reschedule",
+    "category": "customer_service",
+    "question": "上门安装已经约好了，但是师傅没来，可以改约吗？",
+    "expect_contains": ["改约"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0,
+    "min_confidence": 0.6
+  },
+  {
+    "id": "obs_customer_accessory_rejected",
+    "category": "customer_service",
+    "question": "我申请补寄配件被驳回了，还能重新提交吗？",
+    "expect_contains": ["驳回"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0,
+    "min_confidence": 0.6
+  },
+  {
+    "id": "obs_multiturn_followup_turn1",
+    "category": "multiturn",
+    "session_id": "obs_multiturn_policy",
+    "question": "我想退款，退款多久能到账？",
+    "expect_contains": ["订单号"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0,
+    "min_confidence": 0.6
+  },
+  {
+    "id": "obs_multiturn_followup_turn2",
+    "category": "multiturn",
+    "session_id": "obs_multiturn_policy",
+    "question": "那需要准备什么材料？",
+    "expect_contains": ["订单号"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0,
+    "min_confidence": 0.6
+  },
+  {
+    "id": "obs_multi_question",
+    "category": "mixed",
+    "question": "\"请问支持退款吗？\",\n\"电钻怎么充电？\"",
+    "expect_contains": ["问题1", "问题2"],
+    "min_confidence": 0.6
+  },
+  {
+    "id": "obs_refusal",
+    "category": "fallback",
+    "question": "请问这台设备能不能直接连接火星基地网络？",
+    "expect_contains": ["根据现有资料无法准确回答此问题"],
+    "max_image_ids": 0,
+    "max_confidence": 0.9
+  },
+  {
+    "id": "obs_api_error_empty_question",
+    "category": "api_error",
+    "question": "   ",
+    "expect_http_status": 400,
+    "expect_error_contains": ["question must not be empty"]
+  }
+]
