@@ -9,8 +9,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from industry_agent.agent.context_manager import ContextManager, TurnContext
+from industry_agent.agent.customer_service_policy import CustomerServicePolicy
 from industry_agent.agent.image_understanding import ImageUnderstandingResult, ImageUnderstander
 from industry_agent.agent.question_splitter import SubQuestion, split_complex_question
+from industry_agent.agent.question_router import QuestionRouter, RouteDecision
+from industry_agent.agent.response_formatter import format_customer_service_answer, format_manual_answer
 from industry_agent.agent.session_store import InMemorySessionStore, SessionState
 from industry_agent.config import settings
 from industry_agent.rag.retriever import SQLiteRetriever
@@ -350,6 +353,8 @@ class AgentService:
         self.base_url = base_url.rstrip("/")
         self.session_store = InMemorySessionStore(max_history_turns=MAX_HISTORY_TURNS)
         self.context_manager = ContextManager(max_history_turns=MAX_HISTORY_TURNS)
+        self.question_router = QuestionRouter()
+        self.customer_service_policy = CustomerServicePolicy()
         if httpx is None:
             raise RuntimeError("httpx is required to use AgentService with Ollama. Please install requirements.txt")
         self.http_client = httpx.Client(proxy=None, timeout=120.0)
@@ -423,6 +428,7 @@ class AgentService:
 
         # 4. Call LLM
         answer = self._call_llm(messages)
+        answer = format_manual_answer(answer, image_ids=image_ids)
 
         return {
             "answer": answer,
@@ -463,6 +469,37 @@ class AgentService:
         )
         return self._call_llm([{"role": "system", "content": system_msg}])
 
+    def _generate_customer_service_response(
+        self,
+        *,
+        question: str,
+        route_decision: RouteDecision,
+    ) -> dict[str, Any]:
+        policy_response = self.customer_service_policy.answer(question)
+        return {
+            "answer": format_customer_service_answer(policy_response.answer),
+            "image_ids": [],
+            "images": [],
+            "sources": ["customer_service_policy"],
+            "references": [
+                {
+                    "chunk_id": f"policy_{topic}",
+                    "title": "客服策略知识",
+                    "text_snippet": question[:100],
+                    "product_name": "customer_service_policy",
+                    "score": str(route_decision.confidence),
+                }
+                for topic in policy_response.matched_topics
+            ],
+            "confidence": round(min(route_decision.confidence, policy_response.confidence), 2),
+            "retrieval_debug": {
+                "route": route_decision.route,
+                "route_reason": route_decision.reason,
+                "route_terms": route_decision.matched_terms,
+                "matched_policy_topics": policy_response.matched_topics,
+            },
+        }
+
     def chat(self, request: ChatRequest) -> ChatResponse:
         """High-level chat with session memory."""
         smalltalk = _match_smalltalk_reply(request.question)
@@ -497,24 +534,40 @@ class AgentService:
 
         sub_results: list[dict[str, Any]] = []
         for sub_question in sub_questions:
-            resolved_query = self._build_subquestion_query(
-                sub_question=sub_question,
-                original_question=request.question,
-                turn_context=turn_context,
-            )
-            if image_result.retrieval_hint:
-                resolved_query = f"{resolved_query} {image_result.retrieval_hint}".strip()
-            result = self.generate_response(
-                query=resolved_query,
-                history=turn_context.history,
-                image_input=request.images[0] if request.images else None,
-                dialog_summary=turn_context.dialog_summary,
-                image_context=image_result.combined_summary,
-            )
+            route_decision = self.question_router.route(sub_question.normalized_text)
+            if route_decision.route == "customer_service":
+                result = self._generate_customer_service_response(
+                    question=sub_question.normalized_text,
+                    route_decision=route_decision,
+                )
+                resolved_query = sub_question.normalized_text
+            else:
+                resolved_query = self._build_subquestion_query(
+                    sub_question=sub_question,
+                    original_question=request.question,
+                    turn_context=turn_context,
+                )
+                if image_result.retrieval_hint:
+                    resolved_query = f"{resolved_query} {image_result.retrieval_hint}".strip()
+                result = self.generate_response(
+                    query=resolved_query,
+                    history=turn_context.history,
+                    image_input=request.images[0] if request.images else None,
+                    dialog_summary=turn_context.dialog_summary,
+                    image_context=image_result.combined_summary,
+                )
             result["retrieval_debug"] = {
                 **result.get("retrieval_debug", {}),
                 "resolved_query": resolved_query,
                 "image_understanding": image_result.to_debug_dict(),
+                "route_decision": {
+                    "route": route_decision.route,
+                    "confidence": route_decision.confidence,
+                    "matched_terms": route_decision.matched_terms,
+                    "manual_score": route_decision.manual_score,
+                    "service_score": route_decision.service_score,
+                    "reason": route_decision.reason,
+                },
             }
             sub_results.append(result)
 
@@ -623,6 +676,10 @@ class AgentService:
             self.session_store = InMemorySessionStore(max_history_turns=MAX_HISTORY_TURNS)
         if not hasattr(self, "context_manager"):
             self.context_manager = ContextManager(max_history_turns=MAX_HISTORY_TURNS)
+        if not hasattr(self, "question_router"):
+            self.question_router = QuestionRouter()
+        if not hasattr(self, "customer_service_policy"):
+            self.customer_service_policy = CustomerServicePolicy()
         if not hasattr(self, "image_understander"):
             self.image_understander = ImageUnderstander(
                 base_url=self.base_url,

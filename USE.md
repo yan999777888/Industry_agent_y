@@ -93,8 +93,18 @@ uvicorn industry_agent.api.app:create_app --factory --host 0.0.0.0 --port 8000
 
 ```bash
 curl http://127.0.0.1:8000/health
-# 预期返回：{"status":"ok"}
+# 预期返回：包含 status 和组件检查结果
 ```
+
+当前 `/health` 会在启动后返回运行时健康检查结果，主要包括：
+
+- `index.sqlite` 是否存在
+- `images.jsonl` 是否存在
+- `Ollama` 服务是否可访问
+- 文本模型是否已拉取
+- 视觉模型是否已拉取
+
+如果缺少必需组件，服务会在启动阶段直接报错，而不是等到第一次 `/chat` 调用才失败。
 
 ---
 
@@ -334,6 +344,15 @@ python3 scripts/generate_submission.py --limit 5
 python3 scripts/generate_submission.py --base-url http://127.0.0.1:8000
 ```
 
+当前脚本在写入 `submission_generated.csv` 之前，还会自动做一层“提交专用清洗”，主要包括：
+
+- 去除 `结论 / 操作说明 / 注意事项 / 相关图片` 这类内部结构化标签
+- 去除 `Manual16_51`、`drill0_17` 这类图片 ID 直接写入答案正文
+- 去除部分“参考资料仅包含...”这类内部说明口吻
+- 将纯拒答答案改写成更自然的客服式提示语
+
+这层清洗只影响提交文件生成，不影响 `/chat` 接口本身的原始返回。
+
 生成后的 `submission/submission_generated.csv` 格式为：
 
 ```csv
@@ -372,7 +391,7 @@ print(resp.confidence)
 查询解析（产品别名 + 型号识别 + 中文关键词）
   │
   ▼
-SQLite LIKE 候选召回 + Python 侧重排
+SQLite LIKE 候选召回 + FTS/BM25 风格候选召回 + Python 混合重排
   │
   ▼
 证据筛选（低置信拒答 + 同产品过滤 + top chunks）
@@ -411,7 +430,7 @@ session_id
 可选视觉描述（OLLAMA_VISION_MODEL）
   │
   ▼
-图片线索注入检索查询与回答上下文
+图片线索去噪后注入检索查询与回答上下文
 ```
 
 当前还额外支持一层轻量分流：
@@ -436,6 +455,58 @@ curl -X POST http://127.0.0.1:8000/chat \
 
 这类输入当前会直接返回简短引导语，而不会误命中说明书内容。
 
+### 示例 6：通用客服问题路由
+
+当前系统已经支持把“说明书问答”和“通用客服/售后问题”分开处理。
+
+这意味着像下面这类问题：
+
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "我想退款，退款多久能到账？"}'
+```
+
+不会再强行去说明书里检索“退款”相关段落，而是优先走轻量客服策略分支，返回更接近真实客服话术的保守答复，例如：
+
+- 提示需要订单号、支付方式、购买渠道
+- 说明到账时间通常取决于支付渠道和订单状态
+- 引导用户继续补充关键信息
+
+当前通用客服分支优先覆盖：
+
+- 退款 / 退货 / 换货
+- 发票 / 发票抬头
+- 物流 / 运费 / 补发 / 签收
+- 投诉 / 假货 / 虚假宣传 / 赔偿
+- 售后 / 维修 / 保修
+- 破损 / 瑕疵 / 少件 / 保质期异常
+
+如果一个请求里同时包含多个子问题，系统会按子问题分别路由；说明书类问题继续走 RAG，售后类问题走客服策略分支。
+
+### 示例 7：固定回归验证集
+
+为了避免后续优化依赖公开题数据，项目现在内置了一套固定回归验证集：
+
+```bash
+python3 scripts/run_regression_suite.py
+```
+
+默认会读取：
+
+```text
+tests/fixtures/regression_cases.json
+```
+
+当前覆盖的通用场景包括：
+
+- 说明书问答
+- 寒暄分流
+- 通用客服问题路由
+- 混合多问题输入
+
+后续如果我们新增功能，也应该优先把验证样例补到这套固定回归集中。
+
 ### 关键文件
 
 | 文件 | 职责 |
@@ -446,6 +517,10 @@ curl -X POST http://127.0.0.1:8000/chat \
 | `src/industry_agent/agent/session_store.py` | 结构化会话状态存储 |
 | `src/industry_agent/agent/context_manager.py` | 多轮上下文继承与追问解析 |
 | `src/industry_agent/agent/image_understanding.py` | 上传图片解析与可选视觉描述 |
+| `src/industry_agent/agent/question_router.py` | 问题路由，区分说明书问答与通用客服问题 |
+| `src/industry_agent/agent/customer_service_policy.py` | 轻量客服策略知识 |
+| `src/industry_agent/agent/response_formatter.py` | 回答后处理与格式稳定 |
+| `src/industry_agent/agent/runtime_checks.py` | 启动健康检查 |
 | `src/industry_agent/rag/retriever.py` | 关键词提取 + SQLite 评分检索 |
 | `src/industry_agent/kb/build_index.py` | 知识库构建主流程 |
 | `src/industry_agent/kb/parser.py` | 手册解析与文本规范化 |

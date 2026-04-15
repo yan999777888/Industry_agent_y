@@ -28,6 +28,17 @@ VISION_PROMPT_TEMPLATE = """\
 
 用户问题：{question}
 """
+_NOISY_VISUAL_TERMS: set[str] = {
+    "图片", "图像", "画面", "设备", "这个", "那个", "其中", "一个", "一些",
+    "可能", "显示", "看到", "部分", "区域", "部件", "位置", "东西", "起来",
+    "相关", "用户", "上传", "内容", "信息", "里的", "中的", "具有", "通过",
+    "可以", "用于", "以及", "还有", "这张", "该图像", "该设备", "一个电子设备",
+    "电子", "电子设备",
+}
+_VISUAL_DOMAIN_HINTS: tuple[str, ...] = (
+    "指示灯", "按钮", "接口", "屏幕", "电池", "充电", "开关", "表带", "卡扣",
+    "旋钮", "插槽", "线缆", "红灯", "蓝灯", "闪烁", "裂纹", "破损", "划痕",
+)
 
 
 @dataclass(frozen=True)
@@ -187,6 +198,9 @@ class ImageUnderstander:
 
         content = str(payload.get("response", "")).strip()
         content = re.sub(r"\s+", " ", content)
+        content = re.sub(r"^\d+\.\s*", "", content)
+        content = re.sub(r"\s*\d+\.\s*", "；", content)
+        content = re.sub(r"；+", "；", content)
         return content[:200]
 
     def _build_retrieval_hint(self, *, question: str, observations: list[ImageObservation]) -> str:
@@ -197,8 +211,15 @@ class ImageUnderstander:
         )
         if not visual_text:
             return ""
-        keywords = extract_keywords(f"{question} {visual_text}")
-        return " ".join(_unique(keywords)[:12])
+        cleaned_visual_text = _clean_visual_summary(visual_text)
+        domain_terms = [term for term in _VISUAL_DOMAIN_HINTS if term in cleaned_visual_text]
+        keywords = extract_keywords(cleaned_visual_text)
+        filtered_keywords = [
+            keyword
+            for keyword in _unique([*domain_terms, *keywords])
+            if _is_useful_visual_keyword(keyword, question=question)
+        ]
+        return " ".join(filtered_keywords[:8])
 
 
 def _decode_base64_image(value: str) -> tuple[bytes, str] | None:
@@ -312,6 +333,31 @@ def _build_combined_summary_text(observation: ImageObservation) -> str:
     if observation.visual_summary:
         return f"{observation.summary}。视觉描述：{observation.visual_summary}"
     return observation.summary
+
+
+def _clean_visual_summary(text: str) -> str:
+    cleaned = text.strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"(图片中|图像中|该图像显示了|该设备还有|可以通过连接线来控制|可能是)", " ", cleaned)
+    cleaned = re.sub(r"[。；,，]+", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _is_useful_visual_keyword(keyword: str, *, question: str) -> bool:
+    term = keyword.strip()
+    if not term or len(term) < 2:
+        return False
+    if term in _NOISY_VISUAL_TERMS:
+        return False
+    if any(noisy in term for noisy in ("图片", "图像", "设备", "电子")):
+        return False
+    if "图片" in term or "图像" in term:
+        return False
+    if term in question:
+        return False
+    if re.fullmatch(r"[0-9A-Za-z]+", term) and len(term) < 3:
+        return False
+    return True
 
 
 def _unique(values: list[str]) -> list[str]:

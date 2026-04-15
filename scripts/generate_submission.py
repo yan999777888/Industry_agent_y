@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -13,6 +14,25 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_FALLBACK_ANSWER = "根据现有资料无法回答此问题。请补充更明确的产品名称、型号、故障现象或图片后再试。"
+_CUSTOMER_SERVICE_KEYWORDS = (
+    "退货", "换货", "退款", "运费", "物流", "快递", "发票", "补发", "签收",
+    "售后", "维修", "保修", "投诉", "赔偿", "订单", "发货", "包装", "瑕疵",
+    "少件", "划痕", "假货", "虚假宣传", "国外", "乡镇",
+)
+_IMAGE_ID_RE = re.compile(r"\b(?:Manual\d+_\d+|drill\d*_?\d+|pump_\d+|generator_\d+)\b")
+_RELATED_IMAGE_SECTION_RE = re.compile(r"\n*相关图片：(?:\n[^\n]*)*", flags=re.IGNORECASE)
+_LABEL_REPLACEMENTS = (
+    ("问题1：", ""),
+    ("问题 1：", ""),
+    ("问题2：", ""),
+    ("问题 2：", ""),
+    ("问题3：", ""),
+    ("问题 3：", ""),
+    ("回答：", ""),
+    ("结论：", ""),
+    ("操作/说明：", ""),
+    ("注意事项：", ""),
+)
 
 
 def read_questions(path: Path) -> list[dict[str, str]]:
@@ -53,6 +73,46 @@ def append_jsonl(path: Path, record: dict) -> None:
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def normalize_submission_answer(answer: str, *, question: str, sources: list[str] | None = None) -> str:
+    sources = sources or []
+    text = answer.strip()
+    if not text:
+        return DEFAULT_FALLBACK_ANSWER
+
+    for old, new in _LABEL_REPLACEMENTS:
+        text = text.replace(old, new)
+    text = text.replace("**", "")
+    text = _RELATED_IMAGE_SECTION_RE.sub("", text)
+    text = _IMAGE_ID_RE.sub("", text)
+    text = text.replace("- 无", "")
+    text = text.replace("- ", "")
+    text = re.sub(r"参考资料[^\n。]*[。]?", "", text)
+    text = re.sub(r"当前资料[^\n。]*[。]?", "", text)
+    text = re.sub(r"资料中仅[^\n。]*[。]?", "", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\s+\n", "\n", text)
+    text = re.sub(r"\n+", " ", text).strip(" |;；，,")
+
+    if text == DEFAULT_FALLBACK_ANSWER or "根据现有资料无法回答此问题" in text:
+        return _build_submission_fallback(question=question, sources=sources)
+
+    if "customer_service_policy" in sources:
+        text = re.sub(r"如果你愿意，我建议下一步优先补充[^。]*。?", "", text)
+        text = re.sub(r"这类问题更适合按通用客服流程处理。?", "", text)
+
+    text = re.sub(r"\s{2,}", " ", text).strip(" ，,；;")
+    if not text.endswith(("。", "！", "？")):
+        text += "。"
+    return text
+
+
+def _build_submission_fallback(*, question: str, sources: list[str]) -> str:
+    if "customer_service_policy" in sources or any(keyword in question for keyword in _CUSTOMER_SERVICE_KEYWORDS):
+        return "您好，相关情况需要结合订单信息、商品情况和售后规则进一步核实。请您补充订单号、商品名称、问题照片或聊天记录，我们会继续为您处理。"
+    return "您好，当前还无法准确定位对应的说明书内容。请补充产品名称、型号、故障现象或图片，我再继续帮您查询。"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate submission CSV by calling the local /chat API.")
     parser.add_argument("--questions", type=Path, default=Path("submission/question_public.csv"))
@@ -82,7 +142,12 @@ def main() -> None:
         try:
             raw_response = call_chat(args.base_url, item["question"], args.timeout)
             data = raw_response.get("data", {})
-            answer = str(data.get("answer") or "").strip() or args.fallback_answer
+            raw_answer = str(data.get("answer") or "").strip() or args.fallback_answer
+            answer = normalize_submission_answer(
+                raw_answer,
+                question=item["question"],
+                sources=list(data.get("sources", []) or []),
+            )
             ok = raw_response.get("code") == 0
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
             error = str(exc)
@@ -93,6 +158,7 @@ def main() -> None:
             "question": item["question"],
             "ok": ok,
             "ret": answer,
+            "raw_answer": raw_response.get("data", {}).get("answer", "") if raw_response else "",
             "elapsed_sec": round(time.time() - started, 3),
             "error": error,
             "response": raw_response,

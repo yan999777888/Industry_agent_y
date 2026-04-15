@@ -13,7 +13,10 @@ if str(SRC_DIR) not in sys.path:
 from industry_agent.agent.question_splitter import split_complex_question
 from industry_agent.agent.service import AgentService, ChatRequest
 from industry_agent.agent.context_manager import ContextManager
+from industry_agent.agent.customer_service_policy import CustomerServicePolicy
 from industry_agent.agent.image_understanding import ImageObservation, ImageUnderstandingResult, ImageUnderstander
+from industry_agent.agent.question_router import QuestionRouter
+from industry_agent.agent.response_formatter import format_customer_service_answer, format_manual_answer
 from industry_agent.agent.session_store import InMemorySessionStore
 
 ONE_BY_ONE_PNG_BASE64 = (
@@ -58,6 +61,8 @@ class DummyAgentService(AgentService):
         self.http_client = None
         self.session_store = InMemorySessionStore()
         self.context_manager = ContextManager()
+        self.question_router = QuestionRouter()
+        self.customer_service_policy = CustomerServicePolicy()
         self.image_understander = ImageUnderstander(base_url=self.base_url, http_client=None, vision_model="")
         self.queries: list[str] = []
 
@@ -111,8 +116,16 @@ class AgentFlowTests(unittest.TestCase):
         )
         self.assertIn("问题1", response.answer)
         self.assertIn("问题2", response.answer)
-        self.assertEqual(response.image_ids, ["img_a", "img_b"])
-        self.assertEqual(response.confidence, 0.8)
+        self.assertEqual(response.image_ids, [])
+        self.assertIn("customer_service_policy", response.sources)
+        self.assertEqual(
+            response.retrieval_debug["sub_results"][0]["retrieval_debug"]["route_decision"]["route"],
+            "customer_service",
+        )
+        self.assertEqual(
+            response.retrieval_debug["sub_results"][1]["retrieval_debug"]["route_decision"]["route"],
+            "customer_service",
+        )
         self.assertEqual(len(response.retrieval_debug["sub_questions"]), 2)
 
     def test_agent_keeps_single_question_shape(self) -> None:
@@ -137,6 +150,36 @@ class AgentFlowTests(unittest.TestCase):
         self.assertEqual(response.image_ids, [])
         self.assertEqual(response.retrieval_debug["intent"], "greeting")
         self.assertEqual(self.agent.queries, [])
+
+    def test_customer_service_route_bypasses_manual_retrieval(self) -> None:
+        response = self.agent.chat(ChatRequest(question="我想退款，退款多久能到账？"))
+
+        self.assertIn("订单号", response.answer)
+        self.assertEqual(response.image_ids, [])
+        self.assertEqual(self.agent.queries, [])
+        self.assertEqual(
+            response.retrieval_debug["sub_results"][0]["retrieval_debug"]["route_decision"]["route"],
+            "customer_service",
+        )
+        self.assertIn("customer_service_policy", response.sources)
+
+    def test_mixed_question_uses_different_routes_per_subquestion(self) -> None:
+        response = self.agent.chat(
+            ChatRequest(question='"请问支持退款吗？",\n"电钻怎么充电？"')
+        )
+
+        self.assertIn("问题1", response.answer)
+        self.assertEqual(len(response.retrieval_debug["sub_results"]), 2)
+        self.assertEqual(
+            response.retrieval_debug["sub_results"][0]["retrieval_debug"]["route_decision"]["route"],
+            "customer_service",
+        )
+        self.assertEqual(
+            response.retrieval_debug["sub_results"][1]["retrieval_debug"]["route_decision"]["route"],
+            "manual_rag",
+        )
+        self.assertEqual(len(self.agent.queries), 1)
+        self.assertIn("电钻怎么充电？", self.agent.queries[0])
 
     def test_follow_up_inherits_product_context(self) -> None:
         session_id = "s_drill"
@@ -194,6 +237,37 @@ class ImageUnderstandingTests(unittest.TestCase):
 
         self.assertTrue(result.has_image_input)
         self.assertEqual(result.observations[0].mime_type, "image/png")
+
+    def test_image_understander_filters_noisy_hint_terms(self) -> None:
+        understander = ImageUnderstander(base_url="http://dummy", http_client=None, vision_model="")
+        result = understander._build_retrieval_hint(  # type: ignore[attr-defined]
+            question="这个指示灯是什么意思？",
+            observations=[
+                ImageObservation(
+                    image_index=1,
+                    format="PNG",
+                    mime_type="image/png",
+                    file_size=68,
+                    visual_summary="该图像显示了一个电子设备，图片里有一个指示灯和一个按钮，红灯闪烁。",
+                )
+            ],
+        )
+        self.assertIn("红灯", result)
+        self.assertIn("按钮", result)
+        self.assertNotIn("图片", result)
+        self.assertNotIn("设备", result)
+
+
+class ResponseFormatterTests(unittest.TestCase):
+    def test_format_manual_answer_injects_image_section(self) -> None:
+        answer = format_manual_answer("请先连接充电器，再观察指示灯状态。", image_ids=["drill0_17"])
+        self.assertIn("结论：", answer)
+        self.assertIn("相关图片：", answer)
+        self.assertIn("drill0_17", answer)
+
+    def test_format_customer_service_answer_is_plain_text(self) -> None:
+        answer = format_customer_service_answer("  这类问题更适合按通用客服流程处理。  ")
+        self.assertEqual(answer, "这类问题更适合按通用客服流程处理。")
 
 
 if __name__ == "__main__":

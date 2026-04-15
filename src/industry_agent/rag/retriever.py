@@ -9,6 +9,7 @@ with the current AgentService.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -85,6 +86,7 @@ _TOKEN_RE = re.compile(
     r"|[0-9]+(?:\.[0-9]+)*",
 )
 _MODEL_RE = re.compile(r"[A-Za-z]{2,}\d+[A-Za-z0-9._-]*")
+_FTS_UNSAFE_RE = re.compile(r'["\'():*]+')
 
 
 @dataclass(frozen=True)
@@ -194,7 +196,13 @@ class SQLiteRetriever:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
-            candidate_rows = self._candidate_search(
+            like_candidates = self._candidate_search(
+                conn,
+                keywords=keywords,
+                products=analysis.products,
+                limit=fetch_limit,
+            )
+            fts_candidates = self._fts_candidate_search(
                 conn,
                 keywords=keywords,
                 products=analysis.products,
@@ -203,6 +211,7 @@ class SQLiteRetriever:
         finally:
             conn.close()
 
+        candidate_rows = self._merge_candidate_rows(like_candidates, fts_candidates)
         scored = [
             self._score_row(dict(row), analysis)
             for row in candidate_rows
@@ -256,6 +265,75 @@ class SQLiteRetriever:
             LIMIT ?
         """
         return conn.execute(sql, [*product_params, *params, limit]).fetchall()
+
+    def _fts_candidate_search(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        keywords: list[str],
+        products: list[str],
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        """Fetch FTS5 candidates when the virtual table is available."""
+
+        usable_terms = [
+            _sanitize_fts_term(term)
+            for term in _unique([*products, *keywords])
+            if _sanitize_fts_term(term)
+        ]
+        if not usable_terms:
+            return []
+
+        match_terms = usable_terms[:10]
+        match_query = " OR ".join(f'"{term}"' for term in match_terms)
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                  chunks.*,
+                  bm25(chunks_fts) AS fts_rank,
+                  1 AS fts_hit
+                FROM chunks_fts
+                JOIN chunks ON chunks.chunk_id = chunks_fts.chunk_id
+                WHERE chunks_fts MATCH ?
+                LIMIT ?
+                """,
+                (match_query, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+
+        if not products:
+            return rows
+        return [
+            row
+            for row in rows
+            if str(row["product_name"]) in products
+        ]
+
+    def _merge_candidate_rows(
+        self,
+        like_rows: list[sqlite3.Row],
+        fts_rows: list[sqlite3.Row],
+    ) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        for row in like_rows:
+            record = dict(row)
+            record.setdefault("fts_rank", None)
+            record.setdefault("fts_hit", 0)
+            merged[str(record["chunk_id"])] = record
+
+        for row in fts_rows:
+            record = dict(row)
+            chunk_id = str(record["chunk_id"])
+            existing = merged.get(chunk_id)
+            if existing is None:
+                merged[chunk_id] = record
+                continue
+            existing["fts_hit"] = max(int(existing.get("fts_hit", 0)), int(record.get("fts_hit", 0)))
+            if record.get("fts_rank") is not None:
+                existing["fts_rank"] = record.get("fts_rank")
+        return list(merged.values())
 
     def _score_row(self, row: dict[str, Any], analysis: QueryAnalysis) -> dict[str, Any]:
         title = str(row.get("title", ""))
@@ -322,6 +400,11 @@ class SQLiteRetriever:
         if image_ids and any(term in analysis.keywords for term in ("指示灯", "表带", "尺寸", "安装", "更换")):
             score += 1.2
 
+        if int(row.get("fts_hit", 0)):
+            score += 5.0
+            rank_bonus = _fts_rank_bonus(row.get("fts_rank"))
+            score += rank_bonus
+
         if title_hits >= 2:
             score += 3.0
         if title_hits + text_hits >= 4:
@@ -334,6 +417,8 @@ class SQLiteRetriever:
         row["_title_hits"] = title_hits
         row["_text_hits"] = text_hits
         row["_product_match"] = product_match
+        row["_fts_rank"] = row.get("fts_rank")
+        row["_fts_hit"] = int(row.get("fts_hit", 0))
         return row
 
 
@@ -351,6 +436,21 @@ def _parse_json_list(value: Any) -> list[str]:
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", "", text.lower())
+
+
+def _sanitize_fts_term(term: str) -> str:
+    cleaned = _FTS_UNSAFE_RE.sub(" ", str(term)).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned if len(cleaned) >= 2 else ""
+
+
+def _fts_rank_bonus(value: Any) -> float:
+    try:
+        rank = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    rank = abs(rank)
+    return max(0.0, 4.0 - min(4.0, math.log1p(rank + 1e-6)))
 
 
 def _unique(values: Any) -> list[str]:

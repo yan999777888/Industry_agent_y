@@ -1,0 +1,22 @@
+[
+  {
+    "id": "manual_basic",
+    "question": "电钻的电池怎么充电？",
+    "expect_contains": ["结论", "操作/说明", "注意事项"]
+  },
+  {
+    "id": "smalltalk",
+    "question": "你好",
+    "expect_contains": ["工业产品客服智能体"]
+  },
+  {
+    "id": "customer_service",
+    "question": "我想退款，退款多久能到账？",
+    "expect_contains": ["订单号"]
+  },
+  {
+    "id": "multi_question",
+    "question": "\"请问支持退款吗？\",\n\"电钻怎么充电？\"",
+    "expect_contains": ["问题1", "问题2"]
+  }
+]
