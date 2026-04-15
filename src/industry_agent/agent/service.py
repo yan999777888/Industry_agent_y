@@ -33,6 +33,7 @@ MIN_KEEP_SCORE = 8.0        # chunks below this score are discarded
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:2b")
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava-phi3")
 
 SYSTEM_TEMPLATE = """\
 你是一个专业的工业产品客服智能体。请严格遵守以下规则：
@@ -355,6 +356,7 @@ class AgentService:
         self.image_understander = ImageUnderstander(
             base_url=self.base_url,
             http_client=self.http_client,
+            vision_model=OLLAMA_VISION_MODEL,
         )
         self.image_index = _load_image_index()
 
@@ -625,6 +627,7 @@ class AgentService:
             self.image_understander = ImageUnderstander(
                 base_url=self.base_url,
                 http_client=getattr(self, "http_client", None),
+                vision_model=OLLAMA_VISION_MODEL,
             )
 
     def _analyze_uploaded_images(self, request: ChatRequest) -> ImageUnderstandingResult:

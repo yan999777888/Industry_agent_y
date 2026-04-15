@@ -44,18 +44,22 @@ curl http://localhost:11434/api/tags
 ```bash
 export OLLAMA_BASE_URL=http://localhost:11434
 export OLLAMA_MODEL=qwen3.5:2b
+export OLLAMA_VISION_MODEL=llava-phi3
 ```
 
 如果你希望真正启用“上传图片理解”，建议额外准备一个支持视觉输入的 Ollama 模型，并设置：
 
 ```bash
-export OLLAMA_VISION_MODEL=llava:7b
+export OLLAMA_VISION_MODEL=moondream
 ```
 
 说明：
 
 - 不设置 `OLLAMA_VISION_MODEL` 时，系统仍然可以接收 `images` 字段，但只会解析图片格式、尺寸、大小等元数据，不会做视觉内容描述。
 - 设置 `OLLAMA_VISION_MODEL` 后，系统会尝试调用该视觉模型，生成简短图片描述，并把描述注入检索链路。
+- 当前代码中的默认组合为：
+  - 文本模型：`qwen3.5:2b`
+  - 视觉模型：`llava-phi3`
 
 ---
 
