@@ -436,6 +436,27 @@ class CustomerServicePolicyTests(unittest.TestCase):
         self.assertIn("收费", response.answer)
         self.assertIn("installation_service", response.matched_topics)
 
+    def test_policy_answers_eligibility_intent_with_conditions(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("刚买完就降价了，申请价保需要满足什么条件？")
+
+        self.assertIn("取决于", response.answer)
+        self.assertIn("price_protection", response.matched_topics)
+
+    def test_policy_answers_process_intent_with_steps(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("支付失败但是扣款了，应该怎么申请核查？")
+
+        self.assertIn("建议", response.answer)
+        self.assertIn("payment_issue", response.matched_topics)
+
+    def test_policy_answers_contact_intent_with_contact_hint(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("发票抬头填错了，这种情况应该联系谁处理？")
+
+        self.assertIn("人工客服", response.answer)
+        self.assertIn("invoice", response.matched_topics)
+
 
 class RetrievalFusionTests(unittest.TestCase):
     def test_merge_retrieval_candidates_prefers_multi_variant_hits(self) -> None:

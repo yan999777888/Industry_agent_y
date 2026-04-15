@@ -18,7 +18,7 @@ from scripts.run_regression_suite import build_payload, check_case, load_cases
 class RegressionSuiteTests(unittest.TestCase):
     def test_load_cases_returns_list(self) -> None:
         cases = load_cases(PROJECT_ROOT / "tests" / "fixtures" / "regression_cases.json")
-        self.assertGreaterEqual(len(cases), 18)
+        self.assertGreaterEqual(len(cases), 24)
 
     def test_build_payload_supports_image_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

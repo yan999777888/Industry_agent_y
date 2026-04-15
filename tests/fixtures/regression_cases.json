@@ -132,6 +132,27 @@
     "max_image_ids": 0
   },
   {
+    "id": "customer_service_price_protection_eligibility",
+    "question": "刚买完就降价了，申请价保需要满足什么条件？",
+    "expect_contains": ["价保"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_payment_process",
+    "question": "支付失败但是扣款了，应该怎么申请核查？",
+    "expect_contains": ["支付方式"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_invoice_contact",
+    "question": "发票抬头填错了，这种情况应该联系谁处理？",
+    "expect_contains": ["人工客服"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
     "id": "session_context_reset",
     "session_id": "reg_reset_session",
     "question": "清空上下文",
