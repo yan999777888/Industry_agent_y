@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from industry_agent.rag.retriever import SQLiteRetriever, analyze_query, extract_keywords
+
+
+class RetrieverAnalysisTests(unittest.TestCase):
+    def test_analyze_query_extracts_models_products_and_phrases(self) -> None:
+        analysis = analyze_query("我的DCB107或DCB112型号电钻指示灯闪烁时，这些闪烁标识代表什么含义？")
+        self.assertIn("电钻", analysis.products)
+        self.assertIn("DCB107", analysis.models)
+        self.assertIn("DCB112", analysis.models)
+        self.assertIn("指示灯", analysis.keywords)
+        self.assertIn("闪烁", analysis.keywords)
+        self.assertIn("标识", analysis.keywords)
+
+    def test_analyze_query_expands_synonyms(self) -> None:
+        analysis = analyze_query("腕带有别的大小吗，红灯闪了怎么办？")
+        self.assertIn("表带", analysis.keywords)
+        self.assertIn("尺寸", analysis.keywords)
+        self.assertIn("指示灯", analysis.keywords)
+        self.assertIn("健身追踪器", analysis.products)
+
+    def test_analyze_query_supports_pin_reset_synonyms(self) -> None:
+        analysis = analyze_query("健身追踪器 pin码 忘了怎么重置？")
+        self.assertIn("密码", analysis.keywords)
+        self.assertIn("设备锁", analysis.keywords)
+
+    def test_extract_keywords_for_long_question_reduces_noise(self) -> None:
+        keywords = extract_keywords("这台设备充满电以后红灯还在闪，是过热还是故障？")
+        self.assertIn("充电", keywords)
+        self.assertIn("红灯", keywords)
+        self.assertIn("故障", keywords)
+        self.assertNotIn("这台", keywords)
+
+
+class RetrieverScoringTests(unittest.TestCase):
+    def test_score_row_prefers_matching_title_intent(self) -> None:
+        retriever = SQLiteRetriever()
+        analysis = analyze_query("电钻充电时有什么注意事项？")
+        strong = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "a",
+                "title": "电池充电注意事项",
+                "text": "充电前请确认电池组和充电器状态。",
+                "product_name": "电钻",
+                "image_ids": "[]",
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+        weak = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "b",
+                "title": "保养说明",
+                "text": "请定期清洁设备外壳。",
+                "product_name": "电钻",
+                "image_ids": "[]",
+                "fts_hit": 0,
+                "fts_rank": None,
+            },
+            analysis,
+        )
+        self.assertGreater(strong["_score"], weak["_score"])
+
+    def test_score_row_penalizes_expansion_only_generic_titles(self) -> None:
+        retriever = SQLiteRetriever()
+        analysis = analyze_query("可编程温控器密码忘了怎么重置？")
+        generic = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "generic",
+                "title": "设置时间",
+                "text": "按菜单键进入设备菜单。",
+                "product_name": "可编程温控器",
+                "image_ids": "[]",
+                "fts_hit": 1,
+                "fts_rank": -0.1,
+            },
+            analysis,
+        )
+        focused = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "focused",
+                "title": "设备锁和 PIN 码重置",
+                "text": "可以在设备锁设置中重置 PIN 码。",
+                "product_name": "可编程温控器",
+                "image_ids": "[]",
+                "fts_hit": 1,
+                "fts_rank": -0.1,
+            },
+            analysis,
+        )
+        self.assertGreater(focused["_score"], generic["_score"])
+
+
+if __name__ == "__main__":
+    unittest.main()

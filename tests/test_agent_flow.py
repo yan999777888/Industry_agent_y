@@ -11,7 +11,12 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from industry_agent.agent.question_splitter import split_complex_question
-from industry_agent.agent.service import AgentService, ChatRequest
+from industry_agent.agent.service import (
+    AgentService,
+    ChatRequest,
+    _filter_evidence_for_query,
+    _merge_retrieval_candidates,
+)
 from industry_agent.agent.context_manager import ContextManager
 from industry_agent.agent.customer_service_policy import CustomerServicePolicy
 from industry_agent.agent.image_understanding import ImageObservation, ImageUnderstandingResult, ImageUnderstander
@@ -47,6 +52,13 @@ class StubImageUnderstander:
             ],
             combined_summary="上传图片1：格式 PNG（image/png），尺寸 1x1，大小 68B。视觉描述：图片里是设备指示灯区域，红灯闪烁",
             retrieval_hint="指示灯 红灯 闪烁",
+            retrieval_terms=["指示灯", "红灯", "闪烁"],
+            visual_features={
+                "component_terms": ["指示灯"],
+                "status_terms": ["红灯", "闪烁"],
+                "issue_terms": [],
+                "other_terms": [],
+            },
             used_vision_model="stub-vision",
         )
 
@@ -66,7 +78,7 @@ class DummyAgentService(AgentService):
         self.image_understander = ImageUnderstander(base_url=self.base_url, http_client=None, vision_model="")
         self.queries: list[str] = []
 
-    def generate_response(self, query: str, history=None, image_input=None, dialog_summary=None, image_context=None):  # type: ignore[override]
+    def generate_response(self, query: str, history=None, image_input=None, dialog_summary=None, image_context=None, image_terms=None, image_features=None):  # type: ignore[override]
         self.queries.append(query)
         image_id = "img_b" if "运费" in query else "img_a" if "退换货" in query else "img_c"
         return {
@@ -76,7 +88,11 @@ class DummyAgentService(AgentService):
             "sources": ["测试产品"],
             "references": [{"chunk_id": "chunk_1", "title": "测试标题", "text_snippet": query[:50], "product_name": "测试产品", "score": "99"}],
             "confidence": 0.8,
-            "retrieval_debug": {"query": query},
+            "retrieval_debug": {
+                "query": query,
+                "image_terms": image_terms or [],
+                "image_features": image_features or {},
+            },
         }
 
     def _call_llm(self, messages):  # type: ignore[override]
@@ -210,8 +226,15 @@ class AgentFlowTests(unittest.TestCase):
         )
 
         self.assertIn("指示灯", self.agent.queries[-1])
-        self.assertIn("红灯", self.agent.queries[-1])
         self.assertTrue(response.retrieval_debug["session"]["image_understanding"]["has_image_input"])
+        self.assertEqual(
+            response.retrieval_debug["sub_results"][0]["retrieval_debug"]["image_terms"],
+            ["指示灯", "红灯", "闪烁"],
+        )
+        self.assertEqual(
+            response.retrieval_debug["sub_results"][0]["retrieval_debug"]["image_features"]["component_terms"],
+            ["指示灯"],
+        )
         self.assertEqual(
             response.retrieval_debug["session"]["image_understanding"]["used_vision_model"],
             "stub-vision",
@@ -230,6 +253,7 @@ class ImageUnderstandingTests(unittest.TestCase):
         self.assertEqual(result.observations[0].height, 1)
         self.assertIn("上传图片1", result.combined_summary)
         self.assertEqual(result.retrieval_hint, "")
+        self.assertEqual(result.retrieval_terms, [])
 
     def test_image_understander_accepts_data_url(self) -> None:
         understander = ImageUnderstander(base_url="http://dummy", http_client=None, vision_model="")
@@ -257,6 +281,24 @@ class ImageUnderstandingTests(unittest.TestCase):
         self.assertNotIn("图片", result)
         self.assertNotIn("设备", result)
 
+    def test_image_understander_exposes_structured_retrieval_terms(self) -> None:
+        understander = ImageUnderstander(base_url="http://dummy", http_client=None, vision_model="")
+        features = understander._extract_visual_features(  # type: ignore[attr-defined]
+            question="这个按钮怎么用？",
+            observations=[
+                ImageObservation(
+                    image_index=1,
+                    format="PNG",
+                    mime_type="image/png",
+                    file_size=68,
+                    visual_summary="图片里有一个按钮、一个红灯指示灯和充电接口。",
+                )
+            ],
+        )
+        self.assertIn("指示灯", features["component_terms"])
+        self.assertIn("红灯", features["status_terms"])
+        self.assertIn("充电", features["status_terms"])
+
 
 class ResponseFormatterTests(unittest.TestCase):
     def test_format_manual_answer_injects_image_section(self) -> None:
@@ -268,6 +310,118 @@ class ResponseFormatterTests(unittest.TestCase):
     def test_format_customer_service_answer_is_plain_text(self) -> None:
         answer = format_customer_service_answer("  这类问题更适合按通用客服流程处理。  ")
         self.assertEqual(answer, "这类问题更适合按通用客服流程处理。")
+
+    def test_format_manual_answer_splits_plain_text_into_distinct_sections(self) -> None:
+        answer = format_manual_answer(
+            "先连接充电器。观察红灯是否闪烁。请勿在潮湿环境中操作。",
+            image_ids=[],
+        )
+        self.assertIn("结论：\n- 先连接充电器。", answer)
+        self.assertIn("操作/说明：\n- 观察红灯是否闪烁。", answer)
+        self.assertIn("注意事项：\n- 请勿在潮湿环境中操作。", answer)
+
+    def test_format_manual_answer_normalizes_section_labels(self) -> None:
+        answer = format_manual_answer(
+            "结论：可正常充电\n操作：先插电源，再连接设备\n注意：请勿遮挡散热孔",
+            image_ids=["img_1"],
+        )
+        self.assertIn("操作/说明：", answer)
+        self.assertIn("注意事项：", answer)
+        self.assertIn("相关图片：\n- img_1", answer)
+
+
+class RetrievalFusionTests(unittest.TestCase):
+    def test_merge_retrieval_candidates_prefers_multi_variant_hits(self) -> None:
+        rows = _merge_retrieval_candidates(
+            [
+                (
+                    "text_only",
+                    [
+                        {"chunk_id": "a", "title": "普通章节", "text": "普通说明", "product_name": "电钻", "image_ids": "[]", "_score": 20.0},
+                        {"chunk_id": "b", "title": "按钮说明", "text": "按钮位置", "product_name": "电钻", "image_ids": "[]", "_score": 19.0},
+                    ],
+                ),
+                (
+                    "multimodal_fused",
+                    [
+                        {"chunk_id": "b", "title": "按钮说明", "text": "按钮位置", "product_name": "电钻", "image_ids": "[]", "_score": 19.0},
+                    ],
+                ),
+            ]
+        )
+        self.assertEqual(rows[0]["chunk_id"], "b")
+        self.assertEqual(rows[0]["_variant_hits"], 2)
+
+    def test_filter_evidence_for_query_uses_image_overlap_and_diversity(self) -> None:
+        filtered = _filter_evidence_for_query(
+            [
+                {
+                    "chunk_id": "a",
+                    "title": "设置时间",
+                    "text": "按菜单键进入设置界面。",
+                    "product_name": "可编程温控器",
+                    "image_ids": "[]",
+                    "_score": 18.0,
+                    "_variant_hits": 1,
+                },
+                {
+                    "chunk_id": "b",
+                    "title": "充电指示灯说明",
+                    "text": "红灯闪烁表示正在充电。",
+                    "product_name": "可编程温控器",
+                    "image_ids": "[\"img_1\"]",
+                    "_score": 17.5,
+                    "_variant_hits": 2,
+                },
+                {
+                    "chunk_id": "c",
+                    "title": "充电指示灯说明",
+                    "text": "另一段重复标题内容。",
+                    "product_name": "可编程温控器",
+                    "image_ids": "[\"img_2\"]",
+                    "_score": 17.0,
+                    "_variant_hits": 1,
+                },
+            ],
+            query="这个指示灯是什么意思？",
+            image_terms=["指示灯", "红灯", "闪烁"],
+        )
+        self.assertEqual(filtered[0]["chunk_id"], "b")
+        self.assertEqual(len(filtered), 2)
+        self.assertNotEqual(filtered[0]["title"], filtered[1]["title"])
+
+    def test_filter_evidence_for_query_prefers_component_status_alignment(self) -> None:
+        filtered = _filter_evidence_for_query(
+            [
+                {
+                    "chunk_id": "a",
+                    "title": "指示灯状态说明",
+                    "text": "红灯闪烁表示正在充电。",
+                    "product_name": "电钻",
+                    "image_ids": "[\"img_1\"]",
+                    "_score": 16.0,
+                    "_variant_hits": 1,
+                },
+                {
+                    "chunk_id": "b",
+                    "title": "电池安装步骤",
+                    "text": "安装电池时请卡紧卡扣。",
+                    "product_name": "电钻",
+                    "image_ids": "[\"img_2\"]",
+                    "_score": 17.2,
+                    "_variant_hits": 1,
+                },
+            ],
+            query="这个指示灯是什么意思？",
+            image_terms=["指示灯", "红灯", "闪烁"],
+            image_features={
+                "component_terms": ["指示灯"],
+                "status_terms": ["红灯", "闪烁"],
+                "issue_terms": [],
+                "other_terms": [],
+            },
+        )
+        self.assertEqual(filtered[0]["chunk_id"], "a")
 
 
 if __name__ == "__main__":

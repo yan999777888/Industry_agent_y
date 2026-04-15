@@ -39,6 +39,18 @@ _VISUAL_DOMAIN_HINTS: tuple[str, ...] = (
     "指示灯", "按钮", "接口", "屏幕", "电池", "充电", "开关", "表带", "卡扣",
     "旋钮", "插槽", "线缆", "红灯", "蓝灯", "闪烁", "裂纹", "破损", "划痕",
 )
+_VISUAL_COMPONENT_TERMS: tuple[str, ...] = (
+    "指示灯", "按钮", "接口", "屏幕", "电池", "充电器", "电池组", "开关",
+    "表带", "卡扣", "旋钮", "插槽", "线缆", "显示屏", "端口", "插头",
+)
+_VISUAL_STATUS_TERMS: tuple[str, ...] = (
+    "红灯", "蓝灯", "绿灯", "闪烁", "发亮", "熄灭", "松动", "脱落", "安装",
+    "拆卸", "充电", "断开", "连接", "锁定", "卡住",
+)
+_VISUAL_ISSUE_TERMS: tuple[str, ...] = (
+    "裂纹", "破损", "划痕", "烧焦", "变形", "故障", "报警", "漏水", "异响",
+    "发热", "过热", "污渍",
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +73,8 @@ class ImageUnderstandingResult:
     observations: list[ImageObservation] = field(default_factory=list)
     combined_summary: str = ""
     retrieval_hint: str = ""
+    retrieval_terms: list[str] = field(default_factory=list)
+    visual_features: dict[str, list[str]] = field(default_factory=dict)
     used_vision_model: str = ""
     warnings: list[str] = field(default_factory=list)
 
@@ -69,6 +83,8 @@ class ImageUnderstandingResult:
             "has_image_input": self.has_image_input,
             "combined_summary": self.combined_summary,
             "retrieval_hint": self.retrieval_hint,
+            "retrieval_terms": self.retrieval_terms,
+            "visual_features": self.visual_features,
             "used_vision_model": self.used_vision_model,
             "warnings": self.warnings,
             "observations": [asdict(item) for item in self.observations],
@@ -161,12 +177,16 @@ class ImageUnderstander:
         combined_summary = "；".join(
             _build_combined_summary_text(item) for item in observations if item.summary or item.visual_summary
         )
-        retrieval_hint = self._build_retrieval_hint(question=question, observations=observations)
+        visual_features = self._extract_visual_features(question=question, observations=observations)
+        retrieval_terms = self._build_retrieval_terms(visual_features=visual_features)
+        retrieval_hint = " ".join(retrieval_terms)
         return ImageUnderstandingResult(
             has_image_input=True,
             observations=observations,
             combined_summary=combined_summary,
             retrieval_hint=retrieval_hint,
+            retrieval_terms=retrieval_terms,
+            visual_features=visual_features,
             used_vision_model=used_vision_model,
             warnings=warnings,
         )
@@ -203,14 +223,19 @@ class ImageUnderstander:
         content = re.sub(r"；+", "；", content)
         return content[:200]
 
-    def _build_retrieval_hint(self, *, question: str, observations: list[ImageObservation]) -> str:
+    def _extract_visual_features(self, *, question: str, observations: list[ImageObservation]) -> dict[str, list[str]]:
         visual_text = " ".join(
             item.visual_summary
             for item in observations
             if item.visual_summary
         )
         if not visual_text:
-            return ""
+            return {
+                "component_terms": [],
+                "status_terms": [],
+                "issue_terms": [],
+                "other_terms": [],
+            }
         cleaned_visual_text = _clean_visual_summary(visual_text)
         domain_terms = [term for term in _VISUAL_DOMAIN_HINTS if term in cleaned_visual_text]
         keywords = extract_keywords(cleaned_visual_text)
@@ -219,7 +244,34 @@ class ImageUnderstander:
             for keyword in _unique([*domain_terms, *keywords])
             if _is_useful_visual_keyword(keyword, question=question)
         ]
-        return " ".join(filtered_keywords[:8])
+        component_terms = [term for term in filtered_keywords if term in _VISUAL_COMPONENT_TERMS]
+        status_terms = [term for term in filtered_keywords if term in _VISUAL_STATUS_TERMS]
+        issue_terms = [term for term in filtered_keywords if term in _VISUAL_ISSUE_TERMS]
+        other_terms = [
+            term
+            for term in filtered_keywords
+            if term not in component_terms and term not in status_terms and term not in issue_terms
+        ]
+        return {
+            "component_terms": component_terms[:4],
+            "status_terms": status_terms[:4],
+            "issue_terms": issue_terms[:4],
+            "other_terms": other_terms[:4],
+        }
+
+    def _build_retrieval_terms(self, *, visual_features: dict[str, list[str]]) -> list[str]:
+        return _unique(
+            [
+                *visual_features.get("component_terms", []),
+                *visual_features.get("status_terms", []),
+                *visual_features.get("issue_terms", []),
+                *visual_features.get("other_terms", []),
+            ]
+        )[:8]
+
+    def _build_retrieval_hint(self, *, question: str, observations: list[ImageObservation]) -> str:
+        visual_features = self._extract_visual_features(question=question, observations=observations)
+        return " ".join(self._build_retrieval_terms(visual_features=visual_features))
 
 
 def _decode_base64_image(value: str) -> tuple[bytes, str] | None:

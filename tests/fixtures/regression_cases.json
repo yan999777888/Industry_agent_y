@@ -2,21 +2,88 @@
   {
     "id": "manual_basic",
     "question": "电钻的电池怎么充电？",
-    "expect_contains": ["结论", "操作/说明", "注意事项"]
+    "expect_contains": ["结论", "操作/说明", "注意事项"],
+    "min_image_ids": 0
   },
   {
     "id": "smalltalk",
     "question": "你好",
-    "expect_contains": ["工业产品客服智能体"]
+    "expect_contains": ["工业产品客服智能体"],
+    "max_image_ids": 0
   },
   {
     "id": "customer_service",
     "question": "我想退款，退款多久能到账？",
-    "expect_contains": ["订单号"]
+    "expect_contains": ["订单号"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
   },
   {
-    "id": "multi_question",
+    "id": "multi_question_mixed",
     "question": "\"请问支持退款吗？\",\n\"电钻怎么充电？\"",
-    "expect_contains": ["问题1", "问题2"]
+    "expect_contains": ["问题1", "问题2"],
+    "expect_sources_contains": ["customer_service_policy"]
+  },
+  {
+    "id": "followup_turn1",
+    "session_id": "reg_tracker_session",
+    "question": "我想更换健身追踪器的表带",
+    "expect_contains": ["结论", "相关图片"]
+  },
+  {
+    "id": "followup_turn2",
+    "session_id": "reg_tracker_session",
+    "question": "这个还有其他尺寸吗？",
+    "expect_contains": ["结论", "相关图片"]
+  },
+  {
+    "id": "image_question",
+    "question": "请结合图片判断这个部件或指示灯相关的使用注意事项是什么？",
+    "image_paths": ["Knowledge_base/插图/drill0_17.png"],
+    "expect_contains": ["结论", "注意事项"],
+    "min_image_ids": 1
+  },
+  {
+    "id": "complex_split_manual",
+    "question": "\"电钻怎么充电？\",\n\"充电时有什么注意事项？\"",
+    "expect_contains": ["问题1", "问题2", "相关图片"]
+  },
+  {
+    "id": "fallback_reject",
+    "question": "请问这台设备能不能直接连接火星基地网络？",
+    "expect_contains": ["根据现有资料无法准确回答此问题"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "invalid_base64_image",
+    "question": "这个指示灯是什么意思？",
+    "images": ["not_a_valid_base64_payload"],
+    "expect_contains": ["结论", "注意事项"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "followup_without_context",
+    "question": "这个还有其他尺寸吗？",
+    "expect_contains": ["根据现有资料无法准确回答此问题"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "smalltalk_with_punctuation",
+    "question": "hello!!!",
+    "expect_contains": ["工业产品客服智能体"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "customer_service_with_product_name",
+    "question": "电钻坏了，可以保修吗？",
+    "expect_contains": ["订单号"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "max_image_ids": 0
+  },
+  {
+    "id": "empty_question_bad_request",
+    "question": "   ",
+    "expect_http_status": 400,
+    "expect_error_contains": ["question must not be empty"]
   }
 ]

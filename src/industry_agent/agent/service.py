@@ -16,7 +16,7 @@ from industry_agent.agent.question_router import QuestionRouter, RouteDecision
 from industry_agent.agent.response_formatter import format_customer_service_answer, format_manual_answer
 from industry_agent.agent.session_store import InMemorySessionStore, SessionState
 from industry_agent.config import settings
-from industry_agent.rag.retriever import SQLiteRetriever
+from industry_agent.rag.retriever import SQLiteRetriever, analyze_query
 
 try:
     import httpx
@@ -33,6 +33,7 @@ MAX_CONTEXT_CHARS = 4000    # truncate context to fit model window
 MAX_HISTORY_TURNS = 5       # keep last N turns per session
 MIN_TOP_SCORE = 10.0        # below this, do not ask LLM to hallucinate
 MIN_KEEP_SCORE = 8.0        # chunks below this score are discarded
+MULTIMODAL_RETRIEVAL_LIMIT = 6
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:2b")
@@ -180,6 +181,144 @@ def _filter_evidence(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         if top_product and chunk.get("product_name") != top_product:
             continue
+        filtered.append(chunk)
+        if len(filtered) >= FINAL_CONTEXT_CHUNKS:
+            break
+    return filtered
+
+
+def _text_overlap_count(text: str, terms: list[str]) -> int:
+    normalized = re.sub(r"\s+", "", str(text).lower())
+    count = 0
+    for term in terms:
+        token = re.sub(r"\s+", "", str(term).lower())
+        if len(token) < 2:
+            continue
+        if token in normalized:
+            count += 1
+    return count
+
+
+def _title_key(title: str) -> str:
+    return re.sub(r"\s+", "", str(title).strip().lower())
+
+
+def _rank_evidence_chunks(
+    chunks: list[dict[str, Any]],
+    *,
+    query: str,
+    image_terms: list[str] | None = None,
+    image_features: dict[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    if not chunks:
+        return []
+
+    analysis = analyze_query(query) if query.strip() else None
+    image_terms = [term for term in (image_terms or []) if len(str(term).strip()) >= 2]
+    image_features = image_features or {}
+    component_terms = [term for term in image_features.get("component_terms", []) if len(str(term).strip()) >= 2]
+    status_terms = [term for term in image_features.get("status_terms", []) if len(str(term).strip()) >= 2]
+    issue_terms = [term for term in image_features.get("issue_terms", []) if len(str(term).strip()) >= 2]
+    ranked: list[dict[str, Any]] = []
+    for chunk in chunks:
+        row = dict(chunk)
+        base_score = float(row.get("_score", 0.0))
+        title = str(row.get("title", ""))
+        text = str(row.get("text", ""))
+        image_ids = _parse_json_list(row.get("image_ids"))
+
+        query_terms = []
+        if analysis is not None:
+            query_terms = [
+                *analysis.products,
+                *analysis.models,
+                *analysis.phrases[:4],
+                *analysis.expanded_keywords[:4],
+                *analysis.keywords[:8],
+            ]
+
+        query_overlap = _text_overlap_count(f"{title}\n{text}", _unique(query_terms))
+        image_overlap = _text_overlap_count(f"{title}\n{text}", image_terms)
+        title_component_overlap = _text_overlap_count(title, component_terms)
+        text_component_overlap = _text_overlap_count(text, component_terms)
+        title_status_overlap = _text_overlap_count(title, status_terms)
+        text_status_overlap = _text_overlap_count(text, status_terms)
+        issue_overlap = _text_overlap_count(f"{title}\n{text}", issue_terms)
+
+        evidence_score = base_score
+        evidence_score += min(query_overlap * 1.1, 5.0)
+        evidence_score += min(image_overlap * 1.8, 5.4)
+        evidence_score += min(title_component_overlap * 1.8 + text_component_overlap * 0.9, 4.8)
+        evidence_score += min(title_status_overlap * 1.2 + text_status_overlap * 1.5, 4.6)
+        evidence_score += min(issue_overlap * 1.6, 3.2)
+        if image_ids and image_overlap > 0:
+            evidence_score += 1.0
+        if (title_component_overlap + text_component_overlap) > 0 and (title_status_overlap + text_status_overlap) > 0:
+            evidence_score += 2.0
+        if issue_overlap > 0 and image_ids:
+            evidence_score += 0.8
+        if int(row.get("_variant_hits", 0)) >= 2:
+            evidence_score += 1.5
+        if image_overlap == 0 and image_terms and query_overlap <= 1 and not image_ids:
+            evidence_score -= 1.2
+
+        row["_evidence_score"] = round(evidence_score, 3)
+        row["_query_overlap"] = query_overlap
+        row["_image_overlap"] = image_overlap
+        row["_image_component_overlap"] = title_component_overlap + text_component_overlap
+        row["_image_status_overlap"] = title_status_overlap + text_status_overlap
+        row["_image_issue_overlap"] = issue_overlap
+        ranked.append(row)
+
+    ranked.sort(
+        key=lambda item: (
+            float(item.get("_evidence_score", 0.0)),
+            int(item.get("_image_component_overlap", 0)) + int(item.get("_image_status_overlap", 0)),
+            int(item.get("_image_overlap", 0)),
+            int(item.get("_query_overlap", 0)),
+            len(_parse_json_list(item.get("image_ids"))),
+        ),
+        reverse=True,
+    )
+    return ranked
+
+
+def _filter_evidence_for_query(
+    chunks: list[dict[str, Any]],
+    *,
+    query: str,
+    image_terms: list[str] | None = None,
+    image_features: dict[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Keep high-confidence evidence with light multimodal reranking and diversity."""
+    ranked = _rank_evidence_chunks(
+        chunks,
+        query=query,
+        image_terms=image_terms,
+        image_features=image_features,
+    )
+    if not ranked:
+        return []
+
+    top = ranked[0]
+    top_score = float(top.get("_evidence_score", 0.0))
+    if top_score < MIN_TOP_SCORE:
+        return []
+
+    top_product = top.get("product_name", "")
+    filtered: list[dict[str, Any]] = []
+    seen_titles: set[str] = set()
+    for chunk in ranked:
+        score = float(chunk.get("_evidence_score", 0.0))
+        if score < MIN_KEEP_SCORE:
+            continue
+        if top_product and chunk.get("product_name") != top_product:
+            continue
+        title_key = _title_key(str(chunk.get("title", "")))
+        if title_key and title_key in seen_titles:
+            continue
+        if title_key:
+            seen_titles.add(title_key)
         filtered.append(chunk)
         if len(filtered) >= FINAL_CONTEXT_CHUNKS:
             break
@@ -335,6 +474,68 @@ def _merge_images(image_groups: list[list[dict[str, str | bool]]]) -> list[dict[
     return merged
 
 
+def _merge_retrieval_candidates(
+    candidate_groups: list[tuple[str, list[dict[str, Any]]]],
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for variant_name, rows in candidate_groups:
+        for rank, row in enumerate(rows):
+            record = dict(row)
+            chunk_id = str(record.get("chunk_id", ""))
+            if not chunk_id:
+                continue
+            existing = merged.get(chunk_id)
+            variant_bonus = max(0.0, 2.6 - rank * 0.25)
+            if variant_name != "text_only":
+                variant_bonus += 1.0
+            if existing is None:
+                record["_retrieval_variants"] = [variant_name]
+                record["_variant_hits"] = 1
+                record["_fusion_score"] = round(float(record.get("_score", 0.0)) + variant_bonus, 3)
+                merged[chunk_id] = record
+                continue
+
+            existing_variants = list(existing.get("_retrieval_variants", []))
+            if variant_name not in existing_variants:
+                existing_variants.append(variant_name)
+            existing["_retrieval_variants"] = existing_variants
+            existing["_variant_hits"] = len(existing_variants)
+            existing["_fusion_score"] = round(
+                max(float(existing.get("_fusion_score", 0.0)), float(record.get("_score", 0.0)) + variant_bonus)
+                + (1.2 if len(existing_variants) >= 2 else 0.0),
+                3,
+            )
+            if float(record.get("_score", 0.0)) > float(existing.get("_score", 0.0)):
+                for key, value in record.items():
+                    if key.startswith("_"):
+                        continue
+                    existing[key] = value
+                existing["_score"] = record.get("_score", existing.get("_score", 0.0))
+
+    merged_rows = list(merged.values())
+    merged_rows.sort(
+        key=lambda item: (
+            float(item.get("_fusion_score", 0.0)),
+            int(item.get("_variant_hits", 0)),
+            float(item.get("_score", 0.0)),
+            len(_parse_json_list(item.get("image_ids"))),
+        ),
+        reverse=True,
+    )
+    return merged_rows
+
+
+def _build_visual_focus_terms(image_features: dict[str, list[str]] | None) -> list[str]:
+    image_features = image_features or {}
+    return _unique(
+        [
+            *image_features.get("component_terms", []),
+            *image_features.get("status_terms", []),
+            *image_features.get("issue_terms", []),
+        ]
+    )[:MULTIMODAL_RETRIEVAL_LIMIT]
+
+
 # ---------------------------------------------------------------------------
 # Agent service
 # ---------------------------------------------------------------------------
@@ -386,10 +587,35 @@ class AgentService:
         image_input: str | None = None,
         dialog_summary: str | None = None,
         image_context: str | None = None,
+        image_terms: list[str] | None = None,
+        image_features: dict[str, list[str]] | None = None,
     ) -> dict[str, Any]:
         # 1. Retrieve
-        chunks = self.retriever.search(query, limit=RETRIEVAL_LIMIT)
-        evidence_chunks = _filter_evidence(chunks)
+        candidate_groups: list[tuple[str, list[dict[str, Any]]]] = [
+            ("text_only", self.retriever.search(query, limit=RETRIEVAL_LIMIT))
+        ]
+        multimodal_query = query
+        if image_terms:
+            multimodal_query = f"{query} {' '.join(image_terms[:MULTIMODAL_RETRIEVAL_LIMIT])}".strip()
+            if multimodal_query != query:
+                candidate_groups.append(
+                    ("multimodal_fused", self.retriever.search(multimodal_query, limit=RETRIEVAL_LIMIT))
+                )
+        visual_focus_terms = _build_visual_focus_terms(image_features)
+        if visual_focus_terms:
+            visual_focus_query = f"{query} {' '.join(visual_focus_terms)}".strip()
+            if visual_focus_query != query and visual_focus_query != multimodal_query:
+                candidate_groups.append(
+                    ("visual_focus", self.retriever.search(visual_focus_query, limit=RETRIEVAL_LIMIT))
+                )
+
+        chunks = _merge_retrieval_candidates(candidate_groups)
+        evidence_chunks = _filter_evidence_for_query(
+            chunks,
+            query=query,
+            image_terms=image_terms,
+            image_features=image_features,
+        )
 
         if not evidence_chunks:
             return {
@@ -403,6 +629,9 @@ class AgentService:
                     "retrieved_count": len(chunks),
                     "top_score": chunks[0].get("_score", 0) if chunks else 0,
                     "top_title": chunks[0].get("title", "") if chunks else "",
+                    "query_variants": [name for name, _ in candidate_groups],
+                    "image_terms": image_terms or [],
+                    "image_features": image_features or {},
                     "reason": "low_confidence_or_no_evidence",
                 },
             }
@@ -441,8 +670,14 @@ class AgentService:
                 "retrieved_count": len(chunks),
                 "evidence_count": len(evidence_chunks),
                 "top_score": evidence_chunks[0].get("_score", 0) if evidence_chunks else 0,
+                "top_evidence_score": evidence_chunks[0].get("_evidence_score", 0) if evidence_chunks else 0,
                 "top_title": evidence_chunks[0].get("title", "") if evidence_chunks else "",
                 "top_product": evidence_chunks[0].get("product_name", "") if evidence_chunks else "",
+                "query_variants": [name for name, _ in candidate_groups],
+                "image_terms": image_terms or [],
+                "image_features": image_features or {},
+                "candidate_titles": [str(chunk.get("title", "")) for chunk in chunks[:5]],
+                "selected_titles": [str(chunk.get("title", "")) for chunk in evidence_chunks],
             },
         }
 
@@ -542,22 +777,24 @@ class AgentService:
                 )
                 resolved_query = sub_question.normalized_text
             else:
-                resolved_query = self._build_subquestion_query(
+                base_query = self._build_subquestion_query(
                     sub_question=sub_question,
                     original_question=request.question,
                     turn_context=turn_context,
                 )
-                if image_result.retrieval_hint:
-                    resolved_query = f"{resolved_query} {image_result.retrieval_hint}".strip()
+                resolved_query = base_query
                 result = self.generate_response(
-                    query=resolved_query,
+                    query=base_query,
                     history=turn_context.history,
                     image_input=request.images[0] if request.images else None,
                     dialog_summary=turn_context.dialog_summary,
                     image_context=image_result.combined_summary,
+                    image_terms=image_result.retrieval_terms,
+                    image_features=image_result.visual_features,
                 )
             result["retrieval_debug"] = {
                 **result.get("retrieval_debug", {}),
+                "base_query": base_query if route_decision.route != "customer_service" else resolved_query,
                 "resolved_query": resolved_query,
                 "image_understanding": image_result.to_debug_dict(),
                 "route_decision": {

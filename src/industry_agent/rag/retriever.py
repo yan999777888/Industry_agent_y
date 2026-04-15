@@ -37,6 +37,40 @@ _DOMAIN_PHRASES: tuple[str, ...] = (
     "程序", "控制台", "佩戴", "模式", "温度", "延迟", "开机", "关机",
     "按键", "默认密码", "安全注意事项", "注意事项", "售后", "保修",
 )
+_DOMAIN_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "红灯": ("指示灯", "闪烁"),
+    "蓝灯": ("指示灯",),
+    "绿灯": ("指示灯",),
+    "灯闪": ("指示灯", "闪烁"),
+    "腕带": ("表带", "健身追踪器"),
+    "带子": ("表带",),
+    "大小": ("尺寸",),
+    "配对": ("连接",),
+    "连不上": ("连接", "故障"),
+    "连不上网": ("连接", "故障"),
+    "充满电": ("充电", "电池组"),
+    "没电": ("电池", "充电"),
+    "重置": ("设置",),
+    "密码": ("默认密码",),
+    "pin": ("密码", "设备锁"),
+    "pin码": ("密码", "设备锁"),
+    "pin code": ("密码", "设备锁"),
+    "死机": ("故障",),
+    "卡住": ("故障",),
+    "发热": ("温度",),
+    "过热": ("延迟", "温度"),
+    "拆卸": ("更换", "安装"),
+}
+_LONG_TOKEN_SPLIT_RE = re.compile(r"[的了和及与并或后前时再先把将并且然后如果则呢吗啊呀啦]")
+_QUERY_PHRASE_RE = re.compile(r"[\u4e00-\u9fff]{3,}")
+_TITLE_INTENT_BOOSTS: tuple[tuple[tuple[str, ...], tuple[str, ...], float], ...] = (
+    (("安全注意事项", "注意事项", "佩戴"), ("安全", "注意", "警告"), 5.0),
+    (("安装", "更换", "拆卸"), ("安装", "组装", "更换"), 4.5),
+    (("充电", "电池组", "充满电"), ("充电", "电池", "电池组"), 4.5),
+    (("尺寸", "表带", "腕带"), ("尺寸", "表带"), 4.0),
+    (("默认密码", "密码", "重置", "pin"), ("密码", "默认密码", "pin", "设备锁", "重置"), 4.0),
+    (("连接", "配对", "连不上"), ("连接", "接口", "配对"), 4.0),
+)
 
 _PRODUCT_ALIASES: dict[str, str] = {
     "vr头显": "VR头显",
@@ -52,6 +86,7 @@ _PRODUCT_ALIASES: dict[str, str] = {
     "追踪器": "健身追踪器",
     "手表": "健身追踪器",
     "腕表": "健身追踪器",
+    "腕带": "健身追踪器",
     "表带": "健身追踪器",
     "儿童电动摩托车": "儿童电动摩托车",
     "电动摩托车": "儿童电动摩托车",
@@ -95,6 +130,8 @@ class QueryAnalysis:
     keywords: list[str]
     products: list[str]
     models: list[str]
+    phrases: list[str]
+    expanded_keywords: list[str]
 
 
 def analyze_query(query: str) -> QueryAnalysis:
@@ -107,10 +144,13 @@ def analyze_query(query: str) -> QueryAnalysis:
         if alias and alias in normalized
     )
     models = _unique(match.group(0).upper() for match in _MODEL_RE.finditer(query))
+    phrases = extract_query_phrases(query)
     keywords = extract_keywords(query)
     for phrase in _DOMAIN_PHRASES:
         if phrase in query:
             keywords.append(phrase)
+    expanded_keywords = expand_keywords(query, keywords)
+    keywords.extend(expanded_keywords)
     keywords.extend(products)
     keywords.extend(models)
     return QueryAnalysis(
@@ -118,13 +158,16 @@ def analyze_query(query: str) -> QueryAnalysis:
         keywords=_unique(keywords),
         products=products,
         models=models,
+        phrases=_unique(phrases),
+        expanded_keywords=_unique(expanded_keywords),
     )
 
 
 def extract_keywords(query: str, *, min_len: int = 2) -> list[str]:
     """Extract Chinese and ASCII keywords from a user query."""
 
-    raw_tokens = _TOKEN_RE.findall(query)
+    normalized_query = _normalize_query_text(query)
+    raw_tokens = _TOKEN_RE.findall(normalized_query)
     keywords: list[str] = []
 
     def add(term: str) -> None:
@@ -144,13 +187,35 @@ def extract_keywords(query: str, *, min_len: int = 2) -> list[str]:
                 for index in range(len(token) - size + 1):
                     add(token[index : index + size])
         else:
-            for phrase in _DOMAIN_PHRASES:
-                if phrase in token:
-                    add(phrase)
-            for index in range(len(token) - 1):
-                add(token[index : index + 2])
+            for term in _extract_long_token_terms(token):
+                add(term)
 
     return _unique(keywords)
+
+
+def extract_query_phrases(query: str) -> list[str]:
+    phrases: list[str] = []
+    for match in _QUERY_PHRASE_RE.finditer(query):
+        phrase = match.group(0).strip()
+        if len(phrase) >= 4:
+            phrases.append(phrase[:12])
+    for term in _DOMAIN_PHRASES:
+        if term in query:
+            phrases.append(term)
+    return _unique(phrases)
+
+
+def expand_keywords(query: str, keywords: list[str]) -> list[str]:
+    expanded: list[str] = []
+    normalized = _normalize(query)
+    for key, values in _DOMAIN_SYNONYMS.items():
+        if _normalize(key) in normalized:
+            expanded.extend(values)
+    for keyword in keywords:
+        for key, values in _DOMAIN_SYNONYMS.items():
+            if _normalize(key) == _normalize(keyword):
+                expanded.extend(values)
+    return _unique(expanded)
 
 
 def _merge_ascii_cjk_tokens(tokens: list[str]) -> list[str]:
@@ -199,12 +264,14 @@ class SQLiteRetriever:
             like_candidates = self._candidate_search(
                 conn,
                 keywords=keywords,
+                phrases=analysis.phrases,
                 products=analysis.products,
                 limit=fetch_limit,
             )
             fts_candidates = self._fts_candidate_search(
                 conn,
                 keywords=keywords,
+                phrases=analysis.phrases,
                 products=analysis.products,
                 limit=fetch_limit,
             )
@@ -235,6 +302,7 @@ class SQLiteRetriever:
         conn: sqlite3.Connection,
         *,
         keywords: list[str],
+        phrases: list[str],
         products: list[str],
         limit: int,
     ) -> list[sqlite3.Row]:
@@ -242,7 +310,7 @@ class SQLiteRetriever:
 
         where_parts: list[str] = []
         params: list[str] = []
-        terms = _unique([*keywords, *products])
+        terms = _unique([*phrases, *keywords, *products])
         for term in terms:
             like = f"%{term}%"
             where_parts.append("(text LIKE ? OR title LIKE ? OR product_name LIKE ?)")
@@ -271,6 +339,7 @@ class SQLiteRetriever:
         conn: sqlite3.Connection,
         *,
         keywords: list[str],
+        phrases: list[str],
         products: list[str],
         limit: int,
     ) -> list[sqlite3.Row]:
@@ -278,7 +347,7 @@ class SQLiteRetriever:
 
         usable_terms = [
             _sanitize_fts_term(term)
-            for term in _unique([*products, *keywords])
+            for term in _unique([*products, *phrases, *keywords])
             if _sanitize_fts_term(term)
         ]
         if not usable_terms:
@@ -342,17 +411,24 @@ class SQLiteRetriever:
         title_norm = _normalize(title)
         text_norm = _normalize(text)
         product_norm = _normalize(product)
+        exact_keywords = {
+            keyword
+            for keyword in analysis.keywords
+            if keyword not in analysis.expanded_keywords
+        }
 
         score = 0.0
         title_hits = 0
         text_hits = 0
         product_match = 0
         matched_keywords: list[str] = []
+        matched_distinct_terms: set[str] = set()
 
         if analysis.products:
             if product in analysis.products:
                 product_match = 1
                 score += 20.0
+                matched_distinct_terms.add(product)
             else:
                 score -= 12.0
         elif product == "汇总英文":
@@ -364,10 +440,12 @@ class SQLiteRetriever:
                 score += 12.0
                 title_hits += 1
                 matched_keywords.append(model)
+                matched_distinct_terms.add(model)
             elif model_norm in text_norm:
                 score += 7.0
                 text_hits += 1
                 matched_keywords.append(model)
+                matched_distinct_terms.add(model)
 
         for keyword in analysis.keywords:
             if keyword in analysis.products:
@@ -375,26 +453,53 @@ class SQLiteRetriever:
             kw = _normalize(keyword)
             if not kw:
                 continue
+            is_expanded_only = keyword in analysis.expanded_keywords and keyword not in exact_keywords
+            product_boost = 0.6 if is_expanded_only else 1.0
+            title_boost = 2.0 if is_expanded_only else 3.5
+            text_boost = 0.8 if is_expanded_only else 1.2
+            prefix_boost = 0.5 if is_expanded_only else 2.0
+            domain_title_boost = 2.0 if is_expanded_only else 4.0
+            domain_prefix_boost = 3.0 if is_expanded_only else 8.0
+            domain_text_boost = 0.8 if is_expanded_only else 1.5
             if kw in product_norm:
-                score += 1.0
+                score += product_boost
                 product_match = max(product_match, 1)
                 matched_keywords.append(keyword)
+                matched_distinct_terms.add(keyword)
             if kw in title_norm:
-                score += 3.5
+                score += title_boost
                 title_hits += 1
                 matched_keywords.append(keyword)
+                matched_distinct_terms.add(keyword)
                 if title_norm.startswith(kw):
-                    score += 2.0
+                    score += prefix_boost
                     if keyword in _DOMAIN_PHRASES:
-                        score += 8.0
+                        score += domain_prefix_boost
                 if keyword in _DOMAIN_PHRASES:
-                    score += 4.0
+                    score += domain_title_boost
             elif kw in text_norm:
-                score += 1.2
+                score += text_boost
                 text_hits += 1
                 matched_keywords.append(keyword)
+                matched_distinct_terms.add(keyword)
                 if keyword in _DOMAIN_PHRASES:
-                    score += 1.5
+                    score += domain_text_boost
+
+        for phrase in analysis.phrases:
+            phrase_norm = _normalize(phrase)
+            if len(phrase_norm) < 4:
+                continue
+            if phrase_norm in title_norm:
+                score += 4.5
+                matched_distinct_terms.add(phrase)
+            elif phrase_norm in text_norm:
+                score += 2.0
+                matched_distinct_terms.add(phrase)
+
+        for query_terms, title_terms, boost in _TITLE_INTENT_BOOSTS:
+            if any(term in analysis.keywords or term in analysis.expanded_keywords for term in query_terms):
+                if any(_normalize(term) in title_norm for term in title_terms):
+                    score += boost
 
         image_ids = _parse_json_list(row.get("image_ids"))
         if image_ids and any(term in analysis.keywords for term in ("指示灯", "表带", "尺寸", "安装", "更换")):
@@ -409,6 +514,28 @@ class SQLiteRetriever:
             score += 3.0
         if title_hits + text_hits >= 4:
             score += 2.0
+
+        exact_intent_terms = _unique(
+            [
+                *analysis.models,
+                *analysis.phrases[:4],
+                *[
+                    keyword
+                    for keyword in analysis.keywords
+                    if keyword not in analysis.products and keyword not in analysis.expanded_keywords
+                ],
+            ]
+        )
+        if exact_intent_terms:
+            has_exact_intent_match = any(term in matched_distinct_terms for term in exact_intent_terms)
+            has_expansion_only_match = any(term in matched_distinct_terms for term in analysis.expanded_keywords)
+            if has_expansion_only_match and not has_exact_intent_match:
+                score -= 4.0
+
+        signal_terms = _unique([*analysis.products, *analysis.models, *analysis.expanded_keywords, *analysis.phrases[:4]])
+        if signal_terms:
+            coverage = len(matched_distinct_terms) / max(1, min(len(signal_terms), 6))
+            score += min(coverage * 4.0, 4.0)
 
         row["_score"] = round(score, 3)
         row["_matched_keywords"] = _unique(matched_keywords)
@@ -436,6 +563,35 @@ def _parse_json_list(value: Any) -> list[str]:
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", "", text.lower())
+
+
+def _normalize_query_text(text: str) -> str:
+    cleaned = text.strip()
+    cleaned = re.sub(r"[，,。；;：:！!？?\(\)\[\]\"“”‘’]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned
+
+
+def _extract_long_token_terms(token: str) -> list[str]:
+    terms: list[str] = []
+    matched_phrase = False
+    for phrase in _DOMAIN_PHRASES:
+        if phrase in token:
+            terms.append(phrase)
+            matched_phrase = True
+    for key, values in _DOMAIN_SYNONYMS.items():
+        if key in token:
+            terms.append(key)
+            terms.extend(values)
+
+    parts = [part.strip() for part in _LONG_TOKEN_SPLIT_RE.split(token) if 2 <= len(part.strip()) <= 8]
+    terms.extend(parts[:6])
+
+    if not matched_phrase and not parts:
+        for size in (4, 3):
+            for index in range(min(4, max(0, len(token) - size + 1))):
+                terms.append(token[index : index + size])
+    return _unique(terms)
 
 
 def _sanitize_fts_term(term: str) -> str:
