@@ -208,6 +208,246 @@ def _text_overlap_count(text: str, terms: list[str]) -> int:
     return count
 
 
+def _is_ascii_heavy(text: str) -> bool:
+    letters = re.findall(r"[A-Za-z]", text)
+    cjk = re.findall(r"[\u4e00-\u9fff]", text)
+    return len(letters) >= 8 and len(letters) > len(cjk)
+
+
+def _is_manual_fallback_answer(answer: str) -> bool:
+    return "根据现有资料无法准确回答此问题" in answer or "根据现有资料无法回答此问题" in answer
+
+
+def _build_extractive_manual_answer(
+    *,
+    query: str,
+    evidence_chunks: list[dict[str, Any]],
+    image_ids: list[str],
+) -> str:
+    """Build a conservative evidence-only answer when the LLM refuses English evidence."""
+
+    if not evidence_chunks:
+        return format_manual_answer("根据现有资料无法回答此问题。", image_ids=[])
+
+    analysis = analyze_query(query)
+    query_terms = _unique(
+        [
+            *analysis.phrases[:6],
+            *analysis.keywords[:12],
+            *analysis.models,
+        ]
+    )
+    instructional_query = _looks_like_instructional_query(query)
+    title_candidates: list[tuple[float, str]] = []
+    sentence_candidates: list[tuple[float, str]] = []
+    for chunk in evidence_chunks[:3]:
+        title = _clean_evidence_text(str(chunk.get("title", "")))
+        text = _clean_evidence_text(str(chunk.get("text", "")))
+        if title and not _looks_like_toc_noise(title):
+            title_score = _text_overlap_count(title, query_terms) + 2.0
+            if instructional_query:
+                title_score += _instructional_sentence_bonus(title)
+            title_candidates.append((title_score, title))
+        for sentence in _split_evidence_sentences(text):
+            if _looks_like_toc_noise(sentence):
+                continue
+            score = _text_overlap_count(sentence, query_terms)
+            if score <= 0 and len(sentence) < 80:
+                continue
+            if instructional_query:
+                score += _instructional_sentence_bonus(sentence)
+                score -= _low_value_instruction_sentence_penalty(sentence)
+            sentence_candidates.append((float(score), sentence))
+
+    title_candidates.sort(key=lambda item: (item[0], len(item[1]) <= 160), reverse=True)
+    sentence_candidates.sort(key=lambda item: (item[0], len(item[1]) <= 220), reverse=True)
+    selected: list[str] = []
+    best_title = title_candidates[0][1] if title_candidates else ""
+    for _, sentence in sentence_candidates:
+        if instructional_query and re.search(r":\s*$", sentence):
+            continue
+        if (
+            instructional_query
+            and selected
+            and _low_value_instruction_sentence_penalty(sentence) >= 3.0
+        ):
+            continue
+        if best_title and _is_duplicate_evidence_sentence(sentence, [best_title]):
+            if (
+                (
+                    len(sentence) > len(best_title) + 20
+                    and _normalize_sentence_key(best_title) in _normalize_sentence_key(sentence)
+                )
+                or (
+                    _looks_like_truncated_heading(best_title)
+                    and _instructional_sentence_bonus(sentence) > 0
+                )
+            ):
+                best_title = _clean_submission_style_sentence(sentence)
+            continue
+        if _is_duplicate_evidence_sentence(sentence, selected):
+            continue
+        selected.append(_clean_submission_style_sentence(sentence))
+        if len(selected) >= 3:
+            break
+
+    if not selected:
+        first = evidence_chunks[0]
+        fallback_text = _clean_evidence_text(f"{first.get('title', '')} {first.get('text', '')}")[:320]
+        selected = [_clean_submission_style_sentence(fallback_text)]
+
+    conclusion = _compose_extractive_conclusion(
+        title=best_title,
+        sentence=selected[0] if selected else "",
+        query=query,
+    )
+    details = [
+        sentence
+        for sentence in selected[1:]
+        if not _is_duplicate_evidence_sentence(sentence, [conclusion])
+    ]
+    if not details and selected:
+        details = [selected[0]] if not _is_duplicate_evidence_sentence(selected[0], [conclusion]) else []
+    caution = "The answer is extracted from the retrieved manual evidence. Please follow the original manual for safety-critical operation."
+    if not _is_ascii_heavy(query):
+        caution = "以上内容来自检索到的说明书证据，涉及安全操作时请以原说明书为准。"
+
+    lines = [
+        "结论：",
+        f"- {conclusion}",
+        "",
+        "操作/说明：",
+        *[f"- {item}" for item in details],
+        "",
+        "注意事项：",
+        f"- {caution}",
+    ]
+    if image_ids:
+        lines.extend(["", "相关图片：", *[f"- {image_id}" for image_id in image_ids]])
+    return "\n".join(lines).strip()
+
+
+def _clean_evidence_text(text: str) -> str:
+    cleaned = str(text)
+    cleaned = re.sub(r"\[\[PIC[^\]]*\]\]", " ", cleaned)
+    cleaned = cleaned.replace("#", " ")
+    cleaned = re.sub(r"\\u[0-9a-fA-F]{4}", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip(" -|")
+
+
+def _clean_submission_style_sentence(text: str) -> str:
+    cleaned = _clean_evidence_text(text)
+    cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"([,.;:!?])(?=[A-Za-z])", r"\1 ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip(" -|")
+
+
+def _split_evidence_sentences(text: str) -> list[str]:
+    cleaned = _clean_evidence_text(text)
+    if not cleaned:
+        return []
+    raw_parts = re.split(r"(?<=[。！？.!?;:])\s+|[\n\r]+", cleaned)
+    sentences: list[str] = []
+    for part in raw_parts:
+        sentence = part.strip(" -|")
+        if 18 <= len(sentence) <= 320:
+            sentences.append(sentence)
+    if not sentences and cleaned:
+        sentences.append(cleaned[:320])
+    return sentences
+
+
+def _looks_like_toc_noise(text: str) -> bool:
+    normalized = str(text)
+    if normalized.count("...") >= 1:
+        return True
+    if len(re.findall(r"\bpage\b", normalized, flags=re.IGNORECASE)) >= 2:
+        return True
+    if len(re.findall(r"\b\d+\b", normalized)) >= 5 and len(normalized) < 180:
+        return True
+    return False
+
+
+def _looks_like_truncated_heading(text: str) -> bool:
+    cleaned = str(text).strip()
+    if not cleaned or cleaned.endswith((".", "。", "!", "?", ":", ";")):
+        return False
+    tail = cleaned.rsplit(" ", 1)[-1].lower()
+    return tail in {"support", "with", "to", "and", "or", "of", "for", "in", "the", "a"}
+
+
+def _normalize_sentence_key(text: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]+", "", str(text).lower())
+    return normalized[:240]
+
+
+def _is_duplicate_evidence_sentence(candidate: str, existing_items: list[str]) -> bool:
+    candidate_key = _normalize_sentence_key(candidate)
+    if not candidate_key:
+        return True
+    for item in existing_items:
+        existing_key = _normalize_sentence_key(item)
+        if not existing_key:
+            continue
+        if candidate_key == existing_key:
+            return True
+        if candidate_key in existing_key or existing_key in candidate_key:
+            return True
+    return False
+
+
+def _compose_extractive_conclusion(*, title: str, sentence: str, query: str) -> str:
+    clean_title = _clean_submission_style_sentence(title)
+    clean_sentence = _clean_submission_style_sentence(sentence)
+    if not clean_title:
+        return clean_sentence
+    if not clean_sentence:
+        return clean_title
+    if _is_duplicate_evidence_sentence(clean_title, [clean_sentence]):
+        return clean_sentence if len(clean_sentence) >= len(clean_title) else clean_title
+    if _looks_like_instructional_query(query) and _instructional_sentence_bonus(clean_title) > 0:
+        return clean_title
+    if _is_ascii_heavy(query) and clean_sentence.lower().startswith(
+        ("this ", "these ", "it ", "they ", "the device ", "the labels ")
+    ):
+        return f"{clean_title}: {clean_sentence}"
+    return clean_sentence
+
+
+def _looks_like_instructional_query(text: str) -> bool:
+    normalized = str(text).lower()
+    return bool(re.search(r"\b(how|operate|operation|use|using|press|select|turn|open|close)\b", normalized))
+
+
+def _instructional_sentence_bonus(text: str) -> float:
+    normalized = str(text).lower()
+    bonus = 0.0
+    for pattern in (
+        r"\bgo to\b",
+        r"\bpress\b",
+        r"\bselect\b",
+        r"\bturn\b",
+        r"\bopen\b",
+        r"\bclose\b",
+        r"\bmove\b",
+        r"\benter\b",
+        r"\binstall\b",
+        r"\bremove\b",
+    ):
+        if re.search(pattern, normalized):
+            bonus += 2.0
+    return min(bonus, 6.0)
+
+
+def _low_value_instruction_sentence_penalty(text: str) -> float:
+    normalized = str(text).strip().lower()
+    if normalized.startswith(("note:", "note ", "and it ", "it also ", "this device support")):
+        return 3.0
+    return 0.0
+
+
 def _title_key(title: str) -> str:
     return re.sub(r"\s+", "", str(title).strip().lower())
 
@@ -667,6 +907,12 @@ class AgentService:
         # 4. Call LLM
         answer = self._call_llm(messages)
         answer = format_manual_answer(answer, image_ids=image_ids)
+        if _is_ascii_heavy(query) and _is_manual_fallback_answer(answer):
+            answer = _build_extractive_manual_answer(
+                query=query,
+                evidence_chunks=evidence_chunks,
+                image_ids=image_ids,
+            )
 
         return {
             "answer": answer,

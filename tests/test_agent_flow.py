@@ -14,6 +14,7 @@ from industry_agent.agent.question_splitter import split_complex_question
 from industry_agent.agent.service import (
     AgentService,
     ChatRequest,
+    _build_extractive_manual_answer,
     _filter_evidence_for_query,
     _merge_retrieval_candidates,
 )
@@ -397,6 +398,47 @@ class ResponseFormatterTests(unittest.TestCase):
         self.assertIn("结论：\n- 使用充电器。", answer)
         self.assertIn("问题2：有哪些注意事项？", answer)
         self.assertNotIn("回答：", answer)
+
+    def test_build_extractive_manual_answer_uses_evidence_for_english_query(self) -> None:
+        answer = _build_extractive_manual_answer(
+            query="How to find the approval label of emission control certificate of the boat?",
+            evidence_chunks=[
+                {
+                    "chunk_id": "chunk_en_1",
+                    "title": "Approval label of emission control certificate",
+                    "text": "These labels are attached to each engine unit and to the inside of the engine compartment.",
+                    "product_name": "汇总英文",
+                    "image_ids": "[]",
+                }
+            ],
+            image_ids=[],
+        )
+        self.assertIn("Approval label of emission control certificate", answer)
+        self.assertNotIn("根据现有资料无法准确回答此问题", answer)
+
+    def test_build_extractive_manual_answer_deduplicates_repeated_title_and_text(self) -> None:
+        answer = _build_extractive_manual_answer(
+            query="How to find the approval label of emission control certificate of the boat?",
+            evidence_chunks=[
+                {
+                    "chunk_id": "chunk_en_1",
+                    "title": "Approval label of emission control certificate",
+                    "text": "These labels are attached to each engine unit and to the inside of the engine compartment.",
+                    "product_name": "汇总英文",
+                    "image_ids": "[]",
+                },
+                {
+                    "chunk_id": "chunk_en_2",
+                    "title": "Approval label of Emission control certificate",
+                    "text": "This label is attached to the electrical box and the exhaust side of the crankcase.",
+                    "product_name": "汇总英文",
+                    "image_ids": "[]",
+                },
+            ],
+            image_ids=[],
+        )
+        self.assertEqual(answer.count("Approval label of emission control certificate"), 1)
+        self.assertIn("engine unit", answer)
 
 
 class CustomerServicePolicyTests(unittest.TestCase):

@@ -30,6 +30,13 @@ _STOPWORDS: set[str] = {
     "那", "这个", "那个", "哪", "哪个", "多少", "为什么", "谁",
     "请", "帮", "告诉", "一下", "关于", "需要", "是否", "哪些",
 }
+_EN_STOPWORDS: set[str] = {
+    "a", "an", "and", "are", "as", "at", "be", "before", "can", "could",
+    "do", "does", "for", "from", "how", "i", "if", "in", "into", "is",
+    "it", "me", "my", "of", "on", "or", "should", "the", "this", "to",
+    "use", "using", "want", "what", "when", "where", "while", "with",
+    "after", "about", "please", "tell", "need", "first", "time",
+}
 
 _DOMAIN_PHRASES: tuple[str, ...] = (
     "指示灯", "闪烁", "标识", "充电", "充电器", "电池组", "表带", "尺寸",
@@ -63,6 +70,7 @@ _DOMAIN_SYNONYMS: dict[str, tuple[str, ...]] = {
 }
 _LONG_TOKEN_SPLIT_RE = re.compile(r"[的了和及与并或后前时再先把将并且然后如果则呢吗啊呀啦]")
 _QUERY_PHRASE_RE = re.compile(r"[\u4e00-\u9fff]{3,}")
+_ASCII_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
 _TITLE_INTENT_BOOSTS: tuple[tuple[tuple[str, ...], tuple[str, ...], float], ...] = (
     (("安全注意事项", "注意事项", "佩戴"), ("安全", "注意", "警告"), 5.0),
     (("安装", "更换", "拆卸"), ("安装", "组装", "更换"), 4.5),
@@ -71,6 +79,33 @@ _TITLE_INTENT_BOOSTS: tuple[tuple[tuple[str, ...], tuple[str, ...], float], ...]
     (("默认密码", "密码", "重置", "pin"), ("密码", "默认密码", "pin", "设备锁", "重置"), 4.0),
     (("连接", "配对", "连不上"), ("连接", "接口", "配对"), 4.0),
 )
+_ENGLISH_DOMAIN_HINTS: dict[str, tuple[str, ...]] = {
+    "boat": (
+        "boat", "sailing", "onboard", "on board", "anchor", "jet wash", "steering",
+        "starboard", "port side", "bow", "stern", "hull", "engine compartment",
+        "emission control", "storage compartment", "wet storage", "watercraft",
+    ),
+    "camera": (
+        "camera", "lens", "shutter", "viewfinder", "battery grip", "autofocus",
+        "af mode", "aperture", "iso", "flash photography", "image playback",
+        "dc coupler", "eos",
+    ),
+    "airfryer": (
+        "air fryer", "airfryer", "nutriu", "preset", "keep warm", "basket",
+        "hot air", "remote cooking", "wifi", "voice control", "food table",
+    ),
+    "ereader": (
+        "e reader", "ereader", "e-book reader", "ebook", "voice recording",
+        "photo viewer", "photo mode", "browser history", "record", "main menu",
+    ),
+}
+_ENGLISH_QUERY_ALIASES: dict[str, tuple[str, ...]] = {
+    "battery conversion": ("battery switches", "battery switch assembly", "emerg parallel"),
+    "battery switching": ("battery switches", "battery switch assembly"),
+    "record voice": ("voice recording", "record mode"),
+    "voice record": ("voice recording", "record mode"),
+    "photo viewer": ("photo mode", "photo rotation", "previous or next photo"),
+}
 
 _PRODUCT_ALIASES: dict[str, str] = {
     "vr头显": "VR头显",
@@ -178,6 +213,8 @@ def extract_keywords(query: str, *, min_len: int = 2) -> list[str]:
     merged_tokens = _merge_ascii_cjk_tokens(raw_tokens)
     for token in merged_tokens:
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]*|[0-9]+(?:\.[0-9]+)*", token):
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]*", token) and token.lower() in _EN_STOPWORDS:
+                continue
             add(token.upper())
             continue
 
@@ -199,10 +236,30 @@ def extract_query_phrases(query: str) -> list[str]:
         phrase = match.group(0).strip()
         if len(phrase) >= 4:
             phrases.append(phrase[:12])
+    phrases.extend(_extract_ascii_query_phrases(query))
+    normalized_query = re.sub(r"\s+", " ", query.lower())
+    for alias, values in _ENGLISH_QUERY_ALIASES.items():
+        if alias in normalized_query:
+            phrases.extend(values)
     for term in _DOMAIN_PHRASES:
         if term in query:
             phrases.append(term)
     return _unique(phrases)
+
+
+def _extract_ascii_query_phrases(query: str) -> list[str]:
+    words = [
+        word.lower()
+        for word in _ASCII_WORD_RE.findall(query)
+        if len(word) >= 3 and word.lower() not in _EN_STOPWORDS
+    ]
+    phrases: list[str] = []
+    for size in (3, 2):
+        for index in range(0, max(0, len(words) - size + 1)):
+            phrase = " ".join(words[index : index + size])
+            if len(phrase) >= 8:
+                phrases.append(phrase)
+    return phrases[:8]
 
 
 def expand_keywords(query: str, keywords: list[str]) -> list[str]:
@@ -237,6 +294,24 @@ def _merge_ascii_cjk_tokens(tokens: list[str]) -> list[str]:
     return merged_tokens
 
 
+def _prioritize_search_terms(
+    *,
+    phrases: list[str],
+    keywords: list[str],
+    products: list[str],
+) -> list[str]:
+    prioritized = _unique([*products, *phrases, *keywords])
+    return sorted(
+        prioritized,
+        key=lambda term: (
+            term not in products,
+            term not in phrases,
+            -len(str(term).split()),
+            -len(str(term)),
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Retriever
 # ---------------------------------------------------------------------------
@@ -256,7 +331,7 @@ class SQLiteRetriever:
 
         analysis = analyze_query(query)
         keywords = analysis.keywords or [query.strip()]
-        fetch_limit = max(limit * 12, 50)
+        fetch_limit = max(limit * 20, 180)
 
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -310,13 +385,13 @@ class SQLiteRetriever:
 
         where_parts: list[str] = []
         params: list[str] = []
-        terms = _unique([*phrases, *keywords, *products])
-        for term in terms:
-            like = f"%{term}%"
-            where_parts.append("(text LIKE ? OR title LIKE ? OR product_name LIKE ?)")
-            params.extend([like, like, like])
+        prioritized_terms = _prioritize_search_terms(
+            phrases=phrases,
+            keywords=keywords,
+            products=products,
+        )
 
-        if not where_parts:
+        if not prioritized_terms:
             return []
 
         product_clause = ""
@@ -326,13 +401,59 @@ class SQLiteRetriever:
             product_clause = f"product_name IN ({placeholders}) AND "
             product_params.extend(products)
 
-        sql = f"""
+        merged: dict[str, sqlite3.Row] = {}
+        per_term_limit = max(16, min(80, limit // max(1, min(len(prioritized_terms), 6))))
+        single_term_sql = f"""
+            SELECT *
+            FROM chunks
+            WHERE {product_clause}(text LIKE ? OR title LIKE ? OR product_name LIKE ?)
+            ORDER BY
+              (CASE WHEN title LIKE ? THEN 3 ELSE 0 END) +
+              (CASE WHEN product_name LIKE ? THEN 2 ELSE 0 END) +
+              (CASE WHEN text LIKE ? THEN 1 ELSE 0 END) DESC,
+              LENGTH(title) ASC,
+              LENGTH(text) ASC
+            LIMIT ?
+        """
+        for term in prioritized_terms[:14]:
+            like = f"%{term}%"
+            rows = conn.execute(
+                single_term_sql,
+                [
+                    *product_params,
+                    like,
+                    like,
+                    like,
+                    like,
+                    like,
+                    like,
+                    per_term_limit,
+                ],
+            ).fetchall()
+            for row in rows:
+                merged[str(row["chunk_id"])] = row
+
+        if len(merged) >= max(limit, 40):
+            return list(merged.values())
+
+        for term in prioritized_terms[:10]:
+            like = f"%{term}%"
+            where_parts.append("(text LIKE ? OR title LIKE ? OR product_name LIKE ?)")
+            params.extend([like, like, like])
+
+        if not where_parts:
+            return list(merged.values())
+
+        fallback_sql = f"""
             SELECT *
             FROM chunks
             WHERE {product_clause}({' OR '.join(where_parts)})
+            ORDER BY LENGTH(title) ASC, LENGTH(text) ASC
             LIMIT ?
         """
-        return conn.execute(sql, [*product_params, *params, limit]).fetchall()
+        for row in conn.execute(fallback_sql, [*product_params, *params, limit]).fetchall():
+            merged[str(row["chunk_id"])] = row
+        return list(merged.values())
 
     def _fts_candidate_search(
         self,
@@ -510,6 +631,9 @@ class SQLiteRetriever:
             rank_bonus = _fts_rank_bonus(row.get("fts_rank"))
             score += rank_bonus
 
+        if product == "汇总英文":
+            score += _english_manual_alignment_score(title_norm=title_norm, text_norm=text_norm, analysis=analysis)
+
         if title_hits >= 2:
             score += 3.0
         if title_hits + text_hits >= 4:
@@ -547,6 +671,89 @@ class SQLiteRetriever:
         row["_fts_rank"] = row.get("fts_rank")
         row["_fts_hit"] = int(row.get("fts_hit", 0))
         return row
+
+
+def _english_manual_alignment_score(*, title_norm: str, text_norm: str, analysis: QueryAnalysis) -> float:
+    english_keywords = _unique(
+        keyword
+        for keyword in analysis.keywords
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]*", keyword)
+    )
+    english_phrases = _unique(
+        phrase
+        for phrase in analysis.phrases
+        if _ASCII_WORD_RE.search(phrase)
+    )
+    if not english_keywords and not english_phrases:
+        return 0.0
+
+    keyword_hits = 0
+    title_keyword_hits = 0
+    long_keyword_hits = 0
+    for keyword in english_keywords:
+        token = _normalize(keyword)
+        if not token:
+            continue
+        if token in title_norm:
+            title_keyword_hits += 1
+            keyword_hits += 1
+            if len(token) >= 6:
+                long_keyword_hits += 1
+        elif token in text_norm:
+            keyword_hits += 1
+            if len(token) >= 6:
+                long_keyword_hits += 1
+
+    phrase_hits = 0
+    title_phrase_hits = 0
+    for phrase in english_phrases:
+        token = _normalize(phrase)
+        if not token:
+            continue
+        if token in title_norm:
+            title_phrase_hits += 1
+            phrase_hits += 1
+        elif token in text_norm:
+            phrase_hits += 1
+
+    score = 0.0
+    score += min(keyword_hits * 1.6, 9.0)
+    score += min(title_keyword_hits * 1.8, 6.0)
+    score += min(phrase_hits * 4.0, 12.0)
+    score += min(title_phrase_hits * 3.0, 9.0)
+
+    if keyword_hits <= 1 and phrase_hits == 0:
+        if long_keyword_hits >= 1:
+            score += 4.0
+        else:
+            score -= 12.0
+    elif keyword_hits >= 3 or phrase_hits >= 1:
+        score += 4.0
+
+    query_groups = _detect_english_domain_groups(
+        " ".join([*analysis.keywords, *analysis.phrases])
+    )
+    if query_groups:
+        row_groups = _detect_english_domain_groups(f"{title_norm} {text_norm}")
+        overlap = query_groups & row_groups
+        if overlap:
+            score += 10.0 * len(overlap)
+        elif row_groups:
+            score -= 14.0
+        else:
+            score -= 5.0
+    return score
+
+
+def _detect_english_domain_groups(text: str) -> set[str]:
+    normalized = _normalize(text)
+    groups: set[str] = set()
+    for group_name, hints in _ENGLISH_DOMAIN_HINTS.items():
+        for hint in hints:
+            if _normalize(hint) and _normalize(hint) in normalized:
+                groups.add(group_name)
+                break
+    return groups
 
 
 def _parse_json_list(value: Any) -> list[str]:

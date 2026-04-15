@@ -33,6 +33,13 @@ _LABEL_REPLACEMENTS = (
     ("操作/说明：", ""),
     ("注意事项：", ""),
 )
+_FALLBACK_SENTENCE_PATTERNS: tuple[str, ...] = (
+    r"根据现有资料无法准确回答此问题[。]?",
+    r"根据现有资料无法回答此问题[。]?",
+    r"请补充更明确的产品名称、型号、故障现象或图片后再试[。]?",
+    r"请补充产品名称、型号、故障现象或上传更清晰的图片后再试[。]?",
+    r"当前回答仅基于知识库中的说明书资料，请以实际产品和原文为准[。]?",
+)
 
 
 def read_questions(path: Path) -> list[dict[str, str]]:
@@ -94,12 +101,17 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
     text = re.sub(r"\s+\n", "\n", text)
     text = re.sub(r"\n+", " ", text).strip(" |;；，,")
 
-    if text == DEFAULT_FALLBACK_ANSWER or "根据现有资料无法回答此问题" in text:
+    text_without_fallback = _strip_fallback_sentences(text)
+    text_without_fallback = _remove_question_echo(text_without_fallback, question=question)
+    if _looks_like_pure_fallback(text, text_without_fallback):
         return _build_submission_fallback(question=question, sources=sources)
+    text = text_without_fallback or text
 
     if "customer_service_policy" in sources:
+        text = re.sub(r"如果你愿意，我建议[^。]*。?", "", text)
         text = re.sub(r"如果你愿意，我建议下一步优先补充[^。]*。?", "", text)
         text = re.sub(r"这类问题更适合按通用客服流程处理。?", "", text)
+        text = _compress_customer_service_answer(text)
 
     text = re.sub(r"\s{2,}", " ", text).strip(" ，,；;")
     if not text.endswith(("。", "！", "？")):
@@ -111,6 +123,92 @@ def _build_submission_fallback(*, question: str, sources: list[str]) -> str:
     if "customer_service_policy" in sources or any(keyword in question for keyword in _CUSTOMER_SERVICE_KEYWORDS):
         return "您好，相关情况需要结合订单信息、商品情况和售后规则进一步核实。请您补充订单号、商品名称、问题照片或聊天记录，我们会继续为您处理。"
     return "您好，当前还无法准确定位对应的说明书内容。请补充产品名称、型号、故障现象或图片，我再继续帮您查询。"
+
+
+def _strip_fallback_sentences(text: str) -> str:
+    cleaned = text
+    for pattern in _FALLBACK_SENTENCE_PATTERNS:
+        cleaned = re.sub(pattern, "", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"[。]{2,}", "。", cleaned)
+    return cleaned.strip(" ，,；;。")
+
+
+def _remove_question_echo(text: str, *, question: str) -> str:
+    cleaned = text
+    candidates = re.findall(r'"([^\"]+)"', question)
+    if not candidates:
+        candidates = [question]
+    for candidate in candidates:
+        segment = re.sub(r"\s+", " ", candidate).strip(" ,，;；\"'")
+        if len(segment) < 6:
+            continue
+        cleaned = cleaned.replace(segment, "", 1)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"^[，,；;。:：\s]+", "", cleaned)
+    cleaned = re.sub(r"\s+[，,；;。:：]", "", cleaned)
+    return cleaned.strip(" ，,；;。")
+
+
+def _looks_like_pure_fallback(original: str, stripped: str) -> bool:
+    if not original.strip():
+        return True
+    if original.strip() == DEFAULT_FALLBACK_ANSWER:
+        return True
+    if not stripped.strip():
+        return True
+    informative_chars = len(re.sub(r"\s+", "", stripped))
+    return informative_chars < 18 and (
+        "根据现有资料无法准确回答此问题" in original
+        or "根据现有资料无法回答此问题" in original
+    )
+
+
+def _compress_customer_service_answer(text: str) -> str:
+    sentences = _split_submission_sentences(text)
+    if not sentences:
+        return text
+
+    selected: list[str] = []
+    for sentence in sentences:
+        cleaned = sentence.strip(" ，,；;。")
+        if len(cleaned) < 8:
+            continue
+        if cleaned.endswith(("？", "?")):
+            continue
+        if _is_near_duplicate_sentence(cleaned, selected):
+            continue
+        selected.append(cleaned)
+        if len(selected) >= 5:
+            break
+
+    return "。 ".join(selected).strip()
+
+
+def _split_submission_sentences(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text)
+    parts = re.split(r"(?<=[。！？!?])\s+|(?<=\.)\s+(?=[A-Z\u4e00-\u9fff])", normalized)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _normalize_sentence_key(text: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]+", "", text.lower())
+
+
+def _is_near_duplicate_sentence(candidate: str, existing: list[str]) -> bool:
+    candidate_key = _normalize_sentence_key(candidate)
+    if not candidate_key:
+        return True
+    for sentence in existing:
+        sentence_key = _normalize_sentence_key(sentence)
+        if not sentence_key:
+            continue
+        if candidate_key == sentence_key:
+            return True
+        shorter = min(len(candidate_key), len(sentence_key))
+        if shorter >= 16 and (candidate_key in sentence_key or sentence_key in candidate_key):
+            return True
+    return False
 
 
 def main() -> None:

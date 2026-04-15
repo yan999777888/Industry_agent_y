@@ -42,6 +42,14 @@ class RetrieverAnalysisTests(unittest.TestCase):
         self.assertIn("故障", keywords)
         self.assertNotIn("这台", keywords)
 
+    def test_extract_keywords_filters_english_stopwords(self) -> None:
+        keywords = extract_keywords("How to find the approval label of emission control certificate of the boat?")
+        self.assertIn("APPROVAL", keywords)
+        self.assertIn("LABEL", keywords)
+        self.assertIn("EMISSION", keywords)
+        self.assertNotIn("HOW", keywords)
+        self.assertNotIn("THE", keywords)
+
 
 class RetrieverScoringTests(unittest.TestCase):
     def test_score_row_prefers_matching_title_intent(self) -> None:
@@ -101,6 +109,76 @@ class RetrieverScoringTests(unittest.TestCase):
             analysis,
         )
         self.assertGreater(focused["_score"], generic["_score"])
+
+    def test_score_row_prefers_english_phrase_alignment_inside_summary_manual(self) -> None:
+        retriever = SQLiteRetriever()
+        analysis = analyze_query("How to find the approval label of emission control certificate of the boat?")
+        focused = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "focused",
+                "title": "Approval label of emission control certificate",
+                "text": "These labels are attached to each engine unit and to the inside of the engine compartment.",
+                "product_name": "汇总英文",
+                "image_ids": "[]",
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+        generic = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "generic",
+                "title": "Camera Care",
+                "text": "Do not drop the camera or subject it to physical shock.",
+                "product_name": "汇总英文",
+                "image_ids": "[]",
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+        self.assertGreater(focused["_score"], generic["_score"])
+
+    def test_score_row_prefers_ereader_voice_chunk_over_airfryer_voice_control(self) -> None:
+        retriever = SQLiteRetriever()
+        analysis = analyze_query("Can this eReader record voice?")
+        focused = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "focused",
+                "title": "Voice Recording Select the Record in the main menu",
+                "text": "This E Reader supports voice recording.",
+                "product_name": "汇总英文",
+                "image_ids": "[]",
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+        generic = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "generic",
+                "title": "Voice control",
+                "text": "Use the NutriU app and voice assistant to control the air fryer.",
+                "product_name": "汇总英文",
+                "image_ids": "[]",
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+        self.assertGreater(focused["_score"], generic["_score"])
+
+
+class RetrieverIntegrationTests(unittest.TestCase):
+    def test_search_prefers_boating_battery_switch_chunk_when_query_mentions_sailing(self) -> None:
+        retriever = SQLiteRetriever()
+        if not retriever.db_path.exists():
+            self.skipTest("retrieval index not available")
+
+        rows = retriever.search("How do I use the battery conversion feature before sailing?", limit=5)
+
+        self.assertTrue(rows)
+        self.assertIn("Battery switches", rows[0]["title"])
 
 
 if __name__ == "__main__":
