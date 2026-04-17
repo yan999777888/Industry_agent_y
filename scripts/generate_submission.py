@@ -80,11 +80,13 @@ def append_jsonl(path: Path, record: dict) -> None:
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def normalize_submission_answer(answer: str, *, question: str, sources: list[str] | None = None) -> str:
+def normalize_submission_answer(answer: str, *, question: str, sources: list[str] | None = None,
+                                image_ids: list[str] | None = None) -> str:
     sources = sources or []
+    image_ids = image_ids or []
     text = answer.strip()
     if not text:
-        return DEFAULT_FALLBACK_ANSWER
+        return _format_with_images(DEFAULT_FALLBACK_ANSWER, [])
 
     for old, new in _LABEL_REPLACEMENTS:
         text = text.replace(old, new)
@@ -96,6 +98,10 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
     text = re.sub(r"参考资料[^\n。]*[。]?", "", text)
     text = re.sub(r"当前资料[^\n。]*[。]?", "", text)
     text = re.sub(r"资料中仅[^\n。]*[。]?", "", text)
+    text = re.sub(r"\[参考\s*\d*\]", "", text)
+    text = re.sub(r"参考\s*\[\d+\]", "", text)
+    text = re.sub(r"（参考\s*[^\）]*）", "", text)
+    text = re.sub(r"\(参考\s*[^\)]*\)", "", text)
     text = re.sub(r"\n{2,}", "\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\s+\n", "\n", text)
@@ -104,7 +110,8 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
     text_without_fallback = _strip_fallback_sentences(text)
     text_without_fallback = _remove_question_echo(text_without_fallback, question=question)
     if _looks_like_pure_fallback(text, text_without_fallback):
-        return _build_submission_fallback(question=question, sources=sources)
+        fb = _build_submission_fallback(question=question, sources=sources)
+        return _format_with_images(fb, [])
     text = text_without_fallback or text
 
     if "customer_service_policy" in sources:
@@ -116,7 +123,21 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
     text = re.sub(r"\s{2,}", " ", text).strip(" ，,；;")
     if not text.endswith(("。", "！", "？")):
         text += "。"
-    return text
+    return _format_with_images(text, image_ids)
+
+
+def _format_with_images(text: str, image_ids: list[str]) -> str:
+    """Append image IDs in the competition submission format: "answer";["id1","id2"]."""
+    if not image_ids:
+        return text
+    # Add <PIC> markers for image-text complementarity scoring
+    if "<PIC>" not in text:
+        pic_markers = "<PIC>" * len(image_ids)
+        text = text.rstrip("。！？.!?") + pic_markers
+        if not text.endswith(("。", "！", "？", ".", "!", "?")):
+            text += "。"
+    ids_json = json.dumps(image_ids, ensure_ascii=False)
+    return f'"{text}";{ids_json}'
 
 
 def _build_submission_fallback(*, question: str, sources: list[str]) -> str:
@@ -241,10 +262,12 @@ def main() -> None:
             raw_response = call_chat(args.base_url, item["question"], args.timeout)
             data = raw_response.get("data", {})
             raw_answer = str(data.get("answer") or "").strip() or args.fallback_answer
+            raw_image_ids = list(data.get("image_ids", []) or [])
             answer = normalize_submission_answer(
                 raw_answer,
                 question=item["question"],
                 sources=list(data.get("sources", []) or []),
+                image_ids=raw_image_ids,
             )
             ok = raw_response.get("code") == 0
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:

@@ -31,12 +31,12 @@ except ImportError:  # pragma: no cover - optional for test environments
 # Configuration
 # ---------------------------------------------------------------------------
 
-RETRIEVAL_LIMIT = 8         # chunks to retrieve before evidence filtering
-FINAL_CONTEXT_CHUNKS = 4    # chunks passed into the LLM
-MAX_CONTEXT_CHARS = 4000    # truncate context to fit model window
+RETRIEVAL_LIMIT = 10        # chunks to retrieve before evidence filtering
+FINAL_CONTEXT_CHUNKS = 5    # chunks passed into the LLM
+MAX_CONTEXT_CHARS = 6000    # truncate context to fit model window
 MAX_HISTORY_TURNS = 5       # keep last N turns per session
-MIN_TOP_SCORE = 10.0        # below this, do not ask LLM to hallucinate
-MIN_KEEP_SCORE = 8.0        # chunks below this score are discarded
+MIN_TOP_SCORE = 6.0         # below this, do not ask LLM to hallucinate
+MIN_KEEP_SCORE = 4.0        # chunks below this score are discarded
 MULTIMODAL_RETRIEVAL_LIMIT = 6
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -44,18 +44,14 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:2b")
 OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava-phi3")
 
 SYSTEM_TEMPLATE = """\
-你是一个专业的工业产品客服智能体。请严格遵守以下规则：
+你是一个专业的产品客服智能体。请严格遵守以下规则：
 
-1. **只基于下方【参考资料】回答**，不得编造任何信息。
-2. 如果参考资料不足以回答问题，请明确说明"根据现有资料无法回答此问题"。
-3. 如果用户一次问了多个问题，请拆成多个小标题逐一回答。
-4. 回答格式固定为：
-   - 结论：
-   - 操作/说明：
-   - 注意事项：
-   - 相关图片：
-5. 相关图片只能使用参考资料中出现的图片 ID，不要编造图片 ID。
-6. 直接给出回答，不要输出任何思考过程。
+1. **只基于下方【参考资料】回答**，不得编造。
+2. 尽量从参考资料中提取对用户有帮助的内容，详细、完整地回答。只有参考资料完全不含相关信息时才说"根据现有资料无法回答此问题"。
+3. 如果参考资料是英文的，或用户用英文提问，请用英文回答。
+4. **图文结合**：参考资料中出现配图ID时，必须在答案中对应位置插入 <PIC> 标记，表示此处应展示该图片。例如："安装步骤如图所示<PIC>"。
+5. 回答结构要清晰：先给结论，再分步骤说明操作方法，最后列注意事项。用编号列表组织步骤。
+6. 直接输出最终答案，不要输出思考过程、不要输出"结论："等标签。
 
 【参考资料】
 {context}
@@ -312,18 +308,17 @@ def _build_extractive_manual_answer(
     if not _is_ascii_heavy(query):
         caution = "以上内容来自检索到的说明书证据，涉及安全操作时请以原说明书为准。"
 
-    lines = [
-        "结论：",
-        f"- {conclusion}",
-        "",
-        "操作/说明：",
-        *[f"- {item}" for item in details],
-        "",
-        "注意事项：",
-        f"- {caution}",
-    ]
+    lines = [conclusion]
+    if details:
+        lines.append("")
+        for i, item in enumerate(details, 1):
+            lines.append(f"{i}. {item}")
+    if caution:
+        lines.extend(["", caution])
+    # Insert <PIC> markers for image-text complementarity
     if image_ids:
-        lines.extend(["", "相关图片：", *[f"- {image_id}" for image_id in image_ids]])
+        lines.append("")
+        lines.append("相关配图如下：" + "".join(f"<PIC>" for _ in image_ids))
     return "\n".join(lines).strip()
 
 
@@ -1303,7 +1298,7 @@ class AgentService:
                     "think": False,           # disable qwen3 thinking mode
                     "options": {
                         "temperature": 0.3,
-                        "num_predict": 1024,  # max output tokens
+                        "num_predict": 2048,  # max output tokens
                     },
                 },
             )

@@ -36,6 +36,12 @@ _EN_STOPWORDS: set[str] = {
     "it", "me", "my", "of", "on", "or", "should", "the", "this", "to",
     "use", "using", "want", "what", "when", "where", "while", "with",
     "after", "about", "please", "tell", "need", "first", "time",
+    "you", "your", "that", "they", "them", "their", "its", "has", "have",
+    "had", "been", "was", "were", "will", "would", "may", "might", "shall",
+    "not", "but", "also", "some", "any", "all", "each", "every", "both",
+    "there", "here", "then", "than", "more", "most", "very", "much",
+    "just", "only", "even", "still", "well", "too", "so", "such",
+    "which", "who", "whom", "whose", "other",
 }
 
 _DOMAIN_PHRASES: tuple[str, ...] = (
@@ -148,6 +154,31 @@ _PRODUCT_ALIASES: dict[str, str] = {
     "清洁机": "蒸汽清洁机",
     "蓝牙激光鼠标": "蓝牙激光鼠标",
     "鼠标": "蓝牙激光鼠标",
+    # English product aliases → 汇总英文
+    "jetski": "汇总英文",
+    "jet ski": "汇总英文",
+    "watercraft": "汇总英文",
+    "boat": "汇总英文",
+    "airfryer": "汇总英文",
+    "air fryer": "汇总英文",
+    "vacuum": "汇总英文",
+    "vacuum cleaner": "汇总英文",
+    "lawn mower": "汇总英文",
+    "snowmobile": "汇总英文",
+    "motherboard": "汇总英文",
+    "microwave": "汇总英文",
+    "pressure cooker": "汇总英文",
+    "earphone": "汇总英文",
+    "earphones": "汇总英文",
+    "ereader": "汇总英文",
+    "e-reader": "汇总英文",
+    "e reader": "汇总英文",
+    "fax": "汇总英文",
+    "grill": "汇总英文",
+    "toothbrush": "汇总英文",
+    "coffee machine": "汇总英文",
+    "landline": "汇总英文",
+    "camera": "汇总英文",
 }
 
 _TOKEN_RE = re.compile(
