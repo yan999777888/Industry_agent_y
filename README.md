@@ -62,6 +62,7 @@ Industry_Agent/
 │   ├── generate_submission.py
 │   ├── observe_chat_quality.py
 │   └── run_regression_suite.py
+│   └── reprocess——sybmission。py
 ├── src/
 │   └── industry_agent/
 │       ├── __init__.py
@@ -121,7 +122,8 @@ Industry_Agent/
 - `scripts/evaluate_chat.py`：对 `/chat` 做小样例端到端评测。
 - `scripts/run_regression_suite.py`：执行固定回归验证集。
 - `scripts/observe_chat_quality.py`：执行带分类标签的端到端质量观察，并输出问题分桶统计。
-- `scripts/generate_submission.py`：读取测试问题并生成提交样例。
+- `scripts/generate_submission.py`：读取测试问题并生成提交样例。————自动加<PIC>,自动清理引用标记
+- `scripts/reprocession_submission.py`：对无法回答问题进行处理，变得更像人工客服。————从原来的套话 / 无法回答 → 现在用专属标准答案
 - `src/industry_agent/config.py`：项目路径和默认参数配置。
 - `src/industry_agent/kb/parser.py`：手册解析、文本标准化、`<PIC>` 占位与图片 ID 对齐处理。
 - `src/industry_agent/kb/chunker.py`：按照章节与长度约束切分知识块，生成可用于 RAG 的 chunk。
@@ -129,7 +131,7 @@ Industry_Agent/
 - `src/industry_agent/kb/index_store.py`：将清洗结果写入 JSON、JSONL 和 SQLite 索引。
 - `src/industry_agent/kb/build_index.py`：知识库清洗、切分、索引构建主流程。
 - `src/industry_agent/rag/retriever.py`：当前的 SQLite 检索器，后续会扩展为混合检索。
-- `src/industry_agent/agent/service.py`：客服智能体主编排层，负责检索、对话状态、图片理解结果注入和回答生成。
+- `src/industry_agent/agent/service.py`：客服智能体主编排层，负责检索、对话状态、图片理解结果注入和回答生成。————要求加<PIC>,并且去掉了“结论 / 操作 / 说明” 这类冗余前缀，把 token 上限提到 2048，上下文扩到 6000 字符，回答更长更完整
 - `src/industry_agent/agent/question_router.py`：区分说明书问答、客服问题和寒暄输入。
 - `src/industry_agent/agent/question_splitter.py`：复杂问题拆解模块。
 - `src/industry_agent/agent/customer_service_policy.py`：轻量客服策略知识与场景化模板。
