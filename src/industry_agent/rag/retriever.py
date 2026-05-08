@@ -104,6 +104,86 @@ _ENGLISH_DOMAIN_HINTS: dict[str, tuple[str, ...]] = {
         "e reader", "ereader", "e-book reader", "ebook", "voice recording",
         "photo viewer", "photo mode", "browser history", "record", "main menu",
     ),
+    "vacuum": (
+        "vacuum", "vacuum cleaner", "home base", "full bin", "side brush",
+        "caster wheel", "dual-mode virtual wall", "dust bin", "roomba",
+    ),
+    "motherboard": (
+        "motherboard", "tpm connector", "pci express", "cpu", "system memory",
+        "raid", "rear panel connectors", "onboard led", "bios", "sata", "usb 3.1",
+        "intel lan", "serial port", "apm configuration", "erp ready", "pxe option",
+    ),
+    "pressure_cooker": (
+        "pressure cooker", "quick release", "float valve", "steam release",
+        "anti-block shield", "condensation collector", "sealing ring",
+    ),
+    "microwave": (
+        "microwave", "over-the-range", "auto defrost", "grease filter",
+        "charcoal filter", "oven light", "light timer",
+    ),
+    "snowmobile": (
+        "snowmobile", "throttle cable", "v-belt", "spark plug", "brake lever", "ski",
+        "vk540", "suspension", "spring preload", "fresh snow", "fuel tank", "rider",
+    ),
+    "landline": (
+        "landline", "base station", "handset", "answering machine", "phonebook",
+    ),
+    "lawn_mower": (
+        "lawn mower", "mower deck", "blade-control switch", "height-of-cut",
+        "grass deflector", "spark-plug", "parking brake", "cutting blade", "pto",
+    ),
+    "coffee_machine": (
+        "coffee", "espresso", "lungo", "capsule", "descaling", "water tank",
+        "coffee preparation", "drip tray", "milk frother",
+    ),
+    "fax": (
+        "fax", "telephone line cord", "phone line", "mfc-", "ink cartridge",
+        "document feeder", "scanner glass", "telephone wall jack",
+    ),
+    "toothbrush": (
+        "toothbrush", "brush head", "brushing", "pressure sensor", "brush pacer",
+        "senseiq", "gum", "bristles", "toothpaste",
+    ),
+    "grill": (
+        "grill", "grilling", "burner", "cooking surface", "grease tray",
+        "spider alert", "propane", "bristle brush",
+    ),
+    "earphone": (
+        "earphone", "earphones", "earbud", "earbuds", "charging case",
+        "bluetooth", "noise canceling", "pairing",
+    ),
+    "television": (
+        "television", "tv", "hdmi", "remote control", "channel", "picture mode",
+        "screen", "antenna", "audio output",
+    ),
+    "washing_machine": (
+        "washer", "washing machine", "washtub", "wash timer", "spin timer",
+        "drain filter", "overflow filter", "drain hose", "rinse", "cycle selector",
+    ),
+}
+_SEMANTIC_INTENT_HINTS: dict[str, tuple[str, ...]] = {
+    "procedure": (
+        "怎么", "如何", "步骤", "方法", "安装", "更换", "拆卸", "清洁", "设置",
+        "连接", "操作", "使用", "充电", "佩戴", "调节", "how", "procedure",
+        "install", "replace", "remove", "clean", "set", "connect", "use", "charge",
+    ),
+    "safety_warning": (
+        "安全", "注意", "警告", "危险", "风险", "禁忌", "注意事项", "safety",
+        "warning", "caution", "danger", "risk", "avoid",
+    ),
+    "troubleshooting": (
+        "故障", "错误", "报错", "无法", "不能", "不工作", "闪烁", "指示灯",
+        "蜂鸣", "失败", "troubleshoot", "problem", "error", "fault", "fails",
+        "not working", "flashing", "blinking", "indicator",
+    ),
+    "parts_list": (
+        "部件", "零件", "配件", "组成", "包含", "包装", "清单", "parts",
+        "accessories", "components", "included", "overview",
+    ),
+    "specification": (
+        "规格", "参数", "尺寸", "重量", "容量", "默认", "密码", "型号", "温度",
+        "specification", "dimensions", "weight", "capacity", "default", "model",
+    ),
 }
 _ENGLISH_QUERY_ALIASES: dict[str, tuple[str, ...]] = {
     "battery conversion": ("battery switches", "battery switch assembly", "emerg parallel"),
@@ -179,6 +259,8 @@ _PRODUCT_ALIASES: dict[str, str] = {
     "coffee machine": "汇总英文",
     "landline": "汇总英文",
     "camera": "汇总英文",
+    "washer": "汇总英文",
+    "washing machine": "汇总英文",
 }
 
 _TOKEN_RE = re.compile(
@@ -642,7 +724,9 @@ class SQLiteRetriever:
             if len(phrase_norm) < 4:
                 continue
             if phrase_norm in title_norm:
-                score += 4.5
+                score += 10.0
+                if " " in phrase:
+                    score += 2.0
                 matched_distinct_terms.add(phrase)
             elif phrase_norm in text_norm:
                 score += 2.0
@@ -657,6 +741,16 @@ class SQLiteRetriever:
         if image_ids and any(term in analysis.keywords for term in ("指示灯", "表带", "尺寸", "安装", "更换")):
             score += 1.2
 
+        metadata = _parse_json_object(row.get("metadata"))
+        clean_score = metadata.get("clean_score")
+        if isinstance(clean_score, (int, float)):
+            score += (float(clean_score) - 0.5) * 2.0
+        if metadata.get("is_toc"):
+            score -= 8.0
+        if metadata.get("has_ocr_noise"):
+            score -= 1.5
+        score += _semantic_alignment_score(metadata=metadata, analysis=analysis)
+
         if int(row.get("fts_hit", 0)):
             score += 5.0
             rank_bonus = _fts_rank_bonus(row.get("fts_rank"))
@@ -664,6 +758,13 @@ class SQLiteRetriever:
 
         if product == "汇总英文":
             score += _english_manual_alignment_score(title_norm=title_norm, text_norm=text_norm, analysis=analysis)
+            query_groups = _detect_english_domain_groups(" ".join([*analysis.keywords, *analysis.phrases]))
+            domain_label = str(metadata.get("domain_label") or "")
+            if domain_label and query_groups:
+                if domain_label in query_groups:
+                    score += 12.0
+                else:
+                    score -= 10.0
 
         if title_hits >= 2:
             score += 3.0
@@ -777,14 +878,81 @@ def _english_manual_alignment_score(*, title_norm: str, text_norm: str, analysis
 
 
 def _detect_english_domain_groups(text: str) -> set[str]:
-    normalized = _normalize(text)
+    normalized = re.sub(r"\s+", " ", text.lower())
     groups: set[str] = set()
     for group_name, hints in _ENGLISH_DOMAIN_HINTS.items():
         for hint in hints:
-            if _normalize(hint) and _normalize(hint) in normalized:
+            if _english_hint_occurs(normalized, hint):
                 groups.add(group_name)
                 break
     return groups
+
+
+def _english_hint_occurs(normalized_text: str, hint: str) -> bool:
+    normalized_hint = re.sub(r"\s+", " ", hint.lower()).strip()
+    if not normalized_hint:
+        return False
+    if " " in normalized_hint or "-" in normalized_hint:
+        return normalized_hint in normalized_text
+    return bool(re.search(rf"\b{re.escape(normalized_hint)}\b", normalized_text))
+
+
+def _semantic_alignment_score(*, metadata: dict[str, Any], analysis: QueryAnalysis) -> float:
+    semantic_type = str(metadata.get("semantic_type") or "general")
+    if not semantic_type or semantic_type == "general":
+        return 0.0
+
+    intents = _detect_query_semantic_intents(analysis)
+    if not intents:
+        return -1.5 if metadata.get("is_warning_only") else 0.0
+
+    score = 0.0
+    if "procedure" in intents:
+        if semantic_type == "procedure":
+            score += 5.5
+        elif semantic_type == "safety_warning":
+            score -= 3.5
+    if "safety_warning" in intents:
+        if semantic_type == "safety_warning":
+            score += 5.0
+        elif semantic_type == "procedure":
+            score += 0.8
+    if "troubleshooting" in intents:
+        if semantic_type == "troubleshooting":
+            score += 6.0
+        elif semantic_type == "procedure":
+            score += 1.2
+        elif semantic_type == "safety_warning":
+            score -= 2.0
+    if "parts_list" in intents:
+        if semantic_type == "parts_list":
+            score += 5.0
+        elif semantic_type == "specification":
+            score += 1.5
+    if "specification" in intents:
+        if semantic_type == "specification":
+            score += 5.0
+        elif semantic_type == "parts_list":
+            score += 1.0
+
+    if metadata.get("is_warning_only") and "safety_warning" not in intents:
+        score -= 1.5
+    return score
+
+
+def _detect_query_semantic_intents(analysis: QueryAnalysis) -> set[str]:
+    query_text = " ".join(
+        [
+            analysis.raw_query.lower(),
+            *[keyword.lower() for keyword in analysis.keywords],
+            *[phrase.lower() for phrase in analysis.phrases],
+        ]
+    )
+    intents: set[str] = set()
+    for intent, hints in _SEMANTIC_INTENT_HINTS.items():
+        if any(hint.lower() in query_text for hint in hints):
+            intents.add(intent)
+    return intents
 
 
 def _parse_json_list(value: Any) -> list[str]:
@@ -797,6 +965,18 @@ def _parse_json_list(value: Any) -> list[str]:
     except json.JSONDecodeError:
         return []
     return [str(v) for v in parsed] if isinstance(parsed, list) else []
+
+
+def _parse_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _normalize(text: str) -> str:
