@@ -1,0 +1,19 @@
+[project]
+name = "industry-agent"
+version = "0.1.0"
+description = "Multimodal customer-service agent for manual-grounded RAG."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
