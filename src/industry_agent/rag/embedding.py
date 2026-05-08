@@ -21,7 +21,10 @@ def _get_model(model_name: str | None = None) -> Any:
     if name not in _MODEL_CACHE:
         from sentence_transformers import SentenceTransformer
 
-        _MODEL_CACHE[name] = SentenceTransformer(name)
+        _MODEL_CACHE[name] = SentenceTransformer(
+            name,
+            local_files_only=True,
+        )
     return _MODEL_CACHE[name]
 
 

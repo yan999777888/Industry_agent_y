@@ -1,0 +1,4 @@
+{
+  "embedding_dimension": 512,
+  "pooling_mode": "cls"
+}

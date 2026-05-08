@@ -78,14 +78,10 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def startup_event():
         from industry_agent.rag.retriever import SQLiteRetriever
-        from industry_agent.agent.service import AgentService, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_VISION_MODEL
+        from industry_agent.agent.service import AgentService
 
         print("Initializing retriever & agent service ...")
-        report = run_startup_checks(
-            base_url=OLLAMA_BASE_URL,
-            model=OLLAMA_MODEL,
-            vision_model=OLLAMA_VISION_MODEL,
-        )
+        report = run_startup_checks()
         app.state.health_report = report
         assert_startup_ready(report)
         app.state.retriever = SQLiteRetriever()
@@ -95,7 +91,7 @@ def create_app() -> FastAPI:
     @app.get(
         "/health",
         summary="健康检查",
-        description="返回索引、Ollama 服务、文本模型和视觉模型的启动检查结果。",
+        description="返回知识库索引和 LLM API 的启动检查结果。",
     )
     def health() -> dict:
         report = getattr(app.state, "health_report", None)

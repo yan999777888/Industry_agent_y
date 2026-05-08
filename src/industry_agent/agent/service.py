@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,12 +19,8 @@ from industry_agent.agent.response_formatter import (
 )
 from industry_agent.agent.session_store import InMemorySessionStore, SessionState
 from industry_agent.config import settings
+from industry_agent.llm.client import LLMClient
 from industry_agent.rag.retriever import SQLiteRetriever, analyze_query
-
-try:
-    import httpx
-except ImportError:  # pragma: no cover - optional for test environments
-    httpx = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -38,10 +33,6 @@ MAX_HISTORY_TURNS = 5       # keep last N turns per session
 MIN_TOP_SCORE = 6.0         # below this, do not ask LLM to hallucinate
 MIN_KEEP_SCORE = 4.0        # chunks below this score are discarded
 MULTIMODAL_RETRIEVAL_LIMIT = 6
-
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:2b")
-OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava-phi3")
 
 SYSTEM_TEMPLATE = """\
 你是一个专业的产品客服智能体。请严格遵守以下规则：
@@ -785,29 +776,20 @@ def _build_visual_focus_terms(image_features: dict[str, list[str]] | None) -> li
 # ---------------------------------------------------------------------------
 
 class AgentService:
-    """Retrieve -> assemble context -> call Ollama LLM -> return answer."""
+    """Retrieve -> assemble context -> call LLM -> return answer."""
 
     def __init__(
         self,
         retriever: SQLiteRetriever | None = None,
-        base_url: str = OLLAMA_BASE_URL,
-        model: str = OLLAMA_MODEL,
+        llm_client: LLMClient | None = None,
     ) -> None:
         self.retriever = retriever or SQLiteRetriever()
-        self.model = model
-        self.base_url = base_url.rstrip("/")
+        self.llm_client = llm_client or LLMClient()
         self.session_store = InMemorySessionStore(max_history_turns=MAX_HISTORY_TURNS)
         self.context_manager = ContextManager(max_history_turns=MAX_HISTORY_TURNS)
         self.question_router = QuestionRouter()
         self.customer_service_policy = CustomerServicePolicy()
-        if httpx is None:
-            raise RuntimeError("httpx is required to use AgentService with Ollama. Please install requirements.txt")
-        self.http_client = httpx.Client(proxy=None, timeout=120.0)
-        self.image_understander = ImageUnderstander(
-            base_url=self.base_url,
-            http_client=self.http_client,
-            vision_model=OLLAMA_VISION_MODEL,
-        )
+        self.image_understander = ImageUnderstander(llm_client=self.llm_client)
         self.image_index = _load_image_index()
 
     def _build_subquestion_query(
@@ -1270,11 +1252,7 @@ class AgentService:
         if not hasattr(self, "customer_service_policy"):
             self.customer_service_policy = CustomerServicePolicy()
         if not hasattr(self, "image_understander"):
-            self.image_understander = ImageUnderstander(
-                base_url=self.base_url,
-                http_client=getattr(self, "http_client", None),
-                vision_model=OLLAMA_VISION_MODEL,
-            )
+            self.image_understander = ImageUnderstander(llm_client=self.llm_client)
 
     def _analyze_uploaded_images(self, request: ChatRequest) -> ImageUnderstandingResult:
         self._ensure_runtime_components()
@@ -1284,28 +1262,16 @@ class AgentService:
         )
 
     # ------------------------------------------------------------------
-    # LLM call — Ollama native /api/chat (supports think=false)
+    # LLM call — OpenAI-compatible API via LLMClient
     # ------------------------------------------------------------------
 
     def _call_llm(self, messages: list[dict[str, str]]) -> str:
         try:
-            resp = self.http_client.post(
-                f"{self.base_url}/api/chat",
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "stream": False,
-                    "think": False,           # disable qwen3 thinking mode
-                    "options": {
-                        "temperature": 0.3,
-                        "num_predict": 2048,  # max output tokens
-                    },
-                },
+            return self.llm_client.chat(
+                messages,
+                temperature=0.3,
+                max_tokens=2048,
+                strip_think=True,
             )
-            resp.raise_for_status()
-            data = resp.json()
-            content = data.get("message", {}).get("content", "")
-            content = _strip_thinking(content)
-            return content.strip() if content.strip() else "模型未返回有效回答。"
         except Exception as exc:
             return f"LLM 调用失败: {exc}"

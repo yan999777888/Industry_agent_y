@@ -1,7 +1,6 @@
 """Image understanding skill — analyzes user-uploaded images.
 
-Wraps the existing ImageUnderstander and enhances it with cloud vision API
-support via the LLMClient.
+Wraps the existing ImageUnderstander with a cloud vision API via LLMClient.
 """
 
 from __future__ import annotations
@@ -24,43 +23,10 @@ class ImageSkill(BaseSkill):
     def understander(self) -> Any:
         if self._understander is None:
             from industry_agent.agent.image_understanding import ImageUnderstander
-            from industry_agent.config import settings
             from industry_agent.llm.client import LLMClient
 
-            # Try cloud vision model first, fall back to Ollama
-            try:
-                llm = LLMClient()
-                if llm.vision_model:
-                    self._understander = ImageUnderstander(
-                        base_url="",
-                        http_client=None,
-                        vision_model="",
-                    )
-                    self._cloud_llm = llm
-                    return self._understander
-            except Exception:
-                pass
-
-            # Fallback to Ollama
-            try:
-                import httpx
-
-                from industry_agent.agent.service import (
-                    OLLAMA_BASE_URL,
-                    OLLAMA_VISION_MODEL,
-                )
-
-                self._understander = ImageUnderstander(
-                    base_url=OLLAMA_BASE_URL,
-                    http_client=httpx.Client(proxy=None, timeout=120.0),
-                    vision_model=OLLAMA_VISION_MODEL,
-                )
-            except Exception:
-                self._understander = ImageUnderstander(
-                    base_url="",
-                    http_client=None,
-                    vision_model="",
-                )
+            llm = LLMClient()
+            self._understander = ImageUnderstander(llm_client=llm)
         return self._understander
 
     def execute(
