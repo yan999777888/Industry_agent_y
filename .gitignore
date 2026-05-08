@@ -10,6 +10,7 @@ venv/
 # Local IDE / tool files
 .vscode/
 .claude/
+bge-small-zh-v1.5/
 
 # Local processed artifacts
 data/processed/index.sqlite
@@ -17,4 +18,5 @@ data/processed/eval_chat_results.jsonl
 data/processed/quality_observation_report.json
 submission/submission_generated.csv
 submission/submission_generated_debug.jsonl
+src/industry_agent/config.py
 TODO.md

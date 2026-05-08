@@ -391,21 +391,28 @@ class CustomerServicePolicy:
             )
             return PolicyResponse(answer=answer, confidence=0.58, matched_topics=[])
 
-        matched_scenarios = [self._match_scenario(rule, normalized) for rule in matched_rules[:2]]
-        snippets = [
-            self._compose_topic_answer(rule, detail_intents=detail_intents, scenario=scenario)
-            for rule, scenario in zip(matched_rules[:2], matched_scenarios)
-        ]
-        answer = self._compose_answer(snippets, detail_intents=detail_intents)
-        scenario_bonus = sum(1 for scenario in matched_scenarios if scenario is not None)
+        # Only use the single best-matching topic to avoid jumbled concatenation.
+        # Pick the rule with the longest matching term (most specific).
+        best_rule = self._pick_best_rule(matched_rules, normalized)
+        best_scenario = self._match_scenario(best_rule, normalized)
+        snippet = self._compose_topic_answer(best_rule, detail_intents=detail_intents, scenario=best_scenario)
+
+        # Build a structured answer that can be sent through the LLM
+        answer = self._compose_focused_answer(
+            snippet=snippet,
+            detail_intents=detail_intents,
+            scenario_name=best_scenario.name if best_scenario else None,
+        )
+
+        scenario_bonus = 1 if best_scenario is not None else 0
         confidence = min(
-            0.7 + 0.03 * len({rule.topic for rule in matched_rules}) + 0.02 * len(detail_intents) + 0.01 * scenario_bonus,
+            0.7 + 0.03 + 0.02 * len(detail_intents) + 0.01 * scenario_bonus,
             0.92,
         )
         return PolicyResponse(
             answer=answer,
             confidence=confidence,
-            matched_topics=[rule.topic for rule in matched_rules],
+            matched_topics=[best_rule.topic],
         )
 
     def _match_rules(self, question: str) -> list[TopicRule]:
@@ -414,6 +421,19 @@ class CustomerServicePolicy:
             if any(term in question for term in rule.terms):
                 matched.append(rule)
         return matched
+
+    def _pick_best_rule(self, rules: list[TopicRule], question: str) -> TopicRule:
+        """Pick the rule with the longest matching term (most specific)."""
+        if len(rules) <= 1:
+            return rules[0]
+        best = rules[0]
+        best_len = 0
+        for rule in rules:
+            for term in rule.terms:
+                if term in question and len(term) > best_len:
+                    best = rule
+                    best_len = len(term)
+        return best
 
     def _detect_detail_intents(self, question: str) -> list[str]:
         intents: list[str] = []
@@ -475,25 +495,15 @@ class CustomerServicePolicy:
             parts.extend((materials, process))
         return " ".join(parts)
 
-    def _compose_answer(self, snippets: list[str], *, detail_intents: list[str]) -> str:
-        unique_snippets: list[str] = []
-        seen: set[str] = set()
-        for snippet in snippets:
-            if snippet in seen:
-                continue
-            seen.add(snippet)
-            unique_snippets.append(snippet)
-
-        closing = "如果你愿意，我建议下一步优先补充订单号、商品名称或型号、购买渠道，以及异常照片或截图。"
+    def _compose_focused_answer(self, *, snippet: str, detail_intents: list[str], scenario_name: str | None) -> str:
+        """Compose a clean, focused answer from a single topic — no generic prefix, no concatenation."""
+        closing = ""
         if "contact" in detail_intents:
-            closing = "如果你已经准备好了订单号和截图，建议直接联系人工客服，这样通常更快进入人工核查。"
+            closing = "如果页面无法直接处理，建议带上订单号联系人工客服进一步核实。"
         elif "timeline" in detail_intents:
-            closing = "如果你愿意，我建议同时提供订单号和当前订单状态，这样更方便进一步判断实际处理时效。"
-        elif "materials" in detail_intents:
-            closing = "如果你现在方便，我建议先把订单号、截图或凭证信息整理好，再继续提交或联系人工客服。"
+            closing = "建议同时提供订单号和当前订单状态，方便进一步判断处理时效。"
 
-        return (
-            "这类问题更适合按通用客服流程处理。"
-            f"{' '.join(unique_snippets[:2])} "
-            f"{closing}"
-        ).strip()
+        parts = [snippet]
+        if closing:
+            parts.append(closing)
+        return " ".join(parts).strip()

@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from industry_agent.config import settings
-
-try:
-    import httpx
-except ImportError:  # pragma: no cover
-    httpx = None  # type: ignore[assignment]
+from industry_agent.llm.client import LLMClient
 
 
 @dataclass
@@ -37,9 +32,6 @@ class StartupHealthReport:
 
 def run_startup_checks(
     *,
-    base_url: str,
-    model: str,
-    vision_model: str = "",
     processed_dir: Path = settings.processed_dir,
 ) -> StartupHealthReport:
     components: list[ComponentStatus] = []
@@ -64,57 +56,28 @@ def run_startup_checks(
         )
     )
 
-    if httpx is None:
+    # LLM API connectivity check (non-blocking — chat endpoint has its own error handling)
+    try:
+        client = LLMClient()
+        api_ok = client.is_available()
+    except Exception as exc:
         components.append(
             ComponentStatus(
-                name="httpx",
+                name="llm_api",
                 ok=False,
-                detail="httpx not installed",
-                required=True,
+                detail=str(exc),
+                required=False,
             )
         )
     else:
-        try:
-            with httpx.Client(proxy=None, timeout=10.0) as client:
-                resp = client.get(f"{base_url.rstrip('/')}/api/tags")
-                resp.raise_for_status()
-                payload = resp.json()
-        except Exception as exc:
-            components.append(
-                ComponentStatus(
-                    name="ollama",
-                    ok=False,
-                    detail=str(exc),
-                    required=True,
-                )
+        components.append(
+            ComponentStatus(
+                name="llm_api",
+                ok=api_ok,
+                detail=f"{settings.llm_base_url} | model: {settings.llm_model}",
+                required=False,
             )
-        else:
-            model_names = _extract_model_names(payload)
-            components.append(
-                ComponentStatus(
-                    name="ollama",
-                    ok=True,
-                    detail=base_url,
-                    required=True,
-                )
-            )
-            components.append(
-                ComponentStatus(
-                    name="text_model",
-                    ok=model in model_names,
-                    detail=model,
-                    required=True,
-                )
-            )
-            if vision_model:
-                components.append(
-                    ComponentStatus(
-                        name="vision_model",
-                        ok=vision_model in model_names,
-                        detail=vision_model,
-                        required=False,
-                    )
-                )
+        )
 
     status = "ok" if all(component.ok or not component.required for component in components) else "degraded"
     return StartupHealthReport(status=status, components=components)
@@ -130,17 +93,3 @@ def assert_startup_ready(report: StartupHealthReport) -> None:
         return
     joined = "; ".join(f"{item.name}: {item.detail}" for item in failures)
     raise RuntimeError(f"startup checks failed: {joined}")
-
-
-def _extract_model_names(payload: dict[str, Any]) -> set[str]:
-    names: set[str] = set()
-    for item in payload.get("models", []) or []:
-        name = str(item.get("name", "")).strip()
-        model = str(item.get("model", "")).strip()
-        if name:
-            names.add(name)
-            names.add(name.split(":")[0])
-        if model:
-            names.add(model)
-            names.add(model.split(":")[0])
-    return names

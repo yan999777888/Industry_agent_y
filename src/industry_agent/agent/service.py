@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,28 +19,20 @@ from industry_agent.agent.response_formatter import (
 )
 from industry_agent.agent.session_store import InMemorySessionStore, SessionState
 from industry_agent.config import settings
+from industry_agent.llm.client import LLMClient
 from industry_agent.rag.retriever import SQLiteRetriever, analyze_query
-
-try:
-    import httpx
-except ImportError:  # pragma: no cover - optional for test environments
-    httpx = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 RETRIEVAL_LIMIT = 10        # chunks to retrieve before evidence filtering
-FINAL_CONTEXT_CHUNKS = 5    # chunks passed into the LLM
-MAX_CONTEXT_CHARS = 6000    # truncate context to fit model window
+FINAL_CONTEXT_CHUNKS = 4    # chunks passed into the LLM
+MAX_CONTEXT_CHARS = 4000    # truncate context to fit model window
 MAX_HISTORY_TURNS = 5       # keep last N turns per session
-MIN_TOP_SCORE = 6.0         # below this, do not ask LLM to hallucinate
-MIN_KEEP_SCORE = 4.0        # chunks below this score are discarded
+MIN_TOP_SCORE = 4.0         # below this, do not ask LLM to hallucinate
+MIN_KEEP_SCORE = 3.0        # chunks below this score are discarded
 MULTIMODAL_RETRIEVAL_LIMIT = 6
-
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:2b")
-OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava-phi3")
 
 SYSTEM_TEMPLATE = """\
 你是一个专业的产品客服智能体。请严格遵守以下规则：
@@ -49,9 +40,13 @@ SYSTEM_TEMPLATE = """\
 1. **只基于下方【参考资料】回答**，不得编造。
 2. 尽量从参考资料中提取对用户有帮助的内容，详细、完整地回答。只有参考资料完全不含相关信息时才说"根据现有资料无法回答此问题"。
 3. 如果参考资料是英文的，或用户用英文提问，请用英文回答。
-4. **图文结合**：参考资料中出现配图ID时，必须在答案中对应位置插入 <PIC> 标记，表示此处应展示该图片。例如："安装步骤如图所示<PIC>"。
+4. **图文结合**：参考资料中出现配图ID时，在关键步骤处插入 **最多3个** <PIC> 标记。不要堆砌大量<PIC>。
 5. 回答结构要清晰：先给结论，再分步骤说明操作方法，最后列注意事项。用编号列表组织步骤。
 6. 直接输出最终答案，不要输出思考过程、不要输出"结论："等标签。
+7. **严禁重复**：同一句话、同一段内容绝对不能重复出现。每个句子只说一次。
+8. 不要重复用户的问题。
+9. 不要输出 <IMG src=""> 这样的空标签。
+10. 不要输出 "请以实际产品型号和说明书原文为准" 之类的免责声明（除非资料确实不足）。
 
 【参考资料】
 {context}
@@ -204,6 +199,68 @@ def _text_overlap_count(text: str, terms: list[str]) -> int:
     return count
 
 
+def _clean_cs_answer(text: str) -> str:
+    """Clean up customer service LLM answers — remove repetition and garbage."""
+    # Remove empty IMG tags
+    text = re.sub(r'<IMG\s+src=""[^>]*/>', '', text)
+    # Remove repeated identical sentences (keep first occurrence)
+    sentences = re.split(r'(?<=[。！？.!?])\s*', text)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        key = re.sub(r'\s+', '', s)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(s)
+    result = ' '.join(unique)
+    # Remove generic prefixes
+    result = re.sub(r'^这类问题更适合按通用客服流程处理。?\s*', '', result)
+    result = re.sub(r'\s{2,}', ' ', result).strip()
+    return result if result else text.strip()
+
+
+def _deduplicate_answer(text: str) -> str:
+    """Remove duplicate sentences, empty IMG tags, and cap PIC markers from LLM output."""
+    # Remove empty IMG tags
+    text = re.sub(r'<IMG\s+src=""[^>]*/>', '', text)
+    # Remove "请以实际产品型号和说明书原文为准" disclaimer
+    text = re.sub(r'请以实际产品型号和说明书原文为准[。]?\s*', '', text)
+    # Cap PIC markers at 3
+    pic_count = text.count('<PIC>')
+    if pic_count > 3:
+        # Keep only first 3 PIC markers
+        parts = text.split('<PIC>')
+        text = '<PIC>'.join(parts[:4]) + ''.join(parts[4:]).replace('<PIC>', '')
+
+    # Split into sentences and deduplicate
+    sentences = re.split(r'(?<=[。！？.!?])\s+|(?<=[。！？.!?])$', text)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        # Normalize for comparison: strip whitespace and PIC markers
+        key = re.sub(r'\s+', '', s)
+        key = re.sub(r'<PIC>', '', key)
+        key = re.sub(r'</?PIC>', '', key)
+        if not key or len(key) < 4:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(s)
+    result = ' '.join(unique)
+    # Remove "（相关配图：...）" inline references
+    result = re.sub(r'（相关配图：[^）]*）', '', result)
+    result = re.sub(r'\s{2,}', ' ', result).strip()
+    return result if result else text.strip()
+
+
 def _is_ascii_heavy(text: str) -> bool:
     letters = re.findall(r"[A-Za-z]", text)
     cjk = re.findall(r"[\u4e00-\u9fff]", text)
@@ -304,9 +361,9 @@ def _build_extractive_manual_answer(
     ]
     if not details and selected:
         details = [selected[0]] if not _is_duplicate_evidence_sentence(selected[0], [conclusion]) else []
-    caution = "The answer is extracted from the retrieved manual evidence. Please follow the original manual for safety-critical operation."
+    caution = ""
     if not _is_ascii_heavy(query):
-        caution = "以上内容来自检索到的说明书证据，涉及安全操作时请以原说明书为准。"
+        caution = "涉及安全操作时请以原说明书为准。"
 
     lines = [conclusion]
     if details:
@@ -315,10 +372,10 @@ def _build_extractive_manual_answer(
             lines.append(f"{i}. {item}")
     if caution:
         lines.extend(["", caution])
-    # Insert <PIC> markers for image-text complementarity
+    # Insert <PIC> markers for image-text complementarity (cap at 3)
     if image_ids:
         lines.append("")
-        lines.append("相关配图如下：" + "".join(f"<PIC>" for _ in image_ids))
+        lines.append("相关配图如下：" + "<PIC>" * min(len(image_ids), 3))
     return "\n".join(lines).strip()
 
 
@@ -785,29 +842,20 @@ def _build_visual_focus_terms(image_features: dict[str, list[str]] | None) -> li
 # ---------------------------------------------------------------------------
 
 class AgentService:
-    """Retrieve -> assemble context -> call Ollama LLM -> return answer."""
+    """Retrieve -> assemble context -> call LLM -> return answer."""
 
     def __init__(
         self,
         retriever: SQLiteRetriever | None = None,
-        base_url: str = OLLAMA_BASE_URL,
-        model: str = OLLAMA_MODEL,
+        llm_client: LLMClient | None = None,
     ) -> None:
         self.retriever = retriever or SQLiteRetriever()
-        self.model = model
-        self.base_url = base_url.rstrip("/")
+        self.llm_client = llm_client or LLMClient()
         self.session_store = InMemorySessionStore(max_history_turns=MAX_HISTORY_TURNS)
         self.context_manager = ContextManager(max_history_turns=MAX_HISTORY_TURNS)
         self.question_router = QuestionRouter()
         self.customer_service_policy = CustomerServicePolicy()
-        if httpx is None:
-            raise RuntimeError("httpx is required to use AgentService with Ollama. Please install requirements.txt")
-        self.http_client = httpx.Client(proxy=None, timeout=120.0)
-        self.image_understander = ImageUnderstander(
-            base_url=self.base_url,
-            http_client=self.http_client,
-            vision_model=OLLAMA_VISION_MODEL,
-        )
+        self.image_understander = ImageUnderstander(llm_client=self.llm_client)
         self.image_index = _load_image_index()
 
     def _build_subquestion_query(
@@ -901,6 +949,7 @@ class AgentService:
 
         # 4. Call LLM
         answer = self._call_llm(messages)
+        answer = _deduplicate_answer(answer)
         answer = format_manual_answer(answer, image_ids=image_ids)
         if _is_ascii_heavy(query) and _is_manual_fallback_answer(answer):
             answer = _build_extractive_manual_answer(
@@ -961,8 +1010,34 @@ class AgentService:
             question,
             context_topics=context_topics,
         )
+
+        # Send policy context through LLM for natural language generation
+        # instead of returning raw template text
+        cs_system = (
+            '你是一个专业的产品客服人员。请根据以下【客服策略参考】，用自然、亲切的语气直接回答用户的问题。\n'
+            '要求：\n'
+            '1. 直接针对用户的具体问题回答，不要说"按通用客服流程处理"这类泛泛而谈的话。\n'
+            '2. 回答要简洁具体，给出可操作的建议，不要重复相同内容。\n'
+            '3. 不要输出思考过程，不要使用markdown格式。\n'
+            '4. 不要重复用户的问题。\n\n'
+            f'【客服策略参考】\n{policy_response.answer}'
+        )
+
+        messages = [
+            {"role": "system", "content": cs_system},
+            {"role": "user", "content": question},
+        ]
+
+        try:
+            llm_answer = self._call_llm(messages)
+        except Exception:
+            llm_answer = policy_response.answer
+
+        # Post-process: remove garbage patterns
+        llm_answer = _clean_cs_answer(llm_answer)
+
         return {
-            "answer": format_customer_service_answer(policy_response.answer),
+            "answer": format_customer_service_answer(llm_answer),
             "image_ids": [],
             "images": [],
             "sources": ["customer_service_policy"],
@@ -1107,7 +1182,7 @@ class AgentService:
             image_id
             for result in sub_results
             for image_id in result["image_ids"]
-        ])
+        ])[:5]  # Cap at 5 images per answer
         merged_images = _merge_images([result["images"] for result in sub_results])
         merged_sources = _unique([
             source
@@ -1270,11 +1345,7 @@ class AgentService:
         if not hasattr(self, "customer_service_policy"):
             self.customer_service_policy = CustomerServicePolicy()
         if not hasattr(self, "image_understander"):
-            self.image_understander = ImageUnderstander(
-                base_url=self.base_url,
-                http_client=getattr(self, "http_client", None),
-                vision_model=OLLAMA_VISION_MODEL,
-            )
+            self.image_understander = ImageUnderstander(llm_client=self.llm_client)
 
     def _analyze_uploaded_images(self, request: ChatRequest) -> ImageUnderstandingResult:
         self._ensure_runtime_components()
@@ -1284,28 +1355,16 @@ class AgentService:
         )
 
     # ------------------------------------------------------------------
-    # LLM call — Ollama native /api/chat (supports think=false)
+    # LLM call — OpenAI-compatible API via LLMClient
     # ------------------------------------------------------------------
 
     def _call_llm(self, messages: list[dict[str, str]]) -> str:
         try:
-            resp = self.http_client.post(
-                f"{self.base_url}/api/chat",
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "stream": False,
-                    "think": False,           # disable qwen3 thinking mode
-                    "options": {
-                        "temperature": 0.3,
-                        "num_predict": 2048,  # max output tokens
-                    },
-                },
+            return self.llm_client.chat(
+                messages,
+                temperature=0.1,
+                max_tokens=2048,
+                strip_think=True,
             )
-            resp.raise_for_status()
-            data = resp.json()
-            content = data.get("message", {}).get("content", "")
-            content = _strip_thinking(content)
-            return content.strip() if content.strip() else "模型未返回有效回答。"
         except Exception as exc:
             return f"LLM 调用失败: {exc}"

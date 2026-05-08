@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import os
 import re
 import struct
 from dataclasses import asdict, dataclass, field
@@ -92,19 +91,16 @@ class ImageUnderstandingResult:
 
 
 class ImageUnderstander:
-    """Analyze uploaded images and optionally call a vision-capable Ollama model."""
+    """Analyze uploaded images and optionally call a vision-capable LLM."""
 
     def __init__(
         self,
         *,
-        base_url: str,
-        http_client: Any = None,
-        vision_model: str | None = None,
+        llm_client: Any | None = None,
         max_vision_images: int = 1,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.http_client = http_client
-        self.vision_model = (vision_model or os.getenv("OLLAMA_VISION_MODEL", "")).strip()
+        self.llm_client = llm_client
+        self.vision_model = (llm_client.vision_model if llm_client else "").strip()
         self.max_vision_images = max_vision_images
 
     def analyze_images(self, images: list[str] | None, *, question: str = "") -> ImageUnderstandingResult:
@@ -170,7 +166,7 @@ class ImageUnderstander:
                     **{
                         **asdict(observation),
                         "visual_summary": caption,
-                        "source": "ollama_vision",
+                        "source": "llm_vision",
                     }
                 )
 
@@ -192,31 +188,22 @@ class ImageUnderstander:
         )
 
     def _can_use_vision(self) -> bool:
-        return bool(self.vision_model and self.http_client is not None)
+        return bool(self.vision_model and self.llm_client is not None)
 
     def _caption_image(self, base64_payload: str, *, question: str) -> str:
         if not self._can_use_vision():
             return ""
         try:
-            response = self.http_client.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": self.vision_model,
-                    "prompt": VISION_PROMPT_TEMPLATE.format(question=question or "请描述这张图片"),
-                    "images": [base64_payload],
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.1,
-                        "num_predict": 160,
-                    },
-                },
+            content = self.llm_client.chat_with_image(
+                question=question or "请描述这张图片",
+                image_base64=base64_payload,
+                system_prompt=VISION_PROMPT_TEMPLATE.format(question=question or "请描述这张图片"),
+                temperature=0.1,
+                max_tokens=160,
             )
-            response.raise_for_status()
-            payload = response.json()
         except Exception:
             return ""
 
-        content = str(payload.get("response", "")).strip()
         content = re.sub(r"\s+", " ", content)
         content = re.sub(r"^\d+\.\s*", "", content)
         content = re.sub(r"\s*\d+\.\s*", "；", content)

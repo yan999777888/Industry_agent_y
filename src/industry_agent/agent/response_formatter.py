@@ -170,7 +170,7 @@ def _build_sections_from_plain_text(text: str) -> dict[str, list[str]]:
         if sentence not in cautions
     ] or [sentences[0]]
     if not cautions:
-        cautions = ["请以实际产品型号和说明书原文为准。"]
+        cautions = ["请参考说明书相关章节中的安全注意事项。"]
     return {
         "结论": conclusion,
         "操作/说明": _dedupe_lines(operation),
@@ -202,12 +202,12 @@ def _fill_missing_sections(sections: dict[str, list[str]]) -> dict[str, list[str
             for line in [*operation, *conclusion]
             if any(pattern.search(line) for pattern in _CAUTION_PATTERNS)
         ]
-        cautions = extracted or ["说明书未明确提及额外注意事项，请以实际产品和原文为准。"]
+        cautions = extracted or ["请参考说明书相关章节中的安全注意事项。"]
 
     if operation == conclusion:
         operation = [line for line in operation if line not in conclusion] or operation
     if cautions == conclusion:
-        cautions = ["说明书未明确提及额外注意事项，请以实际产品和原文为准。"]
+        cautions = ["请参考说明书相关章节中的安全注意事项。"]
 
     result["结论"] = _dedupe_lines(conclusion[:2])
     result["操作/说明"] = _dedupe_lines(operation[:3])
@@ -224,7 +224,7 @@ def _render_manual_sections(sections: dict[str, list[str]], *, image_ids: list[s
         bullet_lines = "\n".join(f"- {line}" for line in lines)
         blocks.append(f"{label}：\n{bullet_lines}")
 
-    image_line = "、".join(image_ids[:4]) if image_ids else "无"
+    image_line = "、".join(image_ids[:3]) if image_ids else "无"
     blocks.append(f"相关图片：\n- {image_line}")
     return "\n\n".join(blocks).strip()
 
