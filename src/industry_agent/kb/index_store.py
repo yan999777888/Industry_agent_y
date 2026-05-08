@@ -174,20 +174,35 @@ def _create_fts_index(conn: sqlite3.Connection, chunks: list[KnowledgeChunk]) ->
     treats each Unicode codepoint as a token, which makes substring-style
     MATCH queries work for CJK characters.
     """
-    try:
-        conn.execute(
-            """
-            CREATE VIRTUAL TABLE chunks_fts USING fts5(
-              chunk_id UNINDEXED,
-              manual_id UNINDEXED,
-              product_name,
-              title,
-              text,
-              tokenize='unicode61 categories "L* N* Co"'
-            )
-            """
+    create_sql_candidates = (
+        """
+        CREATE VIRTUAL TABLE chunks_fts USING fts5(
+          chunk_id UNINDEXED,
+          manual_id UNINDEXED,
+          product_name,
+          title,
+          text,
+          tokenize='unicode61 categories "L* N* Co"'
         )
-    except sqlite3.OperationalError:
+        """,
+        """
+        CREATE VIRTUAL TABLE chunks_fts USING fts5(
+          chunk_id UNINDEXED,
+          manual_id UNINDEXED,
+          product_name,
+          title,
+          text,
+          tokenize='unicode61'
+        )
+        """,
+    )
+    for create_sql in create_sql_candidates:
+        try:
+            conn.execute(create_sql)
+            break
+        except sqlite3.OperationalError:
+            continue
+    else:
         return False
 
     conn.executemany(
