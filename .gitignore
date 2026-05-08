@@ -10,7 +10,7 @@ venv/
 # Local IDE / tool files
 .vscode/
 .claude/
-bge-smart-agent/
+bge-small-zh-v1.5/
 
 # Local processed artifacts
 data/processed/index.sqlite

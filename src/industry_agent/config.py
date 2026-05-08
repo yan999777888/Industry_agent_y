@@ -25,7 +25,7 @@ class Settings:
     retrieval_mode: str = os.getenv("RETRIEVAL_MODE", "hybrid")
 
     # LLM (OpenAI-compatible cloud API)
-    llm_api_key: str = os.getenv("LLM_API_KEY", "sk-c")
+    llm_api_key: str = os.getenv("LLM_API_KEY", "sk-")
     llm_base_url: str = os.getenv("LLM_BASE_URL", "https://api.xiaomimimo.com/v1")
     llm_model: str = os.getenv("LLM_MODEL", "mimo-v2.5-pro")
     llm_vision_model: str = os.getenv("LLM_VISION_MODEL", "mimo-v2.5-pro")
