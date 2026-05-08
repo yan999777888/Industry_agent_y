@@ -3,10 +3,10 @@
     "manual_id": "VR头显手册",
     "product_name": "VR头显",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/VR头显手册.txt",
-    "char_count": 5043,
+    "char_count": 5047,
     "pic_count": 10,
     "image_count": 10,
-    "chunk_count": 34,
+    "chunk_count": 32,
     "parse_mode": "json"
   },
   {
@@ -23,27 +23,27 @@
     "manual_id": "健身单车手册",
     "product_name": "健身单车",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/健身单车手册.txt",
-    "char_count": 10871,
+    "char_count": 10880,
     "pic_count": 43,
     "image_count": 43,
-    "chunk_count": 67,
+    "chunk_count": 66,
     "parse_mode": "json"
   },
   {
     "manual_id": "健身追踪器手册",
     "product_name": "健身追踪器",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/健身追踪器手册.txt",
-    "char_count": 12937,
+    "char_count": 12934,
     "pic_count": 57,
     "image_count": 57,
-    "chunk_count": 90,
+    "chunk_count": 89,
     "parse_mode": "json"
   },
   {
     "manual_id": "儿童电动摩托车手册",
     "product_name": "儿童电动摩托车",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/儿童电动摩托车手册.txt",
-    "char_count": 4946,
+    "char_count": 4951,
     "pic_count": 23,
     "image_count": 23,
     "chunk_count": 30,
@@ -53,10 +53,10 @@
     "manual_id": "冰箱手册",
     "product_name": "冰箱",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/冰箱手册.txt",
-    "char_count": 7233,
+    "char_count": 7239,
     "pic_count": 58,
     "image_count": 58,
-    "chunk_count": 125,
+    "chunk_count": 103,
     "parse_mode": "json"
   },
   {
@@ -66,17 +66,17 @@
     "char_count": 4233,
     "pic_count": 19,
     "image_count": 19,
-    "chunk_count": 44,
+    "chunk_count": 43,
     "parse_mode": "json"
   },
   {
     "manual_id": "发电机手册",
     "product_name": "发电机",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/发电机手册.txt",
-    "char_count": 9143,
+    "char_count": 9148,
     "pic_count": 102,
     "image_count": 101,
-    "chunk_count": 92,
+    "chunk_count": 86,
     "parse_mode": "json"
   },
   {
@@ -86,7 +86,7 @@
     "char_count": 5131,
     "pic_count": 57,
     "image_count": 58,
-    "chunk_count": 48,
+    "chunk_count": 43,
     "parse_mode": "json"
   },
   {
@@ -96,77 +96,77 @@
     "char_count": 7460,
     "pic_count": 54,
     "image_count": 54,
-    "chunk_count": 59,
+    "chunk_count": 55,
     "parse_mode": "json"
   },
   {
     "manual_id": "摩托艇手册",
     "product_name": "摩托艇",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/摩托艇手册.txt",
-    "char_count": 6815,
+    "char_count": 6802,
     "pic_count": 35,
     "image_count": 35,
-    "chunk_count": 68,
+    "chunk_count": 61,
     "parse_mode": "json"
   },
   {
     "manual_id": "水泵手册",
     "product_name": "水泵",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/水泵手册.txt",
-    "char_count": 5407,
+    "char_count": 5415,
     "pic_count": 78,
     "image_count": 78,
-    "chunk_count": 60,
+    "chunk_count": 56,
     "parse_mode": "json"
   },
   {
     "manual_id": "汇总英文手册",
     "product_name": "汇总英文",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/汇总英文手册.txt",
-    "char_count": 1104179,
+    "char_count": 1065597,
     "pic_count": 1783,
     "image_count": 142,
-    "chunk_count": 2972,
+    "chunk_count": 2733,
     "parse_mode": "tail-recovery"
   },
   {
     "manual_id": "洗碗机手册",
     "product_name": "洗碗机",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/洗碗机手册.txt",
-    "char_count": 14124,
+    "char_count": 14121,
     "pic_count": 29,
     "image_count": 30,
-    "chunk_count": 83,
+    "chunk_count": 78,
     "parse_mode": "literal"
   },
   {
     "manual_id": "烤箱手册",
     "product_name": "烤箱",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/烤箱手册.txt",
-    "char_count": 6283,
+    "char_count": 6288,
     "pic_count": 30,
     "image_count": 30,
-    "chunk_count": 54,
+    "chunk_count": 48,
     "parse_mode": "json"
   },
   {
     "manual_id": "电钻手册",
     "product_name": "电钻",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/电钻手册.txt",
-    "char_count": 10542,
+    "char_count": 10545,
     "pic_count": 26,
     "image_count": 26,
-    "chunk_count": 41,
+    "chunk_count": 38,
     "parse_mode": "json"
   },
   {
     "manual_id": "相机手册",
     "product_name": "相机",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/相机手册.txt",
-    "char_count": 15844,
+    "char_count": 15067,
     "pic_count": 87,
     "image_count": 87,
-    "chunk_count": 104,
+    "chunk_count": 94,
     "parse_mode": "json"
   },
   {
@@ -176,37 +176,37 @@
     "char_count": 3009,
     "pic_count": 27,
     "image_count": 27,
-    "chunk_count": 28,
+    "chunk_count": 26,
     "parse_mode": "json"
   },
   {
     "manual_id": "空调手册",
     "product_name": "空调",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/空调手册.txt",
-    "char_count": 7380,
+    "char_count": 7385,
     "pic_count": 36,
     "image_count": 36,
-    "chunk_count": 83,
+    "chunk_count": 74,
     "parse_mode": "json"
   },
   {
     "manual_id": "蒸汽清洁机手册",
     "product_name": "蒸汽清洁机",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/蒸汽清洁机手册.txt",
-    "char_count": 3370,
+    "char_count": 3372,
     "pic_count": 17,
     "image_count": 17,
-    "chunk_count": 24,
+    "chunk_count": 20,
     "parse_mode": "json"
   },
   {
     "manual_id": "蓝牙激光鼠标手册",
     "product_name": "蓝牙激光鼠标",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/蓝牙激光鼠标手册.txt",
-    "char_count": 3256,
+    "char_count": 3259,
     "pic_count": 19,
     "image_count": 19,
-    "chunk_count": 24,
+    "chunk_count": 23,
     "parse_mode": "json"
   }
 ]

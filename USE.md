@@ -838,6 +838,32 @@ tests/fixtures/regression_cases.json
 
 后续如果我们新增功能，也应该优先把验证样例补到这套固定回归集中。
 
+### 示例 8：重建清洗后的知识库索引
+
+当修改了手册解析、数据清洗、chunk 切分或检索元数据后，需要重新构建知识库：
+
+```bash
+python3 scripts/build_kb.py
+```
+
+构建完成后重点检查输出中的：
+
+- `chunk_count`：当前清洗后为 `3800`
+- `sqlite.fts5_available`：应为 `true`
+- `warnings`：主要用于确认原始手册的 `<PIC>` 数量和图片列表是否一致
+
+本阶段清洗后的 chunk 元数据会包含：
+
+- `domain_label`：用于区分 `汇总英文` 内部的产品领域，例如 `lawn_mower`、`coffee_machine`、`fax`、`toothbrush`、`grill`、`television`、`washing_machine`
+- `semantic_type`：用于区分 `procedure`、`safety_warning`、`troubleshooting`、`parts_list`、`specification` 等语义类型
+- `clean_score`：用于检索排序时降低目录、OCR 噪声等低质量 chunk 的优先级
+
+可以运行以下命令确认测试通过：
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
 ### 关键文件
 
 | 文件 | 职责 |

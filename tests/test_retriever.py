@@ -168,6 +168,102 @@ class RetrieverScoringTests(unittest.TestCase):
         )
         self.assertGreater(focused["_score"], generic["_score"])
 
+    def test_score_row_uses_english_domain_metadata_to_reduce_cross_product_noise(self) -> None:
+        retriever = SQLiteRetriever()
+        analysis = analyze_query("What is the correct procedure for cleaning the side brush of a vacuum cleaner?")
+        focused = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "focused",
+                "title": "Cleaning the side brush",
+                "text": "Remove hair and debris from the vacuum side brush.",
+                "product_name": "汇总英文",
+                "image_ids": "[]",
+                "metadata": '{"domain_label": "vacuum", "clean_score": 1.0}',
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+        noisy = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "noisy",
+                "title": "Cleaning cooking surfaces",
+                "text": "Clean the grill cooking surfaces with a brush.",
+                "product_name": "汇总英文",
+                "image_ids": "[]",
+                "metadata": '{"domain_label": "grill", "clean_score": 0.7}',
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+
+        self.assertGreater(focused["_score"], noisy["_score"])
+
+    def test_score_row_prefers_procedure_metadata_for_how_to_queries(self) -> None:
+        retriever = SQLiteRetriever()
+        analysis = analyze_query("How do I clean the side brush of a vacuum cleaner?")
+        procedure = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "procedure",
+                "title": "Cleaning the side brush",
+                "text": "1. Remove the side brush. 2. Clean any hair and debris from the vacuum.",
+                "product_name": "汇总英文",
+                "image_ids": "[]",
+                "metadata": '{"domain_label": "vacuum", "clean_score": 1.0, "semantic_type": "procedure", "is_procedure": true}',
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+        warning = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "warning",
+                "title": "Cleaning Safety",
+                "text": "WARNING: Do not clean the product while it is connected to power.",
+                "product_name": "汇总英文",
+                "image_ids": "[]",
+                "metadata": '{"domain_label": "vacuum", "clean_score": 1.0, "semantic_type": "safety_warning", "is_warning_only": true}',
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+
+        self.assertGreater(procedure["_score"], warning["_score"])
+
+    def test_score_row_prefers_troubleshooting_metadata_for_fault_queries(self) -> None:
+        retriever = SQLiteRetriever()
+        analysis = analyze_query("指示灯一直闪烁是什么故障？")
+        troubleshooting = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "trouble",
+                "title": "指示灯闪烁故障",
+                "text": "如果指示灯持续闪烁，请检查电池和连接状态。",
+                "product_name": "测试产品",
+                "image_ids": "[]",
+                "metadata": '{"clean_score": 1.0, "semantic_type": "troubleshooting"}',
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+        generic = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "generic",
+                "title": "指示灯位置",
+                "text": "指示灯位于设备正面。",
+                "product_name": "测试产品",
+                "image_ids": "[]",
+                "metadata": '{"clean_score": 1.0, "semantic_type": "general"}',
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+
+        self.assertGreater(troubleshooting["_score"], generic["_score"])
+
 
 class RetrieverIntegrationTests(unittest.TestCase):
     def test_search_prefers_boating_battery_switch_chunk_when_query_mentions_sailing(self) -> None:

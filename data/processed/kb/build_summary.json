@@ -2,7 +2,7 @@
   "knowledge_dir": "Knowledge_base",
   "output_dir": "data/processed/kb",
   "manual_count": 21,
-  "chunk_count": 4132,
+  "chunk_count": 3800,
   "referenced_image_count": 958,
   "disk_image_count": 2608,
   "missing_image_count": 0,
@@ -11,7 +11,7 @@
   "sqlite": {
     "db_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/data/processed/kb/index.sqlite",
     "fts5_available": true,
-    "chunk_count": 4132,
+    "chunk_count": 3800,
     "image_count": 2608,
     "manual_count": 21
   },
