@@ -7,7 +7,12 @@
     "pic_count": 10,
     "image_count": 10,
     "chunk_count": 32,
-    "parse_mode": "json"
+    "parse_mode": "json",
+    "attached_image_count": 10,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "人体工学椅手册",
@@ -17,7 +22,12 @@
     "pic_count": 16,
     "image_count": 16,
     "chunk_count": 2,
-    "parse_mode": "json"
+    "parse_mode": "json",
+    "attached_image_count": 16,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "健身单车手册",
@@ -27,7 +37,12 @@
     "pic_count": 43,
     "image_count": 43,
     "chunk_count": 66,
-    "parse_mode": "json"
+    "parse_mode": "json",
+    "attached_image_count": 43,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "健身追踪器手册",
@@ -37,7 +52,12 @@
     "pic_count": 57,
     "image_count": 57,
     "chunk_count": 89,
-    "parse_mode": "json"
+    "parse_mode": "json",
+    "attached_image_count": 57,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "儿童电动摩托车手册",
@@ -47,7 +67,12 @@
     "pic_count": 23,
     "image_count": 23,
     "chunk_count": 30,
-    "parse_mode": "json"
+    "parse_mode": "json",
+    "attached_image_count": 23,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "冰箱手册",
@@ -56,8 +81,13 @@
     "char_count": 7239,
     "pic_count": 58,
     "image_count": 58,
-    "chunk_count": 103,
-    "parse_mode": "json"
+    "chunk_count": 101,
+    "parse_mode": "json",
+    "attached_image_count": 58,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "功能键盘手册",
@@ -66,8 +96,13 @@
     "char_count": 4233,
     "pic_count": 19,
     "image_count": 19,
-    "chunk_count": 43,
-    "parse_mode": "json"
+    "chunk_count": 36,
+    "parse_mode": "json",
+    "attached_image_count": 19,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "发电机手册",
@@ -76,8 +111,13 @@
     "char_count": 9148,
     "pic_count": 102,
     "image_count": 101,
-    "chunk_count": 86,
-    "parse_mode": "json"
+    "chunk_count": 81,
+    "parse_mode": "json",
+    "attached_image_count": 101,
+    "unmatched_pic_count": 1,
+    "pic_coverage_ratio": 0.9902,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "可编程温控器手册",
@@ -86,8 +126,13 @@
     "char_count": 5131,
     "pic_count": 57,
     "image_count": 58,
-    "chunk_count": 43,
-    "parse_mode": "json"
+    "chunk_count": 42,
+    "parse_mode": "json",
+    "attached_image_count": 57,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0175,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "吹风机手册",
@@ -96,38 +141,58 @@
     "char_count": 7460,
     "pic_count": 54,
     "image_count": 54,
-    "chunk_count": 55,
-    "parse_mode": "json"
+    "chunk_count": 54,
+    "parse_mode": "json",
+    "attached_image_count": 54,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "摩托艇手册",
     "product_name": "摩托艇",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/摩托艇手册.txt",
-    "char_count": 6802,
+    "char_count": 6804,
     "pic_count": 35,
     "image_count": 35,
     "chunk_count": 61,
-    "parse_mode": "json"
+    "parse_mode": "json",
+    "attached_image_count": 35,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "水泵手册",
     "product_name": "水泵",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/水泵手册.txt",
-    "char_count": 5415,
+    "char_count": 5416,
     "pic_count": 78,
     "image_count": 78,
-    "chunk_count": 56,
-    "parse_mode": "json"
+    "chunk_count": 55,
+    "parse_mode": "json",
+    "attached_image_count": 78,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "汇总英文手册",
     "product_name": "汇总英文",
     "source_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/Knowledge_base/汇总英文手册.txt",
-    "char_count": 1065597,
+    "char_count": 1066166,
     "pic_count": 1783,
     "image_count": 142,
-    "chunk_count": 2733,
-    "parse_mode": "tail-recovery"
+    "chunk_count": 2307,
+    "parse_mode": "tail-recovery",
+    "attached_image_count": 0,
+    "unmatched_pic_count": 1783,
+    "pic_coverage_ratio": 0.0796,
+    "attachment_strategy": "suppress_misaligned",
+    "suppressed_image_count": 142
   },
   {
     "manual_id": "洗碗机手册",
@@ -137,7 +202,12 @@
     "pic_count": 29,
     "image_count": 30,
     "chunk_count": 78,
-    "parse_mode": "literal"
+    "parse_mode": "literal",
+    "attached_image_count": 29,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0345,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "烤箱手册",
@@ -147,7 +217,12 @@
     "pic_count": 30,
     "image_count": 30,
     "chunk_count": 48,
-    "parse_mode": "json"
+    "parse_mode": "json",
+    "attached_image_count": 30,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "电钻手册",
@@ -157,7 +232,12 @@
     "pic_count": 26,
     "image_count": 26,
     "chunk_count": 38,
-    "parse_mode": "json"
+    "parse_mode": "json",
+    "attached_image_count": 26,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "相机手册",
@@ -167,7 +247,12 @@
     "pic_count": 87,
     "image_count": 87,
     "chunk_count": 94,
-    "parse_mode": "json"
+    "parse_mode": "json",
+    "attached_image_count": 87,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "空气净化器手册",
@@ -177,7 +262,12 @@
     "pic_count": 27,
     "image_count": 27,
     "chunk_count": 26,
-    "parse_mode": "json"
+    "parse_mode": "json",
+    "attached_image_count": 27,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "空调手册",
@@ -186,8 +276,13 @@
     "char_count": 7385,
     "pic_count": 36,
     "image_count": 36,
-    "chunk_count": 74,
-    "parse_mode": "json"
+    "chunk_count": 71,
+    "parse_mode": "json",
+    "attached_image_count": 36,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "蒸汽清洁机手册",
@@ -197,7 +292,12 @@
     "pic_count": 17,
     "image_count": 17,
     "chunk_count": 20,
-    "parse_mode": "json"
+    "parse_mode": "json",
+    "attached_image_count": 17,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   },
   {
     "manual_id": "蓝牙激光鼠标手册",
@@ -206,7 +306,12 @@
     "char_count": 3259,
     "pic_count": 19,
     "image_count": 19,
-    "chunk_count": 23,
-    "parse_mode": "json"
+    "chunk_count": 21,
+    "parse_mode": "json",
+    "attached_image_count": 19,
+    "unmatched_pic_count": 0,
+    "pic_coverage_ratio": 1.0,
+    "attachment_strategy": "sequential",
+    "suppressed_image_count": 0
   }
 ]

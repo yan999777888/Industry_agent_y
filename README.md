@@ -20,13 +20,38 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-推荐在启动服务前显式配置 Ollama 文本模型和视觉模型：
+当前默认配置已经与 `Industry_agent_y` 对齐，推荐在启动服务前优先配置云端 OpenAI-compatible API：
+
+```bash
+export EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+export RETRIEVAL_MODE=hybrid
+export INDUSTRY_AGENT_AGENT_BACKEND=service
+export INDUSTRY_AGENT_LLM_BACKEND=openai_compatible
+export LLM_API_KEY=your-api-key
+export LLM_BASE_URL=https://api.xiaomimimo.com/v1
+export LLM_MODEL=mimo-v2.5-pro
+export LLM_VISION_MODEL=mimo-v2.5-pro
+```
+
+当前默认嵌入、检索和大模型后端都已经对齐到 `Industry_agent_y` 的配置：
+- 默认嵌入模型：`BAAI/bge-small-zh-v1.5`
+- 默认检索模式：`hybrid`
+- 默认大模型后端：`openai_compatible`
+- 默认文本/视觉模型：`mimo-v2.5-pro`
+
+如果你修改了嵌入模型或检索模式，需要重新执行 `python3 scripts/build_kb.py` 重建向量索引。
+
+如果你想改回本地 Ollama，可以切到下面这组可选配置：
 
 ```bash
 export OLLAMA_BASE_URL=http://127.0.0.1:11434
 export OLLAMA_MODEL=qwen3.5:2b
 export OLLAMA_VISION_MODEL=llava-phi3
+export INDUSTRY_AGENT_AGENT_BACKEND=service
+export INDUSTRY_AGENT_LLM_BACKEND=ollama
 ```
+
+如果你还想启用参考 `Industry_agent_y/` 择优合并进来的模块化编排器，再把 `INDUSTRY_AGENT_AGENT_BACKEND` 改成 `orchestrator` 即可。
 
 如果后续需要直接启动 API 服务，也可以继续执行：
 
@@ -59,10 +84,11 @@ Industry_Agent/
 ├── scripts/
 │   ├── build_kb.py
 │   ├── evaluate_chat.py
+│   ├── analyze_submission_quality.py
 │   ├── generate_submission.py
 │   ├── observe_chat_quality.py
-│   └── run_regression_suite.py
-│   └── reprocess——sybmission。py
+│   ├── run_regression_suite.py
+│   └── reprocess_submission.py
 ├── src/
 │   └── industry_agent/
 │       ├── __init__.py
@@ -71,13 +97,23 @@ Industry_Agent/
 │       │   ├── __init__.py
 │       │   ├── context_manager.py
 │       │   ├── customer_service_policy.py
+│       │   ├── customer_service_kb.py
+│       │   ├── customer_service_kb_data.json
 │       │   ├── image_understanding.py
+│       │   ├── orchestrator.py
+│       │   ├── prompts.py
 │       │   ├── question_router.py
 │       │   ├── question_splitter.py
 │       │   ├── response_formatter.py
 │       │   ├── runtime_checks.py
 │       │   ├── service.py
 │       │   ├── session_store.py
+│       │   ├── skills/
+│       │   │   ├── __init__.py
+│       │   │   ├── evaluation_skill.py
+│       │   │   ├── image_skill.py
+│       │   │   ├── retrieval_skill.py
+│       │   │   └── routing_skill.py
 │       │   └── test_api.py
 │       ├── api/
 │       │   ├── __init__.py
@@ -91,7 +127,14 @@ Industry_Agent/
 │       │   └── parser.py
 │       ├── rag/
 │       │   ├── __init__.py
-│       │   └── retriever.py
+│       │   ├── embedding.py
+│       │   ├── hybrid_retriever.py
+│       │   ├── index_builder.py
+│       │   ├── retriever.py
+│       │   └── vector_store.py
+│       ├── llm/
+│       │   ├── __init__.py
+│       │   └── client.py
 │       └── utils/
 │           └── __init__.py
 ├── tests/
@@ -99,11 +142,13 @@ Industry_Agent/
 │   │   ├── quality_observation_cases.json
 │   │   └── regression_cases.json
 │   ├── test_agent_flow.py
+│   ├── test_prompt_and_retrieval_config.py
 │   ├── test_quality_observation.py
 │   ├── test_regression_suite.py
 │   ├── test_retriever.py
 │   ├── test_runtime_checks.py
-│   └── test_submission_generation.py
+│   ├── test_submission_generation.py
+│   └── test_submission_quality_analysis.py
 ├── README.md
 ├── TASK.md
 ├── TODO.md
@@ -122,24 +167,33 @@ Industry_Agent/
 - `scripts/evaluate_chat.py`：对 `/chat` 做小样例端到端评测。
 - `scripts/run_regression_suite.py`：执行固定回归验证集。
 - `scripts/observe_chat_quality.py`：执行带分类标签的端到端质量观察，并输出问题分桶统计。
-- `scripts/generate_submission.py`：读取测试问题并生成提交样例。————自动加<PIC>,自动清理引用标记
-- `scripts/reprocession_submission.py`：对无法回答问题进行处理，变得更像人工客服。————从原来的套话 / 无法回答 → 现在用专属标准答案
-- `src/industry_agent/config.py`：项目路径和默认参数配置。
+- `scripts/generate_submission.py`：读取测试问题并生成提交样例，包含多问结构保留与提交清洗。
+- `scripts/reprocess_submission.py`：对无法回答问题进行二次处理，使提交结果更接近人工客服表达。
+- `src/industry_agent/config.py`：项目路径、后端切换、LLM 与检索模式配置。
 - `src/industry_agent/kb/parser.py`：手册解析、文本标准化、`<PIC>` 占位与图片 ID 对齐处理。
 - `src/industry_agent/kb/chunker.py`：按照章节与长度约束切分知识块，生成可用于 RAG 的 chunk。
 - `src/industry_agent/kb/models.py`：知识库处理过程中使用的数据模型。
 - `src/industry_agent/kb/index_store.py`：将清洗结果写入 JSON、JSONL 和 SQLite 索引。
 - `src/industry_agent/kb/build_index.py`：知识库清洗、切分、索引构建主流程。
-- `src/industry_agent/rag/retriever.py`：当前的 SQLite 检索器，后续会扩展为混合检索。
-- `src/industry_agent/agent/service.py`：客服智能体主编排层，负责检索、对话状态、图片理解结果注入和回答生成。————要求加<PIC>,并且去掉了“结论 / 操作 / 说明” 这类冗余前缀，把 token 上限提到 2048，上下文扩到 6000 字符，回答更长更完整
+- `src/industry_agent/rag/embedding.py`：兼容 `Industry_agent_y/` 的嵌入管理封装，统一接到当前向量实现。
+- `src/industry_agent/rag/hybrid_retriever.py`：兼容层混合检索器，提供 RRF 融合接口。
+- `src/industry_agent/rag/index_builder.py`：兼容层向量索引构建入口，可单独重建 `chunk_vectors`。
+- `src/industry_agent/rag/retriever.py`：当前主检索器，使用 SQLite 词法检索并可融合轻量向量召回。
+- `src/industry_agent/rag/vector_store.py`：当前轻量向量检索与可选 sentence-transformers 嵌入入口。
+- `src/industry_agent/llm/client.py`：统一的 LLM 客户端，支持本地 Ollama 和 OpenAI-compatible 云端接口。
+- `src/industry_agent/agent/service.py`：当前默认主编排层，负责检索、对话状态、图片理解结果注入和回答生成。
+- `src/industry_agent/agent/orchestrator.py`：参考 `Industry_agent_y/` 合并进来的可选模块化编排器。
 - `src/industry_agent/agent/question_router.py`：区分说明书问答、客服问题和寒暄输入。
 - `src/industry_agent/agent/question_splitter.py`：复杂问题拆解模块。
 - `src/industry_agent/agent/customer_service_policy.py`：轻量客服策略知识与场景化模板。
+- `src/industry_agent/agent/customer_service_kb.py`：客服知识检索层，优先加载独立客服知识数据，再用 policy projection 做兜底补全。
+- `src/industry_agent/agent/customer_service_kb_data.json`：独立维护的客服知识数据文件，存放高频客服场景的结构化知识条目。
 - `src/industry_agent/agent/response_formatter.py`：回答结构化与输出风格统一。
-- `src/industry_agent/agent/runtime_checks.py`：服务启动前检查 Ollama、模型和索引状态。
+- `src/industry_agent/agent/runtime_checks.py`：服务启动前检查索引、Ollama 或云端 LLM 配置状态。
 - `src/industry_agent/agent/session_store.py`：结构化多轮会话状态存储。
 - `src/industry_agent/agent/context_manager.py`：多轮上下文继承、产品补全和追问解析。
 - `src/industry_agent/agent/image_understanding.py`：用户上传图片的 Base64 解析、元数据抽取和可选视觉描述。
+- `src/industry_agent/agent/skills/`：模块化技能目录，封装路由、检索、图片理解与回答自评。
 - `src/industry_agent/api/app.py`：FastAPI 应用入口，目前已提供 `/health` 和 `/chat` 脚手架。
 - `tests/fixtures/regression_cases.json`：固定回归集。
 - `tests/fixtures/quality_observation_cases.json`：端到端质量观察样例。
@@ -159,7 +213,9 @@ Industry_Agent/
 - `fastapi`：`/chat` RESTful API 服务框架。
 - `uvicorn[standard]`：FastAPI 的 ASGI 运行服务。
 - `httpx`：访问 Ollama 文本模型和可选视觉模型。
+- `openai`：可选的 OpenAI-compatible 云端模型客户端。
 - `pillow`：解析上传图片的尺寸、格式等元数据。
+- `sentence-transformers`：可选的神经嵌入模型，用于更强的语义向量检索。
 
 ## 构建知识库索引
 

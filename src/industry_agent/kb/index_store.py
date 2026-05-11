@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from industry_agent.kb.models import ImageRecord, KnowledgeChunk
+from industry_agent.rag.vector_store import build_chunk_vector_index
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -42,6 +43,7 @@ def build_sqlite_index(
         _create_base_tables(conn)
         _insert_records(conn, chunks, images, manual_records)
         fts_available = _create_fts_index(conn, chunks)
+        vector_summary = build_chunk_vector_index(conn, chunks)
         conn.commit()
     finally:
         conn.close()
@@ -52,6 +54,7 @@ def build_sqlite_index(
         "chunk_count": len(chunks),
         "image_count": len(images),
         "manual_count": len(manual_records),
+        "vector": vector_summary,
     }
 
 

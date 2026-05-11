@@ -56,6 +56,26 @@ def build_payload(case: dict) -> dict:
     }
 
 
+def _get_nested_value(payload: dict, path: str):
+    current = payload
+    for raw_part in path.split("."):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if isinstance(current, list):
+            if not part.isdigit():
+                return None
+            index = int(part)
+            if index < 0 or index >= len(current):
+                return None
+            current = current[index]
+            continue
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
 def check_case(case: dict, response: dict) -> tuple[bool, list[str]]:
     data = response.get("data", {})
     answer = str(data.get("answer", ""))
@@ -85,6 +105,22 @@ def check_case(case: dict, response: dict) -> tuple[bool, list[str]]:
     for term in case.get("expect_error_contains", []):
         if term not in detail_text:
             failures.append(f"missing error detail term: {term}")
+
+    for path, expected in case.get("expect_debug_equals", {}).items():
+        actual = _get_nested_value(data.get("retrieval_debug", {}), str(path))
+        if actual != expected:
+            failures.append(f"debug mismatch at {path}: {actual!r} != {expected!r}")
+
+    for path, expected_terms in case.get("expect_debug_contains", {}).items():
+        actual = _get_nested_value(data.get("retrieval_debug", {}), str(path))
+        if isinstance(expected_terms, list):
+            values = expected_terms
+        else:
+            values = [expected_terms]
+        haystack = json.dumps(actual, ensure_ascii=False) if isinstance(actual, (list, dict)) else str(actual)
+        for term in values:
+            if str(term) not in haystack:
+                failures.append(f"missing debug term at {path}: {term}")
 
     min_image_ids = case.get("min_image_ids")
     if min_image_ids is not None and len(image_ids) < int(min_image_ids):

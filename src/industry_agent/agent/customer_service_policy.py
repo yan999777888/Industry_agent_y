@@ -39,6 +39,20 @@ class TopicRule:
     scenarios: tuple[ScenarioRule, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class MatchedRule:
+    rule: TopicRule
+    score: int
+    specificity_bonus: int
+    scenario_hits: int
+    term_hits: int
+    context_bonus: int
+
+    @property
+    def explicit_hits(self) -> int:
+        return self.term_hits + self.scenario_hits
+
+
 _TOPIC_RULES: tuple[TopicRule, ...] = (
     TopicRule(
         topic="refund_exchange",
@@ -51,6 +65,28 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
         process="一般建议先在订单页发起售后申请，并同步说明问题原因、商品状态和诉求，必要时上传图片或视频证据。",
         contact="如果页面无法直接发起售后，建议携带订单号和证据材料联系人工客服进一步处理。",
         scenarios=(
+            ScenarioRule(
+                name="size_exchange",
+                terms=("更大", "更小", "大一号", "小一号", "换尺寸", "换尺码", "尺码", "尺寸差价", "补差价", "差价"),
+                overview="如果是想把商品更换成更大或更小的尺寸，通常要先看是否仍在换货时效内、商品是否适合尺码更换，以及平台是否支持补差价处理。",
+                materials="建议准备订单号、当前商品规格、想更换的目标尺寸、商品状态说明，以及外包装和配件是否完整的照片。",
+                timeline="尺寸换货和差价处理时效通常取决于订单状态、换货审核、库存以及补差价流程。",
+                fees="是否需要补差价、退差价或承担运费，通常要看新旧规格价格、换货原因以及平台规则；无质量问题时运费更可能由买家承担。",
+                eligibility="是否支持更换尺寸，通常取决于商品是否未明显使用、是否仍在换货时效内，以及目标尺寸是否有库存。",
+                process="建议先确认目标尺寸是否有库存，再在订单页发起换货申请并说明需要更换的规格；如涉及差价，按页面或客服指引补差或退差。",
+                contact="如果页面没有尺寸换货入口或差价规则写得不清楚，建议带上订单号联系人工客服核实。",
+            ),
+            ScenarioRule(
+                name="refund_arrival",
+                terms=("多久到账", "多久能到账", "原路返回", "信用卡", "银行卡", "储蓄卡", "借记卡", "退款多久"),
+                overview="如果你主要关心退款到账，通常会先看支付渠道和退款是否已经审核通过，再判断到账时间。",
+                materials="建议准备订单号、退款申请记录、支付方式、扣款账单或银行卡/信用卡账单截图。",
+                timeline="退款到账时间通常取决于平台审核进度和支付渠道处理速度；信用卡、银行卡或第三方支付到账时效会不同。",
+                fees="退款到账本身通常不以额外费用为核心，但是否有手续费或汇率差异，要看支付渠道规则。",
+                eligibility="如果订单已成功取消或售后审核通过，通常才会进入正式退款流程。",
+                process="建议先确认订单是否已经取消成功或售后是否审核通过，再查看退款状态和原支付渠道回执。",
+                contact="如果长时间未到账，建议带上订单号和账单截图联系人工客服或支付渠道客服核查。",
+            ),
             ScenarioRule(
                 name="seven_day_no_reason",
                 terms=("7天无理由", "七天无理由", "不想要了", "不喜欢", "不合适", "买错了"),
@@ -99,7 +135,7 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
     ),
     TopicRule(
         topic="invoice",
-        terms=("发票", "开发票", "抬头"),
+        terms=("发票", "开发票", "抬头", "补开", "重开"),
         overview="发票问题通常需要确认订单号、开票类型、抬头信息以及当前开票状态。",
         materials="建议先准备订单号、开票类型、发票抬头、税号和接收邮箱等信息。",
         timeline="开票和补开发票的处理时效通常与订单状态、开票系统和平台规则有关，实际时间以平台处理进度为准。",
@@ -108,6 +144,17 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
         process="一般建议先确认订单是否满足开票条件，再提交或修改开票信息，必要时联系人工客服协助处理。",
         contact="如果你不确定发票状态，建议携带订单号直接联系人工客服核实。",
         scenarios=(
+            ScenarioRule(
+                name="invoice_type",
+                terms=("发票类型", "专票", "普票", "电子发票", "纸质发票"),
+                overview="如果你想确认能开什么类型的发票，通常要先看订单开票入口支持的发票种类和商品类目限制。",
+                materials="建议准备订单号、开票抬头、税号、邮箱，以及当前页面的开票选项截图。",
+                timeline="发票开具时效通常取决于订单状态和开票系统处理进度。",
+                fees="普通开票通常不以费用为核心；若涉及纸质邮寄或重开，是否收费要看平台规则。",
+                eligibility="是否支持电子发票、普通发票或专用发票，通常要以订单开票入口和平台规则为准。",
+                process="建议先进入订单页查看可选发票类型；如果没有目标类型，再联系人工客服核实。",
+                contact="如果你需要确认企业专票或纸质发票，建议带上订单号和开票需求联系人工客服。",
+            ),
             ScenarioRule(
                 name="invoice_reissue",
                 terms=("重开", "重开发票", "开错", "抬头填错", "税号错", "邮箱错"),
@@ -119,11 +166,22 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
                 process="建议先确认错误项属于抬头、税号还是邮箱；若支持修改或重开，尽快在订单页或客服渠道提交更正申请。",
                 contact="如果你不确定当前发票是否还能重开，建议带上订单号和错误发票截图联系人工客服核实。",
             ),
+            ScenarioRule(
+                name="invoice_after_issued",
+                terms=("已经开票", "已开票", "开出来了", "开完了", "发票已出"),
+                overview="如果发票已经开具，后续想修改抬头、税号或邮箱，通常不能按普通开票重新点选，而是要先看平台是否支持更正、红冲或重开。",
+                materials="建议准备订单号、已开具发票截图、正确的抬头/税号/邮箱信息和当前修改诉求。",
+                timeline="已开具发票的修改或重开时效通常取决于财务审核和平台发票流程。",
+                fees="是否产生额外费用通常要看平台是否支持免费更正或重开，以及是否涉及邮寄。",
+                eligibility="是否还能改，通常取决于发票是否已报销、是否已入账以及平台规则是否允许。",
+                process="建议先确认发票状态，再申请更正、红冲或重开；如果页面没有入口，直接联系人工客服核实。",
+                contact="如果你已经收到开票完成通知，建议一并提供发票截图给人工客服，方便快速判断还能怎么改。",
+            ),
         ),
     ),
     TopicRule(
         topic="shipping",
-        terms=("物流", "快递", "发货", "补发", "签收", "运费", "乡镇", "国外", "配送"),
+        terms=("物流", "快递", "发货", "补发", "签收", "运费", "乡镇", "国外", "配送", "丢件", "退回", "异常"),
         overview="物流和配送问题通常需要结合订单号、物流单号、收货地址以及当前物流状态判断。",
         materials="建议先准备订单号、物流单号、收货地址、异常时间点以及相关截图。",
         timeline="物流时效通常受仓库出库、承运商揽收和目的地配送能力影响，实际到达时间以物流轨迹为准。",
@@ -132,6 +190,17 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
         process="建议先核对物流轨迹、签收状态和地址信息；若长期停滞、少件或误签，可尽快发起物流异常反馈。",
         contact="如物流长时间无更新或疑似丢件，建议携带订单号和物流单号联系人工客服或承运商处理。",
         scenarios=(
+            ScenarioRule(
+                name="village_or_overseas",
+                terms=("乡镇", "农村", "村里", "国外", "海外", "寄到国外", "国际", "偏远地区"),
+                overview="如果你想确认乡镇、偏远地区或海外是否可配送，通常要先看商品是否支持该地区发货，以及末端配送能力是否覆盖。",
+                materials="建议准备订单号、商品链接、详细收货地址或邮编，以及页面配送说明截图。",
+                timeline="乡镇、偏远地区或海外配送时效通常会比普通城市地址更长，实际到达时间取决于仓库、承运商和目的地配送能力。",
+                fees="是否需要额外运费，通常要看商品类目、配送地区和物流方案；偏远地区或海外更可能产生附加费用。",
+                eligibility="是否支持送达，通常取决于商品限制、地区覆盖和平台物流规则，不是所有商品都支持乡镇或海外直送。",
+                process="建议先在商品页或下单页核对配送范围；如果系统未明确显示，再联系人工客服确认详细地址是否可送达。",
+                contact="如果你已经有完整地址或邮编，建议一并提供给人工客服，这样通常更容易直接核实。",
+            ),
             ScenarioRule(
                 name="tracking_stalled",
                 terms=("没更新", "不更新", "没动", "停滞", "卡住", "未揽收", "一直没有物流"),
@@ -142,6 +211,17 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
                 eligibility="是否能按异常物流处理，通常要对照最近轨迹时间和平台承诺时效判断。",
                 process="建议先核对最近一次轨迹更新时间；如果明显超时，可提交物流催查或人工催件。",
                 contact="如果轨迹超过较长时间仍无变化，建议同时联系人工客服和承运商催查。",
+            ),
+            ScenarioRule(
+                name="package_lost_or_returned",
+                terms=("丢件", "找不到", "退回", "被退回", "拒收", "错发", "异常轨迹", "运回"),
+                overview="如果包裹出现丢件、退回、拒收或异常回流，通常要先按物流异常或包裹回查场景处理，而不是直接默认已完成配送。",
+                materials="建议准备订单号、物流单号、最近轨迹截图、签收状态和收件地址信息。",
+                timeline="丢件、退回或异常回流的核查时效通常要看承运商回查和仓库处理速度。",
+                fees="这类问题是否涉及补发运费或退回费用，通常要看责任归属和平台规则。",
+                eligibility="是否能按丢件或异常退回处理，通常要看轨迹是否完整、是否已签收以及承运商核查结果。",
+                process="建议先联系承运商确认包裹当前状态，再在平台提交物流异常或退回异常申请。",
+                contact="如果物流显示退回但你并未发起退货，建议尽快联系人工客服和承运商双向核实。",
             ),
             ScenarioRule(
                 name="signed_but_missing",
@@ -222,6 +302,28 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
                 process="建议先提交检测或维修申请，并如实说明进水、跌落或私拆等情况，避免后续判责反复。",
                 contact="如果你担心被误判，建议在寄修前带上照片和订单号联系人工客服或官方售后做预判。",
             ),
+            ScenarioRule(
+                name="repair_delay_or_repeat_failure",
+                terms=("半个月", "一直没修好", "还没修好", "返修后", "又坏了", "同样的故障", "维修不彻底", "久修未好"),
+                overview="如果维修时间明显过长，或维修后短时间内再次出现同样故障，通常要先按维修进度异常或返修复发场景升级核查。",
+                materials="建议准备订单号、维修单号、送修时间、故障复发说明，以及维修前后照片、视频或聊天记录。",
+                timeline="维修延期或返修复发的处理时效通常取决于售后网点反馈、复检安排和备件情况；如果需要重新返修，周期可能重新计算。",
+                fees="如果确认是上次维修不彻底或返修复发，通常更适合优先核实是否应免费复检、免费返修或延长维修保障。",
+                eligibility="是否支持优先处理、免费复检或延长保障，通常取决于维修记录、故障一致性和售后复核结果。",
+                process="建议先提供维修单号和送修时间，要求售后核实当前维修进度；如果是返修后短时间内同故障复发，可明确说明希望走复检或重新返修流程。",
+                contact="如果网点反馈不清晰或长时间没有结果，建议带上维修单截图联系人工客服或官方售后升级协调。",
+            ),
+            ScenarioRule(
+                name="rejected_or_disputed",
+                terms=("驳回", "拒绝", "不通过", "判定不合理", "想申诉", "复核", "重新审核", "证据不足"),
+                overview="如果售后申请被驳回或你认为判定不合理，通常要先看驳回原因，再决定是补证据、申诉还是升级人工复核。",
+                materials="建议准备订单号、售后单号、驳回截图、故障证据、聊天记录和你希望达到的处理诉求。",
+                timeline="驳回后的再次审核或复核时效通常取决于补充材料是否完整以及平台工单处理速度。",
+                fees="复核本身通常不涉及额外费用，但后续是否产生检测费、维修费或运费，要看最终判责结果。",
+                eligibility="是否还能重新申诉，通常取决于是否仍在售后时效内，以及是否能补充更充分的证据。",
+                process="建议先明确驳回原因；如果是证据不足，就补充照片、视频或聊天记录后重新提交；如果判定有争议，可直接申请人工复核。",
+                contact="如果平台没有明显的复核入口，建议带上售后截图联系人工客服说明你希望重新审核的理由。",
+            ),
         ),
     ),
     TopicRule(
@@ -234,6 +336,30 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
         eligibility="是否支持补发、换货或退款，通常要看问题是否属于运输或质量异常，以及证据是否充分。",
         process="建议先在订单页发起售后，并同步上传图片或视频说明问题。",
         contact="如系统无法提交售后，建议直接联系人工客服升级处理。",
+        scenarios=(
+            ScenarioRule(
+                name="packaging_damage",
+                terms=("包装破损", "外包装破损", "包装损坏", "封条破损", "箱子破了"),
+                overview="如果主要是外包装破损，先要区分是仅包装受损，还是已经影响到商品本体、配件或签收状态。",
+                materials="建议准备订单号、签收时间、外包装照片、商品本体照片以及开箱视频。",
+                timeline="包装破损类售后通常越早报备越容易核实，处理时效取决于售后审核和物流判责。",
+                fees="如果最终判定为运输或质量问题，额外运费通常不应由买家单独承担；具体仍要看售后审核。",
+                eligibility="仅外包装异常不一定直接影响退换货，但是否支持换货、退款或补偿，要看商品是否受损和证据是否充分。",
+                process="建议先拍照留证，再核对商品本体和配件是否完好；如有异常，尽快发起破损售后并上传证据。",
+                contact="如果你担心影响退换，建议带上签收时间和开箱证据联系人工客服先做判责。",
+            ),
+            ScenarioRule(
+                name="missing_items",
+                terms=("少发", "少件", "漏发", "缺件", "少了一件"),
+                overview="如果收到后发现少发、漏发或缺件，通常可以先按缺件或补发场景申请售后核查。",
+                materials="建议准备订单号、包装清单、缺件照片、开箱视频和签收时间。",
+                timeline="缺件或少发的处理时效通常取决于售后审核、仓库核查和补发物流安排。",
+                fees="若核实属于原包装缺失或漏发，补发费用通常不应由买家承担。",
+                eligibility="是否支持补发、换货或退款，通常要看缺少的是主商品还是配件，以及证据是否充分。",
+                process="建议先对照包装清单确认缺少内容，再发起缺件/补发申请，并明确说明缺少的是哪一项。",
+                contact="如果系统无法选择缺件类型，建议带上包装清单和开箱证据联系人工客服处理。",
+            ),
+        ),
     ),
     TopicRule(
         topic="order_change",
@@ -245,10 +371,23 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
         eligibility="如果订单尚未发货，通常更容易申请取消；已发货订单则可能需要走拒收或售后流程。",
         process="建议先确认订单状态，再在订单页提交取消或售后申请。",
         contact="若页面状态异常，建议携带订单号联系人工客服核实。",
+        scenarios=(
+            ScenarioRule(
+                name="refund_arrival",
+                terms=("多久到账", "多久能到账", "原路返回", "信用卡", "退款多久"),
+                overview="如果你主要关心退款到账，通常会按原支付路径退回；是否已经发起退款、以及支付渠道处理速度会直接影响到账时间。",
+                materials="建议准备订单号、退款申请记录、支付方式、扣款账单或信用卡账单截图。",
+                timeline="退款到账时间通常取决于平台审核进度和支付渠道处理速度；信用卡类支付一般也按原路径退回。",
+                fees="退款到账本身通常不以额外费用为核心，但是否有手续费或汇率差异，要看支付渠道规则。",
+                eligibility="如果订单已成功取消或售后审核通过，通常才会进入正式退款流程。",
+                process="建议先确认订单是否已经取消成功或售后是否审核通过，再查看退款状态和原支付渠道回执。",
+                contact="如果长时间未到账，建议带上订单号和账单截图联系人工客服或支付渠道客服核查。",
+            ),
+        ),
     ),
     TopicRule(
         topic="manual_request",
-        terms=("纸质版说明书", "电子版", "说明书"),
+        terms=("纸质版说明书", "电子版说明书", "电子版", "说明书"),
         overview="说明书补发或获取电子版通常需要先确认具体商品名称和型号。",
         materials="建议准备商品名称、型号、订单号以及需要的说明书版本。",
         timeline="电子版通常更容易即时获取；纸质版是否支持补寄以及时效，通常要看包装配置和售后政策。",
@@ -256,6 +395,74 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
         eligibility="是否支持补寄纸质说明书，通常要看商品原始包装清单和品牌政策。",
         process="建议优先通过商品页面、品牌官网或客服渠道获取电子版，再确认是否支持纸质补寄。",
         contact="如果页面找不到说明书入口，建议携带型号联系人工客服。",
+    ),
+    TopicRule(
+        topic="platform_service",
+        terms=("以旧换新", "优惠券", "试用装", "试用", "智能客服", "人工客服", "活动规则", "会员", "优惠", "价格咨询"),
+        overview="平台活动、优惠、试用和智能客服能力通常要以商品页面、活动规则和平台实际入口为准。",
+        materials="建议准备商品名称、订单号、活动页面截图、优惠券信息或客服对话截图。",
+        timeline="活动资格、优惠券使用和人工客服处理时效通常取决于平台规则和当前排队情况。",
+        fees="是否产生费用或能否抵扣，通常要看活动规则、优惠券门槛和商品适用范围。",
+        eligibility="是否支持以旧换新、试用装、优惠券或会员权益，通常取决于商品类目、活动时间和账号资格。",
+        process="建议先查看商品页、活动页或结算页是否有对应入口；如果没有入口，再联系人工客服核实。",
+        contact="智能客服可处理常见订单、物流、售后和发票问题；需要人工核实时，建议转人工并提供订单号和截图。",
+        scenarios=(
+            ScenarioRule(
+                name="trade_in",
+                terms=("以旧换新", "旧机", "回收"),
+                overview="以旧换新通常取决于商品类目、旧机状态、活动入口和平台估价规则。",
+                materials="建议准备新商品链接、旧机型号、成色说明、估价截图和订单信息。",
+                timeline="以旧换新的处理时效通常取决于旧机评估、回收验机和补贴发放流程。",
+                fees="是否有补贴、回收价或额外费用，要以活动页面和旧机检测结果为准。",
+                eligibility="是否符合以旧换新资格，通常要看旧机品类、活动时间和账号/地区限制。",
+                process="建议先在商品页查看是否有以旧换新入口，再按页面要求填写旧机信息并确认估价。",
+                contact="如果页面没有入口或估价异常，建议联系人工客服核实活动资格。",
+            ),
+            ScenarioRule(
+                name="coupon",
+                terms=("优惠券", "优惠", "满减", "券", "折扣"),
+                overview="优惠券能否使用通常取决于有效期、使用门槛、适用品类和是否可叠加。",
+                materials="建议准备优惠券截图、商品链接、结算页截图和账号信息。",
+                timeline="优惠券通常需要在有效期内使用，过期或活动结束后一般较难补用。",
+                fees="优惠券本身不一定收费，重点是是否满足门槛以及是否能与其他活动叠加。",
+                eligibility="是否适用所有商品，要以优惠券详情中的适用范围和排除规则为准。",
+                process="建议在结算页查看是否可勾选优惠券；若不可用，先核对有效期、门槛和适用品类。",
+                contact="如果优惠券满足规则但无法使用，建议带截图联系人工客服核实。",
+            ),
+            ScenarioRule(
+                name="trial_sample",
+                terms=("试用装", "试用", "样品"),
+                overview="是否提供试用装或试用服务通常取决于商品活动、库存和平台规则。",
+                materials="建议准备商品名称、活动页面截图和账号信息。",
+                timeline="试用申请和发放时效通常以活动页面说明为准。",
+                fees="试用是否收费、是否需要押金或运费，要以活动规则为准。",
+                eligibility="是否能申请试用，通常取决于活动名额、账号资格和商品类目。",
+                process="建议先查看商品页或活动页是否有试用入口，再按页面要求提交申请。",
+                contact="如果页面没有试用入口，建议联系人工客服确认是否有相关活动。",
+            ),
+            ScenarioRule(
+                name="trial_extension_or_fault",
+                terms=("试用期", "试用期间", "延长试用", "延长试用期限", "试用故障", "试用期间故障"),
+                overview="试用期间出现故障、想延长试用期限或确认能否换货时，通常要同时看活动规则、试用协议和故障责任判定。",
+                materials="建议准备订单号、商品名称、活动页面或试用协议截图、故障照片/视频，以及试用开始时间和当前状态说明。",
+                timeline="试用延期、故障审核或换货处理时效通常取决于活动规则、客服审核和售后判责进度。",
+                fees="是否需要承担运费、押金或其他费用，通常要看试用活动规则、故障责任和换货方式。",
+                eligibility="是否能延长试用或直接更换故障商品，通常取决于活动是否允许延期、商品是否仍在试用期内，以及故障是否属于非人为原因。",
+                process="建议先核对试用活动规则，再提交故障说明和延期/换货诉求；如果活动页没有自助入口，尽快联系人工客服登记并申请处理。",
+                contact="如果同时涉及试用延期和故障换货，建议一次性提供订单号、活动截图和故障证据给人工客服，避免重复沟通。",
+            ),
+            ScenarioRule(
+                name="smart_customer_service",
+                terms=("智能客服", "人工客服", "解答不了", "转人工"),
+                overview="智能客服通常适合处理订单、物流、退换货、发票和售后等常见问题。",
+                materials="如果要转人工，建议准备订单号、商品名称、问题截图和已尝试过的处理步骤。",
+                timeline="人工客服响应时效通常取决于当前排队情况和问题复杂度。",
+                fees="联系客服本身通常不是收费问题，重点是提供充分信息以减少来回沟通。",
+                eligibility="需要订单核实、复杂判责或投诉升级的问题，通常更适合转人工处理。",
+                process="建议先让智能客服识别问题类型；如果无法解决，再选择转人工并一次性提供关键信息。",
+                contact="转人工后建议直接说明诉求、订单号、异常现象和期望处理方式。",
+            ),
+        ),
     ),
     TopicRule(
         topic="address_change",
@@ -267,6 +474,19 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
         eligibility="是否还能修改地址，通常取决于订单是否已出库、已发货以及物流是否支持改派。",
         process="建议先确认订单状态；若仍可修改，尽快在订单页或客服渠道提交地址变更申请。",
         contact="若系统内无法直接改地址，建议立即联系人工客服或物流方协助处理。",
+        scenarios=(
+            ScenarioRule(
+                name="address_after_shipment",
+                terms=("已经发货", "已发货", "出库了", "配送中", "快递已经发出"),
+                overview="如果订单已经发货或进入配送中，修改地址通常不再是普通订单修改，而是要看物流是否支持拦截、改派或末端改址。",
+                materials="建议准备订单号、物流单号、原地址、新地址和当前物流轨迹截图。",
+                timeline="已发货后改地址的处理时效通常取决于包裹当前节点和承运商是否支持改派，越早处理越容易成功。",
+                fees="已发货后改派是否收费，通常要看承运商规则、改派距离和是否需要二次派送。",
+                eligibility="是否还能改地址，通常取决于是否已签收、是否进入末端配送，以及承运商是否允许改派。",
+                process="建议先联系承运商确认是否支持改派，同时在平台侧提交地址变更说明，避免订单侧和物流侧信息不一致。",
+                contact="如果你这边已经有物流单号，建议一并提供给人工客服或物流客服，这样通常更快确认是否能改派。",
+            ),
+        ),
     ),
     TopicRule(
         topic="installation_service",
@@ -313,6 +533,19 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
         eligibility="是否属于支付异常，通常要结合订单是否生成、是否重复扣款和账单记录综合判断。",
         process="建议先确认订单是否生成，再核对支付流水；若账单异常，尽快联系客服发起核查。",
         contact="如资金问题较紧急，建议同时联系平台客服和支付渠道客服处理。",
+        scenarios=(
+            ScenarioRule(
+                name="repeat_charge",
+                terms=("重复扣款", "扣了两次", "扣款两次", "多扣", "反复扣款", "重复支付"),
+                overview="如果出现重复扣款，核心不是先重新下单，而是先核对是否生成了重复订单，以及两笔资金分别处于支付成功、冻结还是待退状态。",
+                materials="建议准备订单号、支付流水号、两笔扣款账单截图、支付时间和支付方式信息。",
+                timeline="重复扣款的核查时效通常取决于平台对账和支付渠道回执；如果一笔只是冻结款，解冻时间还要看银行或支付工具规则。",
+                fees="是否会产生额外手续费通常要看支付渠道；多数情况下重点是确认哪一笔是有效支付、哪一笔需要退回或解冻。",
+                eligibility="是否属于重复扣款，通常要结合订单数量、流水数量和账单状态综合判断，并不一定每次看到两笔记录都代表实际成功扣款两次。",
+                process="建议先确认是否生成了重复订单，再核对每笔流水状态；如果只有一笔订单却有两笔成功扣款，应尽快联系客服发起支付异常核查。",
+                contact="如果资金占用比较紧急，建议同时联系平台客服和支付渠道客服说明重复扣款情况。",
+            ),
+        ),
     ),
     TopicRule(
         topic="delivery_delay",
@@ -371,19 +604,45 @@ _DETAIL_INTENT_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("contact", ("联系谁", "找谁", "人工客服", "客服电话", "找哪个部门")),
 )
 
+_FORCED_TOPIC_PRIORITY: tuple[str, ...] = (
+    "refund_exchange",
+    "shipping",
+    "invoice",
+    "quality_issue",
+    "after_sales",
+    "delivery_delay",
+    "accessory_request",
+    "complaint",
+)
+
 
 class CustomerServicePolicy:
     """Generate conservative but helpful replies for generic service scenarios."""
 
     def answer(self, question: str, *, context_topics: list[str] | None = None) -> PolicyResponse:
         normalized = question.strip()
-        matched_rules = self._match_rules(normalized)
         detail_intents = self._detect_detail_intents(normalized)
+        matched_entries = self._match_rules(
+            normalized,
+            context_topics=context_topics,
+            detail_intents=detail_intents,
+        )
 
-        if not matched_rules and context_topics:
-            matched_rules = [rule for rule in _TOPIC_RULES if rule.topic in context_topics]
+        if not matched_entries and context_topics:
+            matched_entries = [
+                MatchedRule(
+                    rule=rule,
+                    score=2,
+                    specificity_bonus=0,
+                    scenario_hits=0,
+                    term_hits=0,
+                    context_bonus=2,
+                )
+                for rule in _TOPIC_RULES
+                if rule.topic in context_topics
+            ]
 
-        if not matched_rules:
+        if not matched_entries:
             answer = (
                 "这类问题更偏向订单、售后或平台服务流程，当前说明书资料无法直接确认。"
                 "建议你补充订单号、商品名称、购买渠道、问题现象以及相关照片或聊天记录，"
@@ -391,29 +650,116 @@ class CustomerServicePolicy:
             )
             return PolicyResponse(answer=answer, confidence=0.58, matched_topics=[])
 
-        matched_scenarios = [self._match_scenario(rule, normalized) for rule in matched_rules[:2]]
-        snippets = [
-            self._compose_topic_answer(rule, detail_intents=detail_intents, scenario=scenario)
-            for rule, scenario in zip(matched_rules[:2], matched_scenarios)
+        selected_entries = self._select_rules(
+            matched_entries,
+            question=normalized,
+            detail_intents=detail_intents,
+        )
+        selected_rules = [entry.rule for entry in selected_entries]
+        matched_scenarios = [self._match_scenario(rule, normalized) for rule in selected_rules]
+        sections = [
+            self._compose_topic_sections(
+                rule,
+                question=normalized,
+                detail_intents=detail_intents,
+                scenario=scenario,
+            )
+            for rule, scenario in zip(selected_rules, matched_scenarios)
         ]
-        answer = self._compose_answer(snippets, detail_intents=detail_intents)
+        answer = self._compose_answer(
+            question=normalized,
+            sections=sections,
+            matched_topics=[rule.topic for rule in selected_rules],
+            detail_intents=detail_intents,
+        )
         scenario_bonus = sum(1 for scenario in matched_scenarios if scenario is not None)
         confidence = min(
-            0.7 + 0.03 * len({rule.topic for rule in matched_rules}) + 0.02 * len(detail_intents) + 0.01 * scenario_bonus,
+            0.7 + 0.03 * len({rule.topic for rule in selected_rules}) + 0.02 * len(detail_intents) + 0.01 * scenario_bonus,
             0.92,
         )
         return PolicyResponse(
             answer=answer,
             confidence=confidence,
-            matched_topics=[rule.topic for rule in matched_rules],
+            matched_topics=[rule.topic for rule in selected_rules],
         )
 
-    def _match_rules(self, question: str) -> list[TopicRule]:
-        matched: list[TopicRule] = []
+    def _match_rules(
+        self,
+        question: str,
+        *,
+        context_topics: list[str] | None = None,
+        detail_intents: list[str] | None = None,
+    ) -> list[MatchedRule]:
+        scored: list[MatchedRule] = []
+        detail_intents = detail_intents or []
         for rule in _TOPIC_RULES:
-            if any(term in question for term in rule.terms):
-                matched.append(rule)
-        return matched
+            matched_terms = [term for term in rule.terms if term in question]
+            term_hits = len(matched_terms)
+            scenario = self._match_scenario(rule, question)
+            scenario_hits = 0
+            specificity_bonus = max((len(term) for term in matched_terms), default=0)
+            if scenario is not None:
+                matched_scenario_terms = [term for term in scenario.terms if term in question]
+                scenario_hits = len(matched_scenario_terms)
+                specificity_bonus = max(
+                    specificity_bonus,
+                    max((len(term) for term in matched_scenario_terms), default=0),
+                )
+            context_bonus = 2 if context_topics and rule.topic in context_topics else 0
+            if term_hits <= 0 and scenario_hits <= 0:
+                if context_bonus <= 0:
+                    continue
+                if not detail_intents and len(question) > 12:
+                    continue
+            priority_bonus = 1 if rule.topic in _FORCED_TOPIC_PRIORITY else 0
+            score = term_hits + scenario_hits * 2 + context_bonus
+            if context_bonus > 0 and term_hits <= 0 and scenario_hits <= 0:
+                score += min(len(detail_intents), 2)
+            score += priority_bonus
+            scored.append(
+                MatchedRule(
+                    rule=rule,
+                    score=score,
+                    specificity_bonus=specificity_bonus,
+                    scenario_hits=scenario_hits,
+                    term_hits=term_hits,
+                    context_bonus=context_bonus,
+                )
+            )
+        scored.sort(
+            key=lambda item: (item.score, item.specificity_bonus, item.scenario_hits, item.context_bonus),
+            reverse=True,
+        )
+        return scored
+
+    def _select_rules(
+        self,
+        matched_entries: list[MatchedRule],
+        *,
+        question: str,
+        detail_intents: list[str],
+    ) -> list[MatchedRule]:
+        if not matched_entries:
+            return []
+        selected = [matched_entries[0]]
+        top = matched_entries[0]
+        allow_parallel = any(term in question for term in ("，", ",", "以及", "并且", "同时", "还有", "另外"))
+        for entry in matched_entries[1:]:
+            if len(selected) >= 2:
+                break
+            if entry.rule.topic in {item.rule.topic for item in selected}:
+                continue
+            score_gap = top.score - entry.score
+            if entry.explicit_hits > 0 and (score_gap <= 2 or (allow_parallel and score_gap <= 4)):
+                selected.append(entry)
+                continue
+            if (
+                entry.context_bonus > 0
+                and entry.explicit_hits == 0
+                and any(intent in detail_intents for intent in ("timeline", "fees", "materials", "contact", "eligibility"))
+            ):
+                selected.append(entry)
+        return selected
 
     def _detect_detail_intents(self, question: str) -> list[str]:
         intents: list[str] = []
@@ -439,13 +785,164 @@ class CustomerServicePolicy:
                 return str(scenario_text)
         return str(getattr(rule, field_name))
 
-    def _compose_topic_answer(
+    def _build_direct_conclusion(
+        self,
+        *,
+        question: str,
+        rule: TopicRule,
+        scenario: ScenarioRule | None,
+        detail_intents: list[str],
+    ) -> str:
+        scenario_name = scenario.name if scenario is not None else ""
+        normalized = "".join(question.split())
+        asks_timeline = "timeline" in detail_intents or any(
+            term in normalized for term in ("多久到账", "多久能到", "多久能收到", "多久")
+        )
+        asks_fees = "fees" in detail_intents or any(
+            term in normalized for term in ("运费", "费用", "收费", "多少钱", "原路返回", "信用卡")
+        )
+        asks_eligibility = "eligibility" in detail_intents or any(
+            term in normalized for term in ("支持", "可以", "能否", "能不能", "还能", "影响")
+        )
+
+        if rule.topic == "refund_exchange":
+            if scenario_name == "size_exchange":
+                return "如果你是想更换更大或更小的尺寸，通常可以先按换货场景提交申请；是否需要补差价、退差价或承担运费，要看目标规格价格、库存和平台规则。"
+            if scenario_name == "refund_arrival":
+                if any(term in normalized for term in ("信用卡", "银行卡", "储蓄卡", "借记卡")):
+                    return "退款通常会原路退回原支付渠道；如果是信用卡或银行卡支付，到账时间通常还要看发卡行或银行处理速度。"
+                return "退款通常会原路退回原支付渠道；到账时间取决于平台审核进度和支付渠道处理速度。"
+            if scenario_name == "seven_day_no_reason":
+                return "如果商品未使用、配件齐全且仍在 7 天无理由时效内，通常可以申请退货；无质量问题时运费通常由买家承担。"
+            if scenario_name == "quality_reason":
+                return "如果是质量问题，通常更适合走质量售后；核实属实后，退换货和相关运费通常更可能由商家或平台承担。"
+            if scenario_name == "opened_or_used":
+                return "商品已经拆封、激活或使用后，是否还能退换要看是否影响二次销售；若同时存在质量问题，仍可优先按质量售后处理。"
+            if scenario_name == "refund_rejected":
+                return "退款或退货被驳回后，不是直接结束，通常要先看驳回原因；材料不足可补证据重提，判定不合理可继续申诉。"
+            if asks_timeline or asks_fees:
+                return "退款一般要在售后审核通过后按原支付渠道退回；是否需要承担运费，要看退换原因和是否属于质量问题。"
+            if asks_eligibility:
+                return "是否可以退货、换货或退款，主要看订单状态、签收时间和商品是否使用；符合条件时一般可先提交售后申请。"
+            return "先看订单状态、签收时间和商品状态；符合条件时一般可先发起售后申请。"
+
+        if rule.topic == "invoice":
+            if scenario_name == "invoice_type" or any(
+                term in normalized for term in ("发票类型", "专票", "普票", "电子发票", "纸质发票")
+            ):
+                return "通常可以按订单申请开票；具体支持电子发票、普通发票还是专用发票，要以订单开票入口和商品类目规则为准。"
+            if scenario_name == "invoice_reissue":
+                return "发票信息填错后，能否重开主要看发票是否已开具、是否已报销以及平台是否支持更正；未锁定前通常更容易修改。"
+            if scenario_name == "invoice_after_issued":
+                return "如果发票已经开具，后续想改抬头、税号或邮箱，通常要先看平台是否支持更正、红冲或重开。"
+            return "一般可先在订单页查看开票入口；是否支持开票、修改抬头或补开，要以当前订单状态和平台规则为准。"
+
+        if rule.topic == "shipping":
+            if scenario_name == "village_or_overseas":
+                return "乡镇、偏远地区或海外是否支持配送，要看商品限制和物流覆盖范围；是否加收运费以及多久送达，也通常取决于详细地址和物流方案。"
+            if scenario_name == "tracking_stalled":
+                return "物流长时间不更新时，通常应先按异常物流催查处理；是否属于超时，要结合最近轨迹和承诺时效判断。"
+            if scenario_name == "package_lost_or_returned":
+                return "如果包裹出现丢件、退回、拒收或异常回流，通常应先按物流异常回查处理，再决定是否补发或改走售后。"
+            if scenario_name == "signed_but_missing":
+                return "如果显示已签收但实际没收到，通常要先按误签、代签或末端异常回查处理，而不是直接当作正常签收。"
+            if scenario_name == "redirect_or_wrong_address":
+                return "如果包裹还没签收，通常可以尝试改派、拦截或纠正地址；能否成功取决于当前物流节点和承运商支持情况。"
+            if any(term in normalized for term in ("乡镇", "国外", "海外", "寄到国外")):
+                return "乡镇、海外或特殊地区是否支持配送，要看平台覆盖范围和商品限制，不是所有商品都能直接送达。"
+            if asks_fees:
+                return "物流或补发是否产生额外运费，主要看配送地区、补发原因和物流方案；异常物流通常应先核责任再谈费用。"
+            return "先看物流轨迹、签收状态和地址信息；若明显停滞、误签或送错地址，应尽快提交异常反馈。"
+
+        if rule.topic == "complaint":
+            return "这类问题可以走投诉或升级处理；先固定订单记录、聊天记录、页面宣传和商品证据，再提交明确诉求会更有效。"
+
+        if rule.topic == "after_sales":
+            if scenario_name == "in_warranty":
+                return "如果商品仍在保修期内且不是人为损坏，通常可以先按保修检测流程推进，确认后更可能免维修费。"
+            if scenario_name == "out_of_warranty":
+                return "如果已经过保，通常不能再按免费保修处理，更可能进入付费检测或付费维修流程。"
+            if scenario_name == "human_damage":
+                return "如果属于进水、摔落、磕碰或私拆等人为损坏，通常不能按免费保修处理，但很多情况下仍可申请付费检测或付费维修。"
+            if scenario_name == "repair_delay_or_repeat_failure":
+                return "如果维修时间过长，或维修后短时间内又出现同样故障，通常应优先核实维修记录和返修责任；若确认是上次维修不彻底，更适合要求复检、重新返修或升级协调。"
+            if scenario_name == "rejected_or_disputed":
+                return "如果售后申请被驳回或你认为判定不合理，通常先看驳回原因，再决定是补证据、申诉还是申请人工复核。"
+            if asks_fees:
+                return "维修是否收费，主要看是否在保、是否人为损坏以及检测结果；确认后才会进入具体报价或保修结论。"
+            return "一般可先提交检测或维修申请；是否走保修，要看故障原因、购买时间和保修凭证。"
+
+        if rule.topic == "quality_issue":
+            if scenario_name == "packaging_damage":
+                return "如果只是外包装破损，先别急着定性为不能退换；应先核对商品本体和配件是否受损，再决定走破损售后、换货还是补偿。"
+            if scenario_name == "missing_items":
+                return "少发、漏发或缺件通常可以先按缺件/补发场景处理；若证据充分，补发费用一般不应由买家承担。"
+            return "这类情况的关键是尽快留证，并在售后时效内发起处理，避免后续难以判责。"
+
+        if rule.topic == "order_change":
+            if scenario_name == "refund_arrival":
+                if any(term in normalized for term in ("信用卡", "银行卡", "储蓄卡", "借记卡")):
+                    return "退款通常会原路退回原支付渠道；如果是信用卡或银行卡支付，到账时间通常还要看发卡行或银行处理速度。"
+                return "退款通常会原路退回原支付渠道；到账时间取决于平台审核进度和支付渠道处理速度。"
+            if "取消订单" in normalized:
+                return "如果订单还没发货，通常更容易直接取消；如果已经发货，往往要转成拒收或售后退款流程。"
+            return "先看订单状态和支付方式；状态确认后才能判断是直接取消还是走售后退款。"
+
+        if rule.topic == "manual_request":
+            return "电子版说明书通常更容易获取；纸质版能否补寄，要看商品原包装配置、库存和售后政策。"
+
+        if rule.topic == "platform_service":
+            if scenario_name == "trade_in":
+                return "是否支持以旧换新，主要看商品类目、旧机状态和活动入口；有入口时通常可以先在线估价。"
+            if scenario_name == "coupon":
+                return "优惠券能否使用，主要看有效期、门槛、适用品类和是否可叠加；满足条件时通常可在结算页直接勾选。"
+            if scenario_name == "trial_sample":
+                return "是否支持试用装或试用服务，要看商品是否参加活动以及账号资格，不是所有商品都会开放试用入口。"
+            if scenario_name == "trial_extension_or_fault":
+                return "试用期间想延长试用或更换故障商品，核心要看活动规则和故障责任；如果属于非人为故障，通常应尽快提交故障证据和延期/换货诉求。"
+            if scenario_name == "smart_customer_service":
+                return "智能客服适合处理常见订单、物流和售后问题；涉及判责、投诉或特殊规则时，通常更适合转人工。"
+            return "这类活动或客服能力要以活动页面和系统入口为准；没有入口时再联系人工客服核实。"
+
+        if rule.topic == "address_change":
+            if scenario_name == "address_after_shipment":
+                return "如果订单已经发货，修改地址通常不再是普通改址，而是要看承运商是否支持拦截或改派；越早处理通常越容易成功。"
+            return "如果订单还没出库，一般更容易修改收货地址；已经发货后则要看物流是否支持拦截或改派。"
+
+        if rule.topic == "installation_service":
+            if scenario_name == "installation_reschedule":
+                return "已经预约安装但需要改约时，通常要先看服务单状态和当前排期；若师傅爽约，可直接申请重新排期或升级协调。"
+            return "是否支持预约安装或上门安装，要看商品类目、服务覆盖地区和订单状态。"
+
+        if rule.topic == "price_protection":
+            return "如果商品支持价保且仍在价保周期内，通常可以申请补差；是否通过要看活动规则和下单时间。"
+
+        if rule.topic == "payment_issue":
+            if scenario_name == "repeat_charge":
+                return "如果出现重复扣款，先不要重复提交支付；应先核对是否生成了重复订单，以及两笔资金中哪一笔是成功支付、哪一笔需要退回或解冻。"
+            return "先确认订单是否生成、是否重复扣款；如果账单已扣款但订单异常，通常需要平台和支付渠道一起核查。"
+
+        if rule.topic == "delivery_delay":
+            return "如果订单明显超过页面承诺时效仍未发货，通常可以先催发货；超时较久时应直接联系人工客服跟进。"
+
+        if rule.topic == "warranty_period":
+            return "先结合商品类目、购买时间和保修凭证核对保修期；超出保修期后通常更可能进入付费维修。"
+
+        if rule.topic == "accessory_request":
+            if scenario_name == "accessory_rejected":
+                return "补寄配件申请被驳回后，先看是证据不足还是超时；若确实缺件且证据完整，通常可以补材料后重新申请复核。"
+            return "缺少配件、附件或包装盒时，先核对包装清单；若属于原包装缺失，通常可以申请补寄或补件核查。"
+
+        return self._pick_field(rule, scenario, "overview")
+
+    def _compose_topic_sections(
         self,
         rule: TopicRule,
         *,
+        question: str,
         detail_intents: list[str],
         scenario: ScenarioRule | None,
-    ) -> str:
+    ) -> dict[str, list[str]]:
         overview = self._pick_field(rule, scenario, "overview")
         materials = self._pick_field(rule, scenario, "materials")
         timeline = self._pick_field(rule, scenario, "timeline")
@@ -454,46 +951,119 @@ class CustomerServicePolicy:
         process = self._pick_field(rule, scenario, "process")
         contact = self._pick_field(rule, scenario, "contact")
 
-        if not detail_intents:
-            return " ".join((overview, materials, process))
-
-        parts: list[str] = [overview]
-        if "materials" in detail_intents:
-            parts.append(materials)
-        if "timeline" in detail_intents:
-            parts.append(timeline)
-        if "fees" in detail_intents:
-            parts.append(fees)
+        conclusions = [
+            self._build_direct_conclusion(
+                question=question,
+                rule=rule,
+                scenario=scenario,
+                detail_intents=detail_intents,
+            )
+        ]
         if "eligibility" in detail_intents:
-            parts.append(eligibility)
-        if "process" in detail_intents:
-            parts.append(process)
-        if "contact" in detail_intents:
-            parts.append(contact)
+            conclusions.append(eligibility)
+        elif scenario is not None and overview not in conclusions:
+            conclusions.append(overview)
 
-        if len(parts) == 1:
-            parts.extend((materials, process))
-        return " ".join(parts)
+        steps = [process]
+        if "materials" in detail_intents or not detail_intents:
+            steps.append(materials)
 
-    def _compose_answer(self, snippets: list[str], *, detail_intents: list[str]) -> str:
-        unique_snippets: list[str] = []
+        timing_fee: list[str] = []
+        if "timeline" in detail_intents or not detail_intents:
+            timing_fee.append(timeline)
+        if "fees" in detail_intents or not detail_intents:
+            timing_fee.append(fees)
+        if "eligibility" in detail_intents:
+            timing_fee.append(eligibility)
+
+        return {
+            "conclusion": self._dedupe_items(conclusions),
+            "steps": self._dedupe_items(steps),
+            "timing_fee": self._dedupe_items(timing_fee),
+            "support": self._dedupe_items([contact] if "contact" in detail_intents else []),
+        }
+
+    def _compose_answer(
+        self,
+        *,
+        question: str,
+        sections: list[dict[str, list[str]]],
+        matched_topics: list[str],
+        detail_intents: list[str],
+    ) -> str:
+        conclusions = self._merge_section_items(sections, "conclusion")
+        steps = self._merge_section_items(sections, "steps")
+        timing_fee = self._merge_section_items(sections, "timing_fee")
+        support = self._merge_section_items(sections, "support")
+
+        reassurance = self._build_reassurance_line(
+            question,
+            matched_topics,
+            detail_intents=detail_intents,
+            has_support=bool(support),
+        )
+        if reassurance:
+            support.append(reassurance)
+        support = self._dedupe_items(support)
+
+        blocks: list[str] = []
+        if conclusions:
+            blocks.append("结论：\n- " + "\n- ".join(conclusions[:2]))
+        if steps:
+            blocks.append(
+                "处理步骤：\n" + "\n".join(
+                    f"{index}. {item}" for index, item in enumerate(steps[:3], start=1)
+                )
+            )
+        if timing_fee:
+            blocks.append("时效/费用：\n- " + "\n- ".join(timing_fee[:3]))
+        if support:
+            blocks.append("补充说明：\n- " + "\n- ".join(support[:2]))
+        return "\n\n".join(blocks).strip()
+
+    def _merge_section_items(
+        self,
+        sections: list[dict[str, list[str]]],
+        key: str,
+    ) -> list[str]:
+        items: list[str] = []
+        for section in sections:
+            items.extend(section.get(key, []))
+        return self._dedupe_items(items)
+
+    def _dedupe_items(self, items: list[str]) -> list[str]:
         seen: set[str] = set()
-        for snippet in snippets:
-            if snippet in seen:
+        result: list[str] = []
+        for raw_item in items:
+            item = " ".join(str(raw_item).split()).strip()
+            if not item or item in seen:
                 continue
-            seen.add(snippet)
-            unique_snippets.append(snippet)
+            seen.add(item)
+            result.append(item)
+        return result
 
-        closing = "如果你愿意，我建议下一步优先补充订单号、商品名称或型号、购买渠道，以及异常照片或截图。"
-        if "contact" in detail_intents:
-            closing = "如果你已经准备好了订单号和截图，建议直接联系人工客服，这样通常更快进入人工核查。"
-        elif "timeline" in detail_intents:
-            closing = "如果你愿意，我建议同时提供订单号和当前订单状态，这样更方便进一步判断实际处理时效。"
-        elif "materials" in detail_intents:
-            closing = "如果你现在方便，我建议先把订单号、截图或凭证信息整理好，再继续提交或联系人工客服。"
-
-        return (
-            "这类问题更适合按通用客服流程处理。"
-            f"{' '.join(unique_snippets[:2])} "
-            f"{closing}"
-        ).strip()
+    def _build_reassurance_line(
+        self,
+        question: str,
+        matched_topics: list[str],
+        *,
+        detail_intents: list[str],
+        has_support: bool,
+    ) -> str:
+        asks_materials_or_contact = any(intent in detail_intents for intent in ("materials", "contact"))
+        asks_customer_service_handoff = any(term in question for term in ("客服", "人工", "联系谁", "怎么联系", "转人工"))
+        if "complaint" in matched_topics:
+            return "如果已经影响你的使用体验或服务体验，建议尽快固定截图、聊天记录和页面证据，再升级到人工客服或平台投诉渠道。"
+        if not asks_materials_or_contact and not asks_customer_service_handoff:
+            return ""
+        if has_support:
+            return ""
+        if "shipping" in matched_topics or "delivery_delay" in matched_topics or "quality_issue" in matched_topics:
+            return "如果已经影响签收、使用或补寄时效，建议尽快带上订单号和截图联系人工客服加急核查。"
+        if "after_sales" in matched_topics or "refund_exchange" in matched_topics:
+            return "如果问题已经影响正常使用，建议一次性准备订单号、故障照片或售后截图，这样通常更快进入人工审核。"
+        if "invoice" in matched_topics:
+            return "如果你这边已经有订单号和开票截图，建议一并提供，通常可以减少重复核对。"
+        if "客服" in question or "人工" in question:
+            return "如果智能客服无法直接解决，建议转人工时一次性说明诉求、订单号和异常截图。"
+        return ""

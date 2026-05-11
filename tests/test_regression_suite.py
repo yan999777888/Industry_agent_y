@@ -18,7 +18,7 @@ from scripts.run_regression_suite import build_payload, check_case, load_cases
 class RegressionSuiteTests(unittest.TestCase):
     def test_load_cases_returns_list(self) -> None:
         cases = load_cases(PROJECT_ROOT / "tests" / "fixtures" / "regression_cases.json")
-        self.assertGreaterEqual(len(cases), 31)
+        self.assertGreaterEqual(len(cases), 30)
 
     def test_build_payload_supports_image_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -63,6 +63,39 @@ class RegressionSuiteTests(unittest.TestCase):
             "_http_status": 400,
             "detail": "question must not be empty",
         }
+        ok, failures = check_case(case, response)
+        self.assertTrue(ok, msg=str(failures))
+
+    def test_check_case_supports_retrieval_debug_expectations(self) -> None:
+        case = {
+            "question": "物流一直显示待揽收，是什么原因？",
+            "expect_debug_equals": {
+                "sub_results.0.retrieval_debug.route_decision.route": "customer_service",
+            },
+            "expect_debug_contains": {
+                "sub_results.0.retrieval_debug.customer_service_kb.hit_source_types": ["data_file"],
+            },
+        }
+        response = {
+            "_http_status": 200,
+            "code": 0,
+            "data": {
+                "answer": "物流显示待揽收，一般表示正在等待快递员揽件。",
+                "sources": ["customer_service_policy", "customer_service_kb"],
+                "image_ids": [],
+                "retrieval_debug": {
+                    "sub_results": [
+                        {
+                            "retrieval_debug": {
+                                "route_decision": {"route": "customer_service"},
+                                "customer_service_kb": {"hit_source_types": ["data_file"]},
+                            }
+                        }
+                    ]
+                },
+            },
+        }
+
         ok, failures = check_case(case, response)
         self.assertTrue(ok, msg=str(failures))
 

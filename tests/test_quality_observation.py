@@ -15,7 +15,7 @@ from scripts.observe_chat_quality import evaluate_case, load_cases, summarize_re
 class QualityObservationTests(unittest.TestCase):
     def test_load_cases_returns_non_empty_list(self) -> None:
         cases = load_cases(PROJECT_ROOT / "tests" / "fixtures" / "quality_observation_cases.json")
-        self.assertGreaterEqual(len(cases), 13)
+        self.assertGreaterEqual(len(cases), 15)
 
     def test_evaluate_case_reports_issue_buckets(self) -> None:
         case = {
@@ -60,6 +60,42 @@ class QualityObservationTests(unittest.TestCase):
 
         record = evaluate_case(case, response)
         self.assertTrue(record["ok"])
+
+    def test_evaluate_case_supports_retrieval_debug_expectations(self) -> None:
+        case = {
+            "id": "pickup_pending",
+            "category": "customer_service",
+            "question": "物流一直显示待揽收，是什么原因？",
+            "expect_debug_equals": {
+                "sub_results.0.retrieval_debug.route_decision.route": "customer_service",
+            },
+            "expect_debug_contains": {
+                "sub_results.0.retrieval_debug.customer_service_kb.hit_source_types": ["data_file"],
+            },
+        }
+        response = {
+            "_http_status": 200,
+            "code": 0,
+            "data": {
+                "answer": "物流显示待揽收，一般表示正在等待快递员揽件。",
+                "sources": ["customer_service_policy", "customer_service_kb"],
+                "image_ids": [],
+                "confidence": 0.82,
+                "retrieval_debug": {
+                    "sub_results": [
+                        {
+                            "retrieval_debug": {
+                                "route_decision": {"route": "customer_service"},
+                                "customer_service_kb": {"hit_source_types": ["data_file"]},
+                            }
+                        }
+                    ]
+                },
+            },
+        }
+
+        record = evaluate_case(case, response)
+        self.assertTrue(record["ok"], msg=str(record))
 
     def test_summarize_records_groups_categories_and_issues(self) -> None:
         summary = summarize_records(

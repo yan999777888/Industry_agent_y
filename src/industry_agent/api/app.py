@@ -16,6 +16,7 @@ except ImportError as exc:
     raise RuntimeError("Install API dependencies first: pip install -r requirements.txt") from exc
 
 from industry_agent.agent.runtime_checks import assert_startup_ready, run_startup_checks
+from industry_agent.config import settings
 
 
 # ── Request / Response models ────────────────────────────────────────────
@@ -72,24 +73,33 @@ def create_app() -> FastAPI:
             "面向工业产品客服场景的多模态问答服务。"
             "当前提供 `/health` 健康检查和 `/chat` 问答接口，"
             "支持说明书检索问答、轻量客服策略、多轮对话和图片理解。"
+            "可通过环境变量在本地 Ollama `service` 后端与模块化 `orchestrator` 后端之间切换。"
         ),
     )
 
     @app.on_event("startup")
     def startup_event():
-        from industry_agent.rag.retriever import SQLiteRetriever
-        from industry_agent.agent.service import AgentService, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_VISION_MODEL
-
-        print("Initializing retriever & agent service ...")
+        print("Initializing agent service ...")
         report = run_startup_checks(
-            base_url=OLLAMA_BASE_URL,
-            model=OLLAMA_MODEL,
-            vision_model=OLLAMA_VISION_MODEL,
+            base_url=settings.ollama_base_url if settings.llm_backend == "ollama" else settings.llm_base_url,
+            model=settings.ollama_model if settings.llm_backend == "ollama" else settings.llm_model,
+            vision_model=settings.ollama_vision_model if settings.llm_backend == "ollama" else settings.llm_vision_model,
+            llm_backend=settings.llm_backend,
+            api_key=settings.llm_api_key,
         )
         app.state.health_report = report
         assert_startup_ready(report)
-        app.state.retriever = SQLiteRetriever()
-        app.state.agent = AgentService(retriever=app.state.retriever)
+        app.state.agent_backend = settings.agent_backend
+        if settings.agent_backend == "orchestrator":
+            from industry_agent.agent.orchestrator import AgentOrchestrator
+
+            app.state.agent = AgentOrchestrator()
+        else:
+            from industry_agent.agent.service import AgentService
+            from industry_agent.rag.factory import create_retriever
+
+            app.state.retriever = create_retriever()
+            app.state.agent = AgentService(retriever=app.state.retriever)
         print("Ready.")
 
     @app.get(
@@ -101,7 +111,10 @@ def create_app() -> FastAPI:
         report = getattr(app.state, "health_report", None)
         if report is None:
             return {"status": "unknown"}
-        return report.to_dict()
+        payload = report.to_dict()
+        payload["agent_backend"] = getattr(app.state, "agent_backend", settings.agent_backend)
+        payload["llm_backend"] = settings.llm_backend
+        return payload
 
     @app.post(
         "/chat",

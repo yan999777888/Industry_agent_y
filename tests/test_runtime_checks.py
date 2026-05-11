@@ -36,3 +36,19 @@ class RuntimeChecksTests(unittest.TestCase):
         )
         with self.assertRaises(RuntimeError):
             assert_startup_ready(report)
+
+    def test_startup_checks_cloud_backend_requires_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_path = Path(tmpdir) / "index.sqlite"
+            index_path.write_text("", encoding="utf-8")
+            report = run_startup_checks(
+                base_url="https://api.example.com/v1",
+                model="demo-model",
+                vision_model="",
+                llm_backend="openai_compatible",
+                api_key="",
+                processed_dir=Path(tmpdir),
+            )
+
+        self.assertEqual(report.status, "degraded")
+        self.assertTrue(any(item.name == "llm_api_key" and not item.ok for item in report.components))

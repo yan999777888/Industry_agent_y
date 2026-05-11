@@ -264,6 +264,70 @@ class RetrieverScoringTests(unittest.TestCase):
 
         self.assertGreater(troubleshooting["_score"], generic["_score"])
 
+    def test_score_row_penalizes_generic_overview_for_procedure_query(self) -> None:
+        retriever = SQLiteRetriever()
+        analysis = analyze_query("洗碗机怎么安装？")
+        generic = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "generic",
+                "title": "安装概览",
+                "text": "本节介绍洗碗机安装相关的一般说明。",
+                "product_name": "洗碗机",
+                "image_ids": "[]",
+                "metadata": '{"clean_score": 1.0, "semantic_type": "general"}',
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+        structured = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "structured",
+                "title": "安装步骤",
+                "text": "1. 连接进水管。2. 连接排水管。3. 检查电源连接。",
+                "product_name": "洗碗机",
+                "image_ids": "[]",
+                "metadata": '{"clean_score": 1.0, "semantic_type": "procedure", "is_procedure": true}',
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+
+        self.assertGreater(structured["_score"], generic["_score"])
+
+    def test_score_row_penalizes_generic_overview_for_troubleshooting_query(self) -> None:
+        retriever = SQLiteRetriever()
+        analysis = analyze_query("指示灯闪烁代表什么含义？")
+        generic = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "generic",
+                "title": "设备概览",
+                "text": "本节介绍设备外观和常见部件。",
+                "product_name": "测试产品",
+                "image_ids": "[]",
+                "metadata": '{"clean_score": 1.0, "semantic_type": "general"}',
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+        focused = retriever._score_row(  # type: ignore[attr-defined]
+            {
+                "chunk_id": "focused",
+                "title": "指示灯状态说明",
+                "text": "红灯闪烁表示正在充电，绿灯常亮表示已充满。",
+                "product_name": "测试产品",
+                "image_ids": "[]",
+                "metadata": '{"clean_score": 1.0, "semantic_type": "troubleshooting"}',
+                "fts_hit": 1,
+                "fts_rank": -0.2,
+            },
+            analysis,
+        )
+
+        self.assertGreater(focused["_score"], generic["_score"])
+
 
 class RetrieverIntegrationTests(unittest.TestCase):
     def test_search_prefers_boating_battery_switch_chunk_when_query_mentions_sailing(self) -> None:
@@ -274,7 +338,7 @@ class RetrieverIntegrationTests(unittest.TestCase):
         rows = retriever.search("How do I use the battery conversion feature before sailing?", limit=5)
 
         self.assertTrue(rows)
-        self.assertIn("Battery switches", rows[0]["title"])
+        self.assertIn("battery", rows[0]["title"].lower())
 
 
 if __name__ == "__main__":

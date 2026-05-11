@@ -35,6 +35,26 @@ def build_payload(case: dict) -> dict:
     }
 
 
+def _get_nested_value(payload: dict, path: str):
+    current = payload
+    for raw_part in path.split("."):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if isinstance(current, list):
+            if not part.isdigit():
+                return None
+            index = int(part)
+            if index < 0 or index >= len(current):
+                return None
+            current = current[index]
+            continue
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
 def call_chat(base_url: str, payload: dict) -> dict:
     request = Request(
         f"{base_url.rstrip('/')}/chat",
@@ -63,6 +83,7 @@ def evaluate_case(case: dict, response: dict) -> dict:
     sources = list(data.get("sources", []) or [])
     image_ids = list(data.get("image_ids", []) or [])
     confidence = float(data.get("confidence", 0.0) or 0.0)
+    retrieval_debug = data.get("retrieval_debug", {}) or {}
     detail_text = json.dumps(response.get("detail", ""), ensure_ascii=False)
 
     issues: list[str] = []
@@ -95,6 +116,21 @@ def evaluate_case(case: dict, response: dict) -> dict:
         if term not in detail_text:
             issues.append("error_detail")
             details.append(f"missing error detail term: {term}")
+
+    for path, expected in case.get("expect_debug_equals", {}).items():
+        actual = _get_nested_value(retrieval_debug, str(path))
+        if actual != expected:
+            issues.append("debug_alignment")
+            details.append(f"debug mismatch at {path}: {actual!r} != {expected!r}")
+
+    for path, expected_terms in case.get("expect_debug_contains", {}).items():
+        actual = _get_nested_value(retrieval_debug, str(path))
+        values = expected_terms if isinstance(expected_terms, list) else [expected_terms]
+        haystack = json.dumps(actual, ensure_ascii=False) if isinstance(actual, (list, dict)) else str(actual)
+        for term in values:
+            if str(term) not in haystack:
+                issues.append("debug_alignment")
+                details.append(f"missing debug term at {path}: {term}")
 
     min_image_ids = case.get("min_image_ids")
     if min_image_ids is not None and len(image_ids) < int(min_image_ids):

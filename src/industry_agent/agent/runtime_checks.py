@@ -40,6 +40,8 @@ def run_startup_checks(
     base_url: str,
     model: str,
     vision_model: str = "",
+    llm_backend: str = "ollama",
+    api_key: str = "",
     processed_dir: Path = settings.processed_dir,
 ) -> StartupHealthReport:
     components: list[ComponentStatus] = []
@@ -64,57 +66,110 @@ def run_startup_checks(
         )
     )
 
-    if httpx is None:
-        components.append(
-            ComponentStatus(
-                name="httpx",
-                ok=False,
-                detail="httpx not installed",
-                required=True,
-            )
+    backend = llm_backend.strip().lower()
+    components.append(
+        ComponentStatus(
+            name="llm_backend",
+            ok=backend in {"ollama", "openai_compatible", "api"},
+            detail=backend or "unknown",
+            required=True,
         )
-    else:
-        try:
-            with httpx.Client(proxy=None, timeout=10.0) as client:
-                resp = client.get(f"{base_url.rstrip('/')}/api/tags")
-                resp.raise_for_status()
-                payload = resp.json()
-        except Exception as exc:
+    )
+
+    if backend == "ollama":
+        if httpx is None:
             components.append(
                 ComponentStatus(
-                    name="ollama",
+                    name="httpx",
                     ok=False,
-                    detail=str(exc),
+                    detail="httpx not installed",
                     required=True,
                 )
             )
         else:
-            model_names = _extract_model_names(payload)
             components.append(
                 ComponentStatus(
-                    name="ollama",
-                    ok=True,
-                    detail=base_url,
+                    name="ollama_base_url",
+                    ok=bool(base_url),
+                    detail=base_url or "(empty)",
                     required=True,
                 )
             )
-            components.append(
-                ComponentStatus(
-                    name="text_model",
-                    ok=model in model_names,
-                    detail=model,
-                    required=True,
-                )
-            )
-            if vision_model:
+            try:
+                with httpx.Client(proxy=None, timeout=10.0) as client:
+                    resp = client.get(f"{base_url.rstrip('/')}/api/tags")
+                    resp.raise_for_status()
+                    payload = resp.json()
+            except Exception as exc:
                 components.append(
                     ComponentStatus(
-                        name="vision_model",
-                        ok=vision_model in model_names,
-                        detail=vision_model,
-                        required=False,
+                        name="ollama",
+                        ok=False,
+                        detail=str(exc),
+                        required=True,
                     )
                 )
+            else:
+                model_names = _extract_model_names(payload)
+                components.append(
+                    ComponentStatus(
+                        name="ollama",
+                        ok=True,
+                        detail=base_url,
+                        required=True,
+                    )
+                )
+                components.append(
+                    ComponentStatus(
+                        name="text_model",
+                        ok=model in model_names,
+                        detail=model,
+                        required=True,
+                    )
+                )
+                if vision_model:
+                    components.append(
+                        ComponentStatus(
+                            name="vision_model",
+                            ok=vision_model in model_names,
+                            detail=vision_model,
+                            required=False,
+                        )
+                    )
+    else:
+        components.append(
+            ComponentStatus(
+                name="llm_base_url",
+                ok=bool(base_url),
+                detail=base_url or "(empty)",
+                required=True,
+            )
+        )
+        components.append(
+            ComponentStatus(
+                name="llm_api_key",
+                ok=bool(api_key),
+                detail="configured" if api_key else "missing",
+                required=True,
+            )
+        )
+        components.append(
+            ComponentStatus(
+                name="text_model",
+                ok=bool(model),
+                detail=model or "(empty)",
+                required=True,
+            )
+        )
+        if vision_model:
+            components.append(
+                ComponentStatus(
+                    name="vision_model",
+                    ok=True,
+                    detail=vision_model,
+                    required=False,
+                )
+            )
 
     status = "ok" if all(component.ok or not component.required for component in components) else "degraded"
     return StartupHealthReport(status=status, components=components)

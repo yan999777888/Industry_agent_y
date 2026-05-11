@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from industry_agent.kb.models import ManualDocument
@@ -133,7 +134,50 @@ OCR_WORD_FIXES: tuple[tuple[str, str], ...] = (
     ("was her", "washer"),
     ("thendrain", "then drain"),
     ("orwax", "or wax"),
+    ("Ioprevent", "To prevent"),
+    ("tollow", "follow"),
+    ("safeguardsbelow", "safeguards below"),
+    ("excessiveheat", "excessive heat"),
+    ("anexplosion", "an explosion"),
+    ("oroily", "or oily"),
+    ("thedustonthe", "the dust on the"),
+    ("becomemoist", "become moist"),
+    ("theoutlet", "the outlet"),
+    ("tocausea", "to cause a"),
+    ("oraanic", "organic"),
+    ("eauioment", "equipment"),
+    ("OPERATINGINSTRUCTIONS", "OPERATING INSTRUCTIONS"),
+    ("INSTANTACTION", "INSTANT ACTION"),
+    ("con rm ation", "confirmation"),
+    ("sternanchored", "stern anchored"),
+    ("andprevent", "and prevent"),
+    ("batterypack", "battery pack"),
+    ("emiting", "emitting"),
+    ("Thefigures", "The figures"),
+    ("in dicates", "indicates"),
+    ("lt is", "It is"),
+    ("formenu", "for menu"),
+    ("theEF-Slenswiththe", "the EF-S lens with the"),
+    ("turnn", "turn"),
+    ("Whenthe", "When the"),
+    ("pwer", "power"),
+    ("dialtoset", "dial to set"),
 )
+
+
+@dataclass
+class ImageAttachmentResult:
+    marked_text: str
+    attached_image_ids: list[str]
+    unmatched_pic_count: int
+    strategy: str
+    pic_count: int
+    image_count: int
+    attached_count: int
+    suppressed_image_count: int
+
+    def to_record(self) -> dict[str, object]:
+        return asdict(self)
 
 
 def load_manual(path: Path) -> ManualDocument:
@@ -241,6 +285,8 @@ def _fix_common_ocr_glued_words(text: str) -> str:
     fixed = text
     for old, new in OCR_WORD_FIXES:
         fixed = fixed.replace(old, new)
+    fixed = re.sub(r"(?m)^([·•●-])(?=[A-Za-z])", r"\1 ", fixed)
+    fixed = re.sub(r"([·•●])(?=[A-Za-z])", r"\1 ", fixed)
     fixed = re.sub(r"\blf\b", "If", fixed)
     fixed = re.sub(r"([,.;:!?])(?=[A-Za-z])", r"\1 ", fixed)
     fixed = re.sub(r"(?<=[a-z])(?=\d)", " ", fixed)
@@ -249,13 +295,28 @@ def _fix_common_ocr_glued_words(text: str) -> str:
     return fixed
 
 
-def attach_image_markers(text: str, image_ids: list[str]) -> tuple[str, list[str], int]:
+def attach_image_markers(text: str, image_ids: list[str]) -> ImageAttachmentResult:
     """Replace each <PIC> with an ordered image marker used during chunking.
 
     When a manual has more picture placeholders than image ids, the extra
     placeholders are kept as a generic missing marker so they do not pollute
     the image index with synthetic ids.
     """
+
+    pic_count = len(PIC_RE.findall(text))
+    strategy = _choose_image_attachment_strategy(pic_count=pic_count, image_count=len(image_ids))
+    if strategy == "suppress_misaligned":
+        marked_text = PIC_RE.sub("\n[[PIC_MISSING]]\n", text)
+        return ImageAttachmentResult(
+            marked_text=marked_text,
+            attached_image_ids=[],
+            unmatched_pic_count=pic_count,
+            strategy=strategy,
+            pic_count=pic_count,
+            image_count=len(image_ids),
+            attached_count=0,
+            suppressed_image_count=len(image_ids),
+        )
 
     parts = PIC_RE.split(text)
     marked_parts: list[str] = []
@@ -274,7 +335,26 @@ def attach_image_markers(text: str, image_ids: list[str]) -> tuple[str, list[str
             unmatched_pic_count += 1
             marked_parts.append("\n[[PIC_MISSING]]\n")
 
-    return "".join(marked_parts), attached_ids, unmatched_pic_count
+    return ImageAttachmentResult(
+        marked_text="".join(marked_parts),
+        attached_image_ids=attached_ids,
+        unmatched_pic_count=unmatched_pic_count,
+        strategy=strategy,
+        pic_count=pic_count,
+        image_count=len(image_ids),
+        attached_count=len(attached_ids),
+        suppressed_image_count=0,
+    )
+
+
+def _choose_image_attachment_strategy(*, pic_count: int, image_count: int) -> str:
+    if pic_count <= 0 or image_count <= 0:
+        return "sequential"
+    coverage_ratio = image_count / pic_count
+    gap = pic_count - image_count
+    if pic_count >= 120 and gap >= 80 and coverage_ratio <= 0.4:
+        return "suppress_misaligned"
+    return "sequential"
 
 
 def _product_name_from_path(path: Path) -> str:

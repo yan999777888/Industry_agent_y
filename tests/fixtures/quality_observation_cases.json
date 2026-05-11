@@ -4,6 +4,9 @@
     "category": "smalltalk",
     "question": "你好",
     "expect_contains": ["工业产品客服智能体"],
+    "expect_debug_equals": {
+      "route": "smalltalk"
+    },
     "max_image_ids": 0,
     "min_confidence": 0.9
   },
@@ -11,7 +14,10 @@
     "id": "obs_manual_rag",
     "category": "manual_rag",
     "question": "电钻怎么充电？",
-    "expect_contains": ["结论", "操作/说明"],
+    "expect_contains": ["充电"],
+    "expect_debug_equals": {
+      "sub_results.0.retrieval_debug.route_decision.route": "manual_rag"
+    },
     "min_confidence": 0.7
   },
   {
@@ -19,8 +25,12 @@
     "category": "multimodal",
     "question": "请结合图片判断这个部件或指示灯相关的使用注意事项是什么？",
     "image_paths": ["Knowledge_base/插图/drill0_17.png"],
-    "expect_contains": ["结论", "注意事项"],
+    "expect_contains": ["指示灯"],
+    "expect_debug_equals": {
+      "sub_results.0.retrieval_debug.route_decision.route": "manual_rag"
+    },
     "min_image_ids": 1,
+    "max_image_ids": 3,
     "min_confidence": 0.7
   },
   {
@@ -87,11 +97,23 @@
     "min_confidence": 0.6
   },
   {
+    "id": "obs_customer_pickup_pending_data_kb",
+    "category": "customer_service",
+    "question": "物流一直显示待揽收，是什么原因？",
+    "expect_contains": ["待揽收", "24小时"],
+    "expect_sources_contains": ["customer_service_policy", "customer_service_kb"],
+    "expect_debug_contains": {
+      "sub_results.0.retrieval_debug.customer_service_kb.hit_source_types": ["data_file"]
+    },
+    "max_image_ids": 0,
+    "min_confidence": 0.6
+  },
+  {
     "id": "obs_multiturn_followup_turn1",
     "category": "multiturn",
     "session_id": "obs_multiturn_policy",
     "question": "我想退款，退款多久能到账？",
-    "expect_contains": ["订单号"],
+    "expect_contains": ["原路退回"],
     "expect_sources_contains": ["customer_service_policy"],
     "max_image_ids": 0,
     "min_confidence": 0.6
@@ -103,6 +125,9 @@
     "question": "那需要准备什么材料？",
     "expect_contains": ["订单号"],
     "expect_sources_contains": ["customer_service_policy"],
+    "expect_debug_equals": {
+      "sub_results.0.retrieval_debug.route_decision.reason": "inherit_customer_service_context"
+    },
     "max_image_ids": 0,
     "min_confidence": 0.6
   },
@@ -110,14 +135,18 @@
     "id": "obs_multi_question",
     "category": "mixed",
     "question": "\"请问支持退款吗？\",\n\"电钻怎么充电？\"",
-    "expect_contains": ["问题1", "问题2"],
+    "expect_not_contains": ["问题1", "问题2"],
+    "expect_debug_equals": {
+      "sub_results.0.retrieval_debug.route_decision.route": "customer_service",
+      "sub_results.1.retrieval_debug.route_decision.route": "manual_rag"
+    },
     "min_confidence": 0.6
   },
   {
     "id": "obs_refusal",
     "category": "fallback",
     "question": "请问这台设备能不能直接连接火星基地网络？",
-    "expect_contains": ["根据现有资料无法准确回答此问题"],
+    "expect_contains": ["根据现有资料无法回答此问题"],
     "max_image_ids": 0,
     "max_confidence": 0.9
   },

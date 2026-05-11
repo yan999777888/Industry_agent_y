@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from industry_agent.config import settings
+from industry_agent.rag.vector_store import SQLiteVectorSearcher, VectorSearcher, describe_vector_retrieval
 
 # ---------------------------------------------------------------------------
 # Query analysis resources
@@ -185,6 +186,24 @@ _SEMANTIC_INTENT_HINTS: dict[str, tuple[str, ...]] = {
         "specification", "dimensions", "weight", "capacity", "default", "model",
     ),
 }
+_GENERIC_SECTION_HINTS: tuple[str, ...] = (
+    "概览", "总览", "简介", "说明", "保养说明", "产品介绍",
+    "overview", "general", "introduction", "camera care", "cleaning safety",
+)
+_PROCEDURE_CUES: tuple[str, ...] = (
+    "步骤", "先", "再", "然后", "最后", "取下", "装入", "插入", "连接",
+    "按下", "点击", "选择", "确认", "检查", "press", "select", "install",
+    "remove", "connect", "turn", "open", "close",
+)
+_TROUBLESHOOTING_CUES: tuple[str, ...] = (
+    "表示", "代表", "含义", "闪烁", "指示灯", "报警", "错误", "故障", "状态",
+    "means", "indicates", "warning", "flash", "flashing", "blink", "blinking",
+    "status", "error", "fault",
+)
+_SPECIFICATION_CUES: tuple[str, ...] = (
+    "规格", "参数", "尺寸", "重量", "容量", "默认", "密码", "型号", "温度",
+    "specification", "dimensions", "weight", "capacity", "default", "model",
+)
 _ENGLISH_QUERY_ALIASES: dict[str, tuple[str, ...]] = {
     "battery conversion": ("battery switches", "battery switch assembly", "emerg parallel"),
     "battery switching": ("battery switches", "battery switch assembly"),
@@ -433,8 +452,24 @@ def _prioritize_search_terms(
 class SQLiteRetriever:
     """Keyword-based retriever backed by the SQLite knowledge index."""
 
-    def __init__(self, db_path: Path = settings.processed_dir / "index.sqlite") -> None:
+    def __init__(
+        self,
+        db_path: Path = settings.processed_dir / "index.sqlite",
+        *,
+        vector_searcher: VectorSearcher | None = None,
+    ) -> None:
         self.db_path = db_path
+        self.vector_searcher = vector_searcher or SQLiteVectorSearcher(db_path)
+
+    def retrieval_status(self) -> dict[str, Any]:
+        """Describe the active retrieval stack for docs/debug output."""
+
+        return {
+            "strategy": "hybrid_lexical_with_optional_vector",
+            "channels": ["like", "fts5_bm25", "vector"],
+            "lexical_channels": ["like", "fts5_bm25"],
+            "vector": describe_vector_retrieval(db_path=self.db_path),
+        }
 
     def search(self, query: str, *, limit: int = 5) -> list[dict[str, Any]]:
         """Return reranked chunks for the query."""
@@ -466,7 +501,8 @@ class SQLiteRetriever:
         finally:
             conn.close()
 
-        candidate_rows = self._merge_candidate_rows(like_candidates, fts_candidates)
+        vector_candidates = self._vector_candidate_search(query=query, limit=fetch_limit)
+        candidate_rows = self._merge_candidate_rows(like_candidates, fts_candidates, vector_candidates)
         scored = [
             self._score_row(dict(row), analysis)
             for row in candidate_rows
@@ -618,12 +654,14 @@ class SQLiteRetriever:
         self,
         like_rows: list[sqlite3.Row],
         fts_rows: list[sqlite3.Row],
+        vector_rows: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         merged: dict[str, dict[str, Any]] = {}
         for row in like_rows:
             record = dict(row)
             record.setdefault("fts_rank", None)
             record.setdefault("fts_hit", 0)
+            record["_retrieval_channels"] = ["like"]
             merged[str(record["chunk_id"])] = record
 
         for row in fts_rows:
@@ -631,12 +669,37 @@ class SQLiteRetriever:
             chunk_id = str(record["chunk_id"])
             existing = merged.get(chunk_id)
             if existing is None:
+                record["_retrieval_channels"] = ["fts"]
                 merged[chunk_id] = record
                 continue
             existing["fts_hit"] = max(int(existing.get("fts_hit", 0)), int(record.get("fts_hit", 0)))
             if record.get("fts_rank") is not None:
                 existing["fts_rank"] = record.get("fts_rank")
+            _append_channel(existing, "fts")
+        for record in vector_rows or []:
+            chunk_id = str(record.get("chunk_id", ""))
+            if not chunk_id:
+                continue
+            existing = merged.get(chunk_id)
+            if existing is None:
+                record.setdefault("fts_rank", None)
+                record.setdefault("fts_hit", 0)
+                record["_retrieval_channels"] = ["vector"]
+                merged[chunk_id] = record
+                continue
+            if record.get("_vector_score") is not None:
+                existing["_vector_score"] = record.get("_vector_score")
+            _append_channel(existing, "vector")
         return list(merged.values())
+
+    def _vector_candidate_search(self, *, query: str, limit: int) -> list[dict[str, Any]]:
+        """Fetch optional vector candidates if a vector searcher is configured."""
+
+        try:
+            rows = self.vector_searcher.search(query, limit=limit)
+        except Exception:
+            return []
+        return [dict(row) for row in rows if row.get("chunk_id")]
 
     def _score_row(self, row: dict[str, Any], analysis: QueryAnalysis) -> dict[str, Any]:
         title = str(row.get("title", ""))
@@ -749,15 +812,27 @@ class SQLiteRetriever:
             score -= 8.0
         if metadata.get("has_ocr_noise"):
             score -= 1.5
-        score += _semantic_alignment_score(metadata=metadata, analysis=analysis)
+        intents = _detect_query_semantic_intents(analysis)
+        score += _semantic_alignment_score(metadata=metadata, analysis=analysis, intents=intents)
+        score += _exact_phrase_alignment_boost(title_norm=title_norm, text_norm=text_norm, analysis=analysis)
+        score += _query_structure_alignment_score(
+            title_norm=title_norm,
+            text_norm=text_norm,
+            metadata=metadata,
+            intents=intents,
+        )
 
         if int(row.get("fts_hit", 0)):
             score += 5.0
             rank_bonus = _fts_rank_bonus(row.get("fts_rank"))
             score += rank_bonus
+        vector_score = row.get("_vector_score")
+        if isinstance(vector_score, (int, float)):
+            score += min(max(float(vector_score), 0.0), 1.0) * 8.0
 
         if product == "汇总英文":
             score += _english_manual_alignment_score(title_norm=title_norm, text_norm=text_norm, analysis=analysis)
+            score += _english_title_focus_score(title_norm=title_norm, text_norm=text_norm, analysis=analysis)
             query_groups = _detect_english_domain_groups(" ".join([*analysis.keywords, *analysis.phrases]))
             domain_label = str(metadata.get("domain_label") or "")
             if domain_label and query_groups:
@@ -802,6 +877,9 @@ class SQLiteRetriever:
         row["_product_match"] = product_match
         row["_fts_rank"] = row.get("fts_rank")
         row["_fts_hit"] = int(row.get("fts_hit", 0))
+        row["_vector_score"] = row.get("_vector_score")
+        row["_retrieval_channels"] = _unique(row.get("_retrieval_channels", []))
+        row["_retrieval_strategy"] = "like+fts+vector_optional"
         return row
 
 
@@ -877,6 +955,41 @@ def _english_manual_alignment_score(*, title_norm: str, text_norm: str, analysis
     return score
 
 
+def _english_title_focus_score(*, title_norm: str, text_norm: str, analysis: QueryAnalysis) -> float:
+    english_exact_keywords = _unique(
+        keyword
+        for keyword in analysis.keywords
+        if keyword not in analysis.expanded_keywords and re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]*", keyword)
+    )
+    if not english_exact_keywords:
+        return 0.0
+
+    title_hits = 0
+    text_only_hits = 0
+    for keyword in english_exact_keywords:
+        token = _normalize(keyword)
+        if not token:
+            continue
+        if token in title_norm:
+            title_hits += 1
+        elif token in text_norm:
+            text_only_hits += 1
+
+    score = min(title_hits * 2.2, 6.0)
+    if title_hits == 0 and text_only_hits >= 2:
+        score -= 3.0
+    elif title_hits == 0 and text_only_hits == 1:
+        score -= 1.2
+    return score
+
+
+def _append_channel(row: dict[str, Any], channel: str) -> None:
+    channels = list(row.get("_retrieval_channels", []))
+    if channel not in channels:
+        channels.append(channel)
+    row["_retrieval_channels"] = channels
+
+
 def _detect_english_domain_groups(text: str) -> set[str]:
     normalized = re.sub(r"\s+", " ", text.lower())
     groups: set[str] = set()
@@ -897,12 +1010,66 @@ def _english_hint_occurs(normalized_text: str, hint: str) -> bool:
     return bool(re.search(rf"\b{re.escape(normalized_hint)}\b", normalized_text))
 
 
-def _semantic_alignment_score(*, metadata: dict[str, Any], analysis: QueryAnalysis) -> float:
+def _exact_phrase_alignment_boost(*, title_norm: str, text_norm: str, analysis: QueryAnalysis) -> float:
+    score = 0.0
+    for phrase in analysis.phrases[:6]:
+        token = _normalize(phrase)
+        if len(token) < 4:
+            continue
+        if title_norm.startswith(token):
+            score += 4.5
+        elif token in title_norm:
+            score += 2.5
+        elif token in text_norm:
+            score += 0.8
+    return score
+
+
+def _query_structure_alignment_score(
+    *,
+    title_norm: str,
+    text_norm: str,
+    metadata: dict[str, Any],
+    intents: set[str],
+) -> float:
+    if not intents:
+        return 0.0
+
+    combined = f"{title_norm} {text_norm}"
+    score = 0.0
+    generic_title = any(_normalize(hint) in title_norm for hint in _GENERIC_SECTION_HINTS)
+    procedure_cue_hits = sum(1 for cue in _PROCEDURE_CUES if _normalize(cue) in combined)
+    troubleshooting_cue_hits = sum(1 for cue in _TROUBLESHOOTING_CUES if _normalize(cue) in combined)
+    specification_cue_hits = sum(1 for cue in _SPECIFICATION_CUES if _normalize(cue) in combined)
+
+    if "procedure" in intents:
+        score += min(procedure_cue_hits * 1.1, 4.5)
+        if metadata.get("is_procedure"):
+            score += 1.5
+        if generic_title and procedure_cue_hits == 0:
+            score -= 3.0
+
+    if "troubleshooting" in intents:
+        score += min(troubleshooting_cue_hits * 1.2, 4.8)
+        if generic_title and troubleshooting_cue_hits == 0:
+            score -= 3.2
+
+    if "specification" in intents:
+        score += min(specification_cue_hits * 1.0, 3.8)
+        if generic_title and specification_cue_hits == 0:
+            score -= 2.2
+
+    if "parts_list" in intents and metadata.get("semantic_type") == "parts_list":
+        score += 1.8
+    return score
+
+
+def _semantic_alignment_score(*, metadata: dict[str, Any], analysis: QueryAnalysis, intents: set[str] | None = None) -> float:
     semantic_type = str(metadata.get("semantic_type") or "general")
     if not semantic_type or semantic_type == "general":
         return 0.0
 
-    intents = _detect_query_semantic_intents(analysis)
+    intents = intents or _detect_query_semantic_intents(analysis)
     if not intents:
         return -1.5 if metadata.get("is_warning_only") else 0.0
 

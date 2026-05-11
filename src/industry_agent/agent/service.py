@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from industry_agent.agent.context_manager import ContextManager, TurnContext
+from industry_agent.agent.customer_service_kb import CustomerServiceKnowledgeBase
 from industry_agent.agent.customer_service_policy import CustomerServicePolicy
 from industry_agent.agent.image_understanding import ImageUnderstandingResult, ImageUnderstander
+from industry_agent.agent.prompts import (
+    SUBQUESTION_MERGE_TEMPLATE,
+    build_customer_service_system_prompt,
+    build_manual_qa_system_prompt,
+)
 from industry_agent.agent.question_splitter import SubQuestion, split_complex_question
 from industry_agent.agent.question_router import QuestionRouter, RouteDecision
 from industry_agent.agent.response_formatter import (
@@ -19,8 +24,11 @@ from industry_agent.agent.response_formatter import (
     format_multi_question_answer,
 )
 from industry_agent.agent.session_store import InMemorySessionStore, SessionState
+from industry_agent.agent.skills.image_skill import ImageSkill
 from industry_agent.config import settings
-from industry_agent.rag.retriever import SQLiteRetriever, analyze_query
+from industry_agent.llm.client import LLMClient
+from industry_agent.rag.factory import create_retriever
+from industry_agent.rag.retriever import analyze_query
 
 try:
     import httpx
@@ -39,39 +47,9 @@ MIN_TOP_SCORE = 6.0         # below this, do not ask LLM to hallucinate
 MIN_KEEP_SCORE = 4.0        # chunks below this score are discarded
 MULTIMODAL_RETRIEVAL_LIMIT = 6
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:2b")
-OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava-phi3")
-
-SYSTEM_TEMPLATE = """\
-你是一个专业的产品客服智能体。请严格遵守以下规则：
-
-1. **只基于下方【参考资料】回答**，不得编造。
-2. 尽量从参考资料中提取对用户有帮助的内容，详细、完整地回答。只有参考资料完全不含相关信息时才说"根据现有资料无法回答此问题"。
-3. 如果参考资料是英文的，或用户用英文提问，请用英文回答。
-4. **图文结合**：参考资料中出现配图ID时，必须在答案中对应位置插入 <PIC> 标记，表示此处应展示该图片。例如："安装步骤如图所示<PIC>"。
-5. 回答结构要清晰：先给结论，再分步骤说明操作方法，最后列注意事项。用编号列表组织步骤。
-6. 直接输出最终答案，不要输出思考过程、不要输出"结论："等标签。
-
-【参考资料】
-{context}
-"""
-
-SUBQUESTION_MERGE_TEMPLATE = """\
-请将下面多个子问题的回答合并成一个最终客服回复。要求：
-
-1. 按“问题1 / 问题2 / 问题3”依次输出。
-2. 每个问题都先直接回答，再补充必要说明。
-3. 不要编造没有出现过的事实。
-4. 如果某个子问题资料不足，就保留“根据现有资料无法回答此问题”。
-5. 直接输出最终答案，不要输出思考过程。
-
-【原始问题】
-{original_question}
-
-【子问题回答】
-{sub_answers}
-"""
+OLLAMA_BASE_URL = settings.ollama_base_url
+OLLAMA_MODEL = settings.ollama_model
+OLLAMA_VISION_MODEL = settings.ollama_vision_model
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +83,19 @@ _ANSWER_START_RE = re.compile(
     r"^([\u4e00-\u9fff]|#{1,3}\s|根据|您好|以下|关于|\d+[\.、])"
 )
 _NON_WORD_RE = re.compile(r"[\W_]+", flags=re.UNICODE)
+_STRONG_MANUAL_REFUSAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"根据现有资料无法准确回答此问题"),
+    re.compile(r"根据现有资料无法回答此问题"),
+    re.compile(r"Based on the available references,?\s+I cannot provide", flags=re.IGNORECASE),
+    re.compile(r"The provided reference materials do not contain", flags=re.IGNORECASE),
+    re.compile(r"The references only mention", flags=re.IGNORECASE),
+)
+_ENGLISH_INTERNAL_HEADING_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"Direct Conclusion\s*:", flags=re.IGNORECASE),
+    re.compile(r"Details/Description\s*:", flags=re.IGNORECASE),
+    re.compile(r"Operation/Steps\s*:", flags=re.IGNORECASE),
+    re.compile(r"Notes?\s*:", flags=re.IGNORECASE),
+)
 _SMALLTALK_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
         "greeting",
@@ -126,6 +117,11 @@ _SERVICE_FOLLOW_UP_TERMS: tuple[str, ...] = (
     "那", "还", "还有", "需要", "准备", "材料", "多久", "几天", "怎么办",
     "可以吗", "能不能", "怎么申请", "怎么处理", "流程", "凭证", "证明",
     "谁承担", "联系谁", "审核", "下一步", "然后呢",
+)
+_VISUAL_GROUNDING_TERMS: tuple[str, ...] = (
+    "图", "图片", "配图", "图示", "示意图", "位置", "外观", "按钮", "按键",
+    "接口", "插口", "指示灯", "灯", "闪烁", "部件", "零件", "表带", "尺寸",
+    "更换", "拆卸", "安装", "连接", "屏幕", "显示",
 )
 
 
@@ -214,6 +210,87 @@ def _is_manual_fallback_answer(answer: str) -> bool:
     return "根据现有资料无法准确回答此问题" in answer or "根据现有资料无法回答此问题" in answer
 
 
+def _looks_like_customer_service_llm_failure(answer: str, *, question: str) -> bool:
+    normalized = _strip_thinking(str(answer)).strip()
+    if not normalized:
+        return True
+    if normalized in {"模型未返回有效回答。"}:
+        return True
+    if normalized.startswith("LLM 调用失败:"):
+        return True
+    if any(token in normalized for token in ("【客服策略骨架】", "生成规则", "思考过程", "提示词")):
+        return True
+    if "根据现有资料无法" in normalized:
+        return True
+    compact = re.sub(r"\s+", "", normalized)
+    if len(compact) < 12:
+        return True
+    if _normalize_for_smalltalk(normalized) == _normalize_for_smalltalk(question):
+        return True
+    return False
+
+
+def _should_use_extractive_manual_answer(answer: str) -> bool:
+    normalized = _strip_thinking(str(answer)).strip()
+    if not normalized:
+        return True
+    if _is_manual_fallback_answer(normalized):
+        return True
+    return any(pattern.search(normalized) for pattern in _STRONG_MANUAL_REFUSAL_PATTERNS)
+
+
+def _should_force_extractive_manual_answer(query: str) -> bool:
+    return _looks_like_instructional_query(query) or _looks_like_troubleshooting_query(query)
+
+
+def _should_prefer_english_extractive_answer(answer: str, *, query: str) -> bool:
+    if not _is_ascii_heavy(query):
+        return False
+
+    normalized = _strip_thinking(str(answer)).strip()
+    if not normalized:
+        return True
+    if any(pattern.search(normalized) for pattern in _STRONG_MANUAL_REFUSAL_PATTERNS):
+        return True
+    if any(pattern.search(normalized) for pattern in _ENGLISH_INTERNAL_HEADING_PATTERNS):
+        return True
+
+    content = re.sub(r"(结论|操作/说明|注意事项|相关图片|无)", " ", normalized)
+    content = re.sub(r"\s+", " ", content)
+    return len(re.findall(r"[\u4e00-\u9fff]", content)) >= 6
+
+
+def _manual_answer_needs_evidence_rescue(answer: str, *, query: str, evidence_chunks: list[dict[str, Any]]) -> bool:
+    normalized = _strip_thinking(str(answer)).strip()
+    if not normalized:
+        return True
+    if len(re.sub(r"\s+", "", normalized)) < 18:
+        return True
+    if any(pattern.search(normalized) for pattern in _STRONG_MANUAL_REFUSAL_PATTERNS):
+        return True
+
+    evidence_terms: list[str] = []
+    analysis = analyze_query(query)
+    evidence_terms.extend(analysis.products[:4])
+    evidence_terms.extend(analysis.models[:4])
+    evidence_terms.extend(analysis.phrases[:4])
+    evidence_terms.extend(analysis.expanded_keywords[:6])
+    evidence_terms.extend(analysis.keywords[:8])
+    for chunk in evidence_chunks[:3]:
+        evidence_terms.extend(_extract_keywords_from_text(str(chunk.get("title", ""))))
+        evidence_terms.extend(_extract_keywords_from_text(str(chunk.get("text", ""))))
+    evidence_terms = [term for term in _unique(evidence_terms) if len(term) >= 2]
+    if not evidence_terms:
+        return False
+
+    overlap = _text_overlap_count(normalized, evidence_terms)
+    if overlap >= 2:
+        return False
+    if _looks_like_instructional_query(query) and len(normalized) > 60:
+        return True
+    return overlap == 0
+
+
 def _build_extractive_manual_answer(
     *,
     query: str,
@@ -234,6 +311,7 @@ def _build_extractive_manual_answer(
         ]
     )
     instructional_query = _looks_like_instructional_query(query)
+    troubleshooting_query = _looks_like_troubleshooting_query(query)
     title_candidates: list[tuple[float, str]] = []
     sentence_candidates: list[tuple[float, str]] = []
     for chunk in evidence_chunks[:3]:
@@ -243,6 +321,8 @@ def _build_extractive_manual_answer(
             title_score = _text_overlap_count(title, query_terms) + 2.0
             if instructional_query:
                 title_score += _instructional_sentence_bonus(title)
+            if troubleshooting_query:
+                title_score += _troubleshooting_sentence_bonus(title)
             title_candidates.append((title_score, title))
         for sentence in _split_evidence_sentences(text):
             if _looks_like_toc_noise(sentence):
@@ -253,6 +333,8 @@ def _build_extractive_manual_answer(
             if instructional_query:
                 score += _instructional_sentence_bonus(sentence)
                 score -= _low_value_instruction_sentence_penalty(sentence)
+            if troubleshooting_query:
+                score += _troubleshooting_sentence_bonus(sentence)
             sentence_candidates.append((float(score), sentence))
 
     title_candidates.sort(key=lambda item: (item[0], len(item[1]) <= 160), reverse=True)
@@ -304,22 +386,114 @@ def _build_extractive_manual_answer(
     ]
     if not details and selected:
         details = [selected[0]] if not _is_duplicate_evidence_sentence(selected[0], [conclusion]) else []
-    caution = "The answer is extracted from the retrieved manual evidence. Please follow the original manual for safety-critical operation."
-    if not _is_ascii_heavy(query):
-        caution = "以上内容来自检索到的说明书证据，涉及安全操作时请以原说明书为准。"
 
     lines = [conclusion]
     if details:
-        lines.append("")
-        for i, item in enumerate(details, 1):
-            lines.append(f"{i}. {item}")
-    if caution:
-        lines.extend(["", caution])
-    # Insert <PIC> markers for image-text complementarity
-    if image_ids:
-        lines.append("")
-        lines.append("相关配图如下：" + "".join(f"<PIC>" for _ in image_ids))
+        lines.extend(details[:2])
     return "\n".join(lines).strip()
+
+
+def _build_manual_answer_terms(query: str, answer: str) -> list[str]:
+    analysis = analyze_query(query)
+    terms = [
+        *analysis.products[:4],
+        *analysis.models[:4],
+        *analysis.phrases[:6],
+        *analysis.expanded_keywords[:8],
+        *analysis.keywords[:10],
+        *_extract_keywords_from_text(answer)[:12],
+    ]
+    return [term for term in _unique(terms) if len(str(term).strip()) >= 2]
+
+
+def _should_ground_manual_images(
+    *,
+    query: str,
+    answer: str,
+    image_terms: list[str] | None,
+    image_features: dict[str, list[str]] | None,
+) -> bool:
+    normalized_query = str(query)
+    if any(term in normalized_query for term in _VISUAL_GROUNDING_TERMS):
+        return True
+    if image_terms:
+        return True
+    if image_features:
+        for values in image_features.values():
+            if any(str(value).strip() for value in values):
+                return True
+    normalized_answer = str(answer)
+    return any(term in normalized_answer for term in _VISUAL_GROUNDING_TERMS)
+
+
+def _select_grounded_manual_image_ids(
+    *,
+    query: str,
+    answer: str,
+    evidence_chunks: list[dict[str, Any]],
+    image_terms: list[str] | None = None,
+    image_features: dict[str, list[str]] | None = None,
+) -> list[str]:
+    if not evidence_chunks:
+        return []
+
+    answer_terms = _build_manual_answer_terms(query, answer)
+    image_terms = [term for term in (image_terms or []) if len(str(term).strip()) >= 2]
+    image_features = image_features or {}
+    feature_terms = _unique(
+        [
+            *(image_features.get("component_terms", []) or []),
+            *(image_features.get("status_terms", []) or []),
+            *(image_features.get("issue_terms", []) or []),
+        ]
+    )
+    should_ground = _should_ground_manual_images(
+        query=query,
+        answer=answer,
+        image_terms=image_terms,
+        image_features=image_features,
+    )
+    ranked_chunks: list[tuple[float, list[str]]] = []
+    for chunk in evidence_chunks[:4]:
+        image_ids = _parse_json_list(chunk.get("image_ids"))
+        if not image_ids:
+            continue
+        chunk_text = f"{chunk.get('title', '')}\n{chunk.get('text', '')}"
+        answer_overlap = _text_overlap_count(chunk_text, answer_terms)
+        image_overlap = _text_overlap_count(chunk_text, image_terms)
+        feature_overlap = _text_overlap_count(chunk_text, feature_terms)
+        score = float(chunk.get("_evidence_score", chunk.get("_score", 0.0)))
+        score += answer_overlap * 1.6
+        score += image_overlap * 2.0
+        score += feature_overlap * 1.8
+        if answer_overlap > 0 and image_ids:
+            score += 0.8
+        if feature_overlap > 0 and image_ids:
+            score += 0.8
+        ranked_chunks.append((score, image_ids))
+
+    if not ranked_chunks:
+        return []
+
+    ranked_chunks.sort(key=lambda item: item[0], reverse=True)
+    if not should_ground and ranked_chunks[0][0] < MIN_KEEP_SCORE + 2.0:
+        return []
+
+    threshold = ranked_chunks[0][0] - (1.5 if should_ground else 0.8)
+    selected: list[str] = []
+    seen: set[str] = set()
+    for score, image_ids in ranked_chunks:
+        if score < threshold and selected:
+            continue
+        for image_id in image_ids:
+            normalized = str(image_id).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            selected.append(normalized)
+            if len(selected) >= 3:
+                return selected
+    return selected
 
 
 def _clean_evidence_text(text: str) -> str:
@@ -337,6 +511,12 @@ def _clean_submission_style_sentence(text: str) -> str:
     cleaned = re.sub(r"([,.;:!?])(?=[A-Za-z])", r"\1 ", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     return cleaned.strip(" -|")
+
+
+def _extract_keywords_from_text(text: str) -> list[str]:
+    cjk_terms = re.findall(r"[\u4e00-\u9fff]{2,8}", str(text))
+    ascii_terms = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", str(text))
+    return _unique([*cjk_terms[:10], *ascii_terms[:10]])
 
 
 def _split_evidence_sentences(text: str) -> list[str]:
@@ -413,7 +593,18 @@ def _compose_extractive_conclusion(*, title: str, sentence: str, query: str) -> 
 
 def _looks_like_instructional_query(text: str) -> bool:
     normalized = str(text).lower()
-    return bool(re.search(r"\b(how|operate|operation|use|using|press|select|turn|open|close)\b", normalized))
+    return bool(
+        re.search(r"\b(how|operate|operation|use|using|press|select|turn|open|close|install|remove|clean|set|check|adjust)\b", normalized)
+        or re.search(r"(怎么|如何|步骤|方法|安装|更换|拆卸|清洁|设置|连接|使用|充电|佩戴|调节|检查|操作)", str(text))
+    )
+
+
+def _looks_like_troubleshooting_query(text: str) -> bool:
+    normalized = str(text).lower()
+    return bool(
+        re.search(r"\b(meaning|mean|indicat|indicator|status|error|fault|warning|flash|flashing|blink|blinking|code)\b", normalized)
+        or re.search(r"(什么意思|代表什么|含义|故障|闪烁|指示灯|报警|异常|无法|不工作|错误|报码|代码|状态)", str(text))
+    )
 
 
 def _instructional_sentence_bonus(text: str) -> float:
@@ -430,10 +621,48 @@ def _instructional_sentence_bonus(text: str) -> float:
         r"\benter\b",
         r"\binstall\b",
         r"\bremove\b",
+        r"步骤",
+        r"先",
+        r"再",
+        r"然后",
+        r"最后",
+        r"取下",
+        r"装入",
+        r"插入",
+        r"连接",
+        r"按下",
+        r"点击",
+        r"选择",
+        r"确认",
+        r"检查",
     ):
         if re.search(pattern, normalized):
             bonus += 2.0
     return min(bonus, 6.0)
+
+
+def _troubleshooting_sentence_bonus(text: str) -> float:
+    normalized = str(text).lower()
+    bonus = 0.0
+    for pattern in (
+        r"\bmeans\b",
+        r"\bindicates\b",
+        r"\bstatus\b",
+        r"\bwarning\b",
+        r"\bflash(?:ing)?\b",
+        r"\bblink(?:ing)?\b",
+        r"表示",
+        r"代表",
+        r"含义",
+        r"闪烁",
+        r"指示灯",
+        r"报警",
+        r"错误",
+        r"状态",
+    ):
+        if re.search(pattern, normalized):
+            bonus += 1.5
+    return min(bonus, 4.5)
 
 
 def _low_value_instruction_sentence_penalty(text: str) -> float:
@@ -466,7 +695,7 @@ def _rank_evidence_chunks(
     ranked: list[dict[str, Any]] = []
     for chunk in chunks:
         row = dict(chunk)
-        base_score = float(row.get("_score", 0.0))
+        base_score = max(float(row.get("_score", 0.0)), float(row.get("_fusion_score", 0.0)))
         title = str(row.get("title", ""))
         text = str(row.get("text", ""))
         image_ids = _parse_json_list(row.get("image_ids"))
@@ -544,26 +773,65 @@ def _filter_evidence_for_query(
     if not ranked:
         return []
 
+    query_analysis = analyze_query(query)
+    query_has_explicit_product = bool(query_analysis.products or query_analysis.models)
+    preferred_products = {str(product) for product in query_analysis.products}
     top = ranked[0]
+    if preferred_products:
+        matched_anchor = next(
+            (
+                chunk for chunk in ranked
+                if str(chunk.get("product_name", "")) in preferred_products
+                and float(chunk.get("_evidence_score", 0.0)) >= MIN_KEEP_SCORE
+            ),
+            None,
+        )
+        if matched_anchor is not None:
+            top = matched_anchor
+
     top_score = float(top.get("_evidence_score", 0.0))
-    if top_score < MIN_TOP_SCORE:
+    min_anchor_score = MIN_KEEP_SCORE if query_has_explicit_product else MIN_TOP_SCORE
+    if top_score < min_anchor_score:
         return []
 
     top_product = top.get("product_name", "")
+    top_query_overlap = int(top.get("_query_overlap", 0))
+    top_image_overlap = int(top.get("_image_overlap", 0))
     filtered: list[dict[str, Any]] = []
     seen_titles: set[str] = set()
+    cross_product_kept = 0
     for chunk in ranked:
         score = float(chunk.get("_evidence_score", 0.0))
         if score < MIN_KEEP_SCORE:
             continue
-        if top_product and chunk.get("product_name") != top_product:
-            continue
+        same_product = not top_product or chunk.get("product_name") == top_product
+        if not same_product:
+            chunk_query_overlap = int(chunk.get("_query_overlap", 0))
+            chunk_image_overlap = int(chunk.get("_image_overlap", 0))
+            chunk_variant_hits = int(chunk.get("_variant_hits", 0))
+            overlap_threshold = max(2, top_query_overlap)
+            if query_has_explicit_product:
+                continue
+            if cross_product_kept >= 2:
+                continue
+            strong_query_alignment = chunk_query_overlap >= overlap_threshold
+            strong_image_alignment = chunk_image_overlap > 0 and chunk_image_overlap >= top_image_overlap
+            near_top_score = score >= top_score - 1.2
+            variant_rescue = (
+                chunk_variant_hits >= 2
+                and chunk_query_overlap >= overlap_threshold
+                and score >= top_score - 1.8
+            )
+            if not ((strong_query_alignment and near_top_score) or strong_image_alignment or variant_rescue):
+                continue
         title_key = _title_key(str(chunk.get("title", "")))
         if title_key and title_key in seen_titles:
             continue
         if title_key:
             seen_titles.add(title_key)
         filtered.append(chunk)
+        if not same_product:
+            cross_product_kept += 1
         if len(filtered) >= FINAL_CONTEXT_CHUNKS:
             break
     return filtered
@@ -636,7 +904,7 @@ def _assemble_context(
         references.append({
             "chunk_id": chunk.get("chunk_id", ""),
             "title": title,
-            "text_snippet": text[:100],
+            "text_snippet": text[:320],
             "product_name": product,
             "score": str(chunk.get("_score", "")),
         })
@@ -785,26 +1053,49 @@ def _build_visual_focus_terms(image_features: dict[str, list[str]] | None) -> li
 # ---------------------------------------------------------------------------
 
 class AgentService:
-    """Retrieve -> assemble context -> call Ollama LLM -> return answer."""
+    """Retrieve -> assemble context -> call the configured LLM backend -> return answer."""
 
     def __init__(
         self,
-        retriever: SQLiteRetriever | None = None,
-        base_url: str = OLLAMA_BASE_URL,
-        model: str = OLLAMA_MODEL,
+        retriever: Any | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+        llm_backend: str | None = None,
     ) -> None:
-        self.retriever = retriever or SQLiteRetriever()
-        self.model = model
-        self.base_url = base_url.rstrip("/")
+        self.retriever = retriever or create_retriever()
+        self.llm_backend = (llm_backend or settings.llm_backend).strip().lower()
+        self.model = model or (settings.ollama_model if self.llm_backend == "ollama" else settings.llm_model)
+        resolved_base_url = base_url or (
+            settings.ollama_base_url if self.llm_backend == "ollama" else settings.llm_base_url
+        )
+        self.base_url = resolved_base_url.rstrip("/")
+        self.vision_model = (
+            settings.ollama_vision_model if self.llm_backend == "ollama" else settings.llm_vision_model
+        )
         self.session_store = InMemorySessionStore(max_history_turns=MAX_HISTORY_TURNS)
         self.context_manager = ContextManager(max_history_turns=MAX_HISTORY_TURNS)
         self.question_router = QuestionRouter()
         self.customer_service_policy = CustomerServicePolicy()
-        if httpx is None:
+        self.customer_service_kb = CustomerServiceKnowledgeBase()
+        if httpx is None and self.llm_backend == "ollama":
             raise RuntimeError("httpx is required to use AgentService with Ollama. Please install requirements.txt")
-        self.http_client = httpx.Client(proxy=None, timeout=120.0)
-        self.image_understander = ImageUnderstander(
+        self.http_client = httpx.Client(proxy=None, timeout=120.0) if httpx is not None else None
+        self.llm_client = LLMClient(
+            backend=self.llm_backend,
             base_url=self.base_url,
+            model=self.model,
+            vision_model=self.vision_model,
+        )
+        self.image_skill = ImageSkill(
+            llm_backend=self.llm_backend,
+            ollama_base_url=settings.ollama_base_url,
+            ollama_vision_model=settings.ollama_vision_model,
+            llm_base_url=settings.llm_base_url,
+            llm_model=settings.llm_model,
+            llm_vision_model=settings.llm_vision_model,
+        )
+        self.image_understander = ImageUnderstander(
+            base_url=settings.ollama_base_url,
             http_client=self.http_client,
             vision_model=OLLAMA_VISION_MODEL,
         )
@@ -874,6 +1165,9 @@ class AgentService:
                     "top_score": chunks[0].get("_score", 0) if chunks else 0,
                     "top_title": chunks[0].get("title", "") if chunks else "",
                     "query_variants": [name for name, _ in candidate_groups],
+                    "retrieval_status": self.retriever.retrieval_status()
+                    if hasattr(self.retriever, "retrieval_status")
+                    else {},
                     "image_terms": image_terms or [],
                     "image_features": image_features or {},
                     "reason": "low_confidence_or_no_evidence",
@@ -882,12 +1176,11 @@ class AgentService:
 
         # 2. Assemble context / collect metadata
         context, image_ids, sources, references = _assemble_context(evidence_chunks)
-        images = _image_details(image_ids, self.image_index)
         confidence = _confidence_from_chunks(evidence_chunks)
 
         # 3. Build messages
-        system_msg = SYSTEM_TEMPLATE.format(context=context if context else "（未找到相关资料）")
-        messages: list[dict[str, str]] = [{"role": "system", "content": system_msg}]
+        prompt_result = build_manual_qa_system_prompt(context)
+        messages: list[dict[str, str]] = [{"role": "system", "content": prompt_result.content}]
         if dialog_summary:
             messages.append({"role": "system", "content": f"【会话上下文】\n{dialog_summary}"})
         if image_context:
@@ -900,18 +1193,33 @@ class AgentService:
         messages.append({"role": "user", "content": query})
 
         # 4. Call LLM
-        answer = self._call_llm(messages)
-        answer = format_manual_answer(answer, image_ids=image_ids)
-        if _is_ascii_heavy(query) and _is_manual_fallback_answer(answer):
-            answer = _build_extractive_manual_answer(
-                query=query,
-                evidence_chunks=evidence_chunks,
-                image_ids=image_ids,
-            )
+        extractive_answer = _build_extractive_manual_answer(
+            query=query,
+            evidence_chunks=evidence_chunks,
+            image_ids=image_ids,
+        )
+        if _should_force_extractive_manual_answer(query):
+            answer = extractive_answer
+        else:
+            answer = self._call_llm(messages)
+            answer = format_manual_answer(answer, image_ids=[], compact=True)
+            if _should_use_extractive_manual_answer(answer) or _should_prefer_english_extractive_answer(answer, query=query):
+                answer = extractive_answer
+            elif _manual_answer_needs_evidence_rescue(answer, query=query, evidence_chunks=evidence_chunks):
+                answer = extractive_answer or answer
+
+        grounded_image_ids = _select_grounded_manual_image_ids(
+            query=query,
+            answer=answer,
+            evidence_chunks=evidence_chunks,
+            image_terms=image_terms,
+            image_features=image_features,
+        )
+        images = _image_details(grounded_image_ids, self.image_index)
 
         return {
             "answer": answer,
-            "image_ids": image_ids,
+            "image_ids": grounded_image_ids,
             "images": images,
             "sources": sources,
             "references": references,
@@ -924,10 +1232,27 @@ class AgentService:
                 "top_title": evidence_chunks[0].get("title", "") if evidence_chunks else "",
                 "top_product": evidence_chunks[0].get("product_name", "") if evidence_chunks else "",
                 "query_variants": [name for name, _ in candidate_groups],
+                "retrieval_status": self.retriever.retrieval_status()
+                if hasattr(self.retriever, "retrieval_status")
+                else {},
+                "retrieval_channels": _unique(
+                    [
+                        channel
+                        for chunk in evidence_chunks
+                        for channel in chunk.get("_retrieval_channels", [])
+                    ]
+                ),
                 "image_terms": image_terms or [],
                 "image_features": image_features or {},
+                "candidate_image_ids": image_ids,
+                "grounded_image_ids": grounded_image_ids,
                 "candidate_titles": [str(chunk.get("title", "")) for chunk in chunks[:5]],
                 "selected_titles": [str(chunk.get("title", "")) for chunk in evidence_chunks],
+                "prompt": {
+                    "rule_count": prompt_result.rule_count,
+                    "has_context": prompt_result.has_context,
+                    "anti_hallucination": True,
+                },
             },
         }
 
@@ -957,31 +1282,85 @@ class AgentService:
         route_decision: RouteDecision,
         context_topics: list[str] | None = None,
     ) -> dict[str, Any]:
+        if not hasattr(self, "customer_service_kb"):
+            self.customer_service_kb = CustomerServiceKnowledgeBase()
         policy_response = self.customer_service_policy.answer(
             question,
             context_topics=context_topics,
         )
+        kb_hits = self.customer_service_kb.search(
+            question,
+            context_topics=[*policy_response.matched_topics, *(context_topics or [])],
+            limit=4,
+        )
+        kb_context = self.customer_service_kb.build_context(kb_hits)
+        prompt_context = (
+            f"【客服策略骨架】\n{policy_response.answer}\n\n【客服知识参考】\n{kb_context}"
+            if kb_context
+            else policy_response.answer
+        )
+        prompt_result = build_customer_service_system_prompt(prompt_context)
+        llm_messages = [
+            {"role": "system", "content": prompt_result.content},
+            {
+                "role": "user",
+                "content": (
+                    "请基于上面的客服策略骨架和客服知识参考，直接回答下面这个用户问题。\n"
+                    "优先吸收与当前场景最接近的客服知识条目，不要复述知识标题，不要编造新政策，不要输出 Markdown 标题。\n\n"
+                    f"用户问题：{question}"
+                ),
+            },
+        ]
+        llm_answer = self._call_llm(llm_messages)
+        used_policy_fallback = _looks_like_customer_service_llm_failure(llm_answer, question=question)
+        final_answer = policy_response.answer if used_policy_fallback else llm_answer
+        references = [
+            {
+                "chunk_id": f"policy_{topic}",
+                "title": "客服策略知识",
+                "text_snippet": question[:100],
+                "product_name": "customer_service_policy",
+                "score": str(route_decision.confidence),
+            }
+            for topic in policy_response.matched_topics
+        ]
+        references.extend(
+            {
+                "chunk_id": str(hit.get("entry_id", "")),
+                "title": str(hit.get("title", "")),
+                "text_snippet": str(hit.get("content", ""))[:320],
+                "product_name": "customer_service_kb",
+                "score": str(hit.get("score", "")),
+            }
+            for hit in kb_hits
+        )
+        sources = ["customer_service_policy"]
+        if kb_hits:
+            sources.append("customer_service_kb")
         return {
-            "answer": format_customer_service_answer(policy_response.answer),
+            "answer": format_customer_service_answer(final_answer),
             "image_ids": [],
             "images": [],
-            "sources": ["customer_service_policy"],
-            "references": [
-                {
-                    "chunk_id": f"policy_{topic}",
-                    "title": "客服策略知识",
-                    "text_snippet": question[:100],
-                    "product_name": "customer_service_policy",
-                    "score": str(route_decision.confidence),
-                }
-                for topic in policy_response.matched_topics
-            ],
+            "sources": sources,
+            "references": references,
             "confidence": round(min(route_decision.confidence, policy_response.confidence), 2),
             "retrieval_debug": {
                 "route": route_decision.route,
                 "route_reason": route_decision.reason,
                 "route_terms": route_decision.matched_terms,
                 "matched_policy_topics": policy_response.matched_topics,
+                "customer_service_kb": {
+                    "hit_count": len(kb_hits),
+                    "hit_titles": [str(hit.get("title", "")) for hit in kb_hits],
+                    "hit_topics": [str(hit.get("topic", "")) for hit in kb_hits],
+                    "hit_source_types": [str(hit.get("source_type", "")) for hit in kb_hits],
+                },
+                "customer_service_generation": {
+                    "used_llm": True,
+                    "used_policy_fallback": used_policy_fallback,
+                    "prompt_rule_count": prompt_result.rule_count,
+                    "has_policy_context": prompt_result.has_context,
+                },
             },
         }
 
@@ -1054,16 +1433,23 @@ class AgentService:
             ]
 
         sub_results: list[dict[str, Any]] = []
+        turn_service_topics: list[str] = []
         for sub_question in sub_questions:
             route_decision = self._resolve_route_decision(
                 question=sub_question.normalized_text,
                 session=session,
+                turn_service_topics=turn_service_topics,
             )
             if route_decision.route == "customer_service":
                 result = self._generate_customer_service_response(
                     question=sub_question.normalized_text,
                     route_decision=route_decision,
-                    context_topics=session.current_service_topics if session is not None else [],
+                    context_topics=_unique(
+                        [
+                            *(session.current_service_topics if session is not None else []),
+                            *turn_service_topics,
+                        ]
+                    ),
                 )
                 resolved_query = sub_question.normalized_text
             else:
@@ -1097,6 +1483,12 @@ class AgentService:
                 },
             }
             sub_results.append(result)
+            turn_service_topics = _unique(
+                [
+                    *turn_service_topics,
+                    *result["retrieval_debug"].get("matched_policy_topics", []),
+                ]
+            )
 
         merged_answer = self._merge_subquestion_answers(
             original_question=request.question,
@@ -1205,10 +1597,22 @@ class AgentService:
         *,
         question: str,
         session: SessionState | None,
+        turn_service_topics: list[str] | None = None,
     ) -> RouteDecision:
         route_decision = self.question_router.route(question)
         if route_decision.route == "customer_service":
             return route_decision
+        if turn_service_topics:
+            analysis = analyze_query(question)
+            if not (analysis.products or analysis.models) and self._looks_like_customer_service_follow_up(question):
+                return RouteDecision(
+                    route="customer_service",
+                    confidence=max(route_decision.confidence, 0.74),
+                    matched_terms=turn_service_topics[:3],
+                    manual_score=route_decision.manual_score,
+                    service_score=max(route_decision.service_score, 2),
+                    reason="inherit_current_turn_customer_service_context",
+                )
         if session is None or session.current_route not in {"customer_service", "mixed"}:
             return route_decision
         if not session.current_service_topics:
@@ -1269,43 +1673,73 @@ class AgentService:
             self.question_router = QuestionRouter()
         if not hasattr(self, "customer_service_policy"):
             self.customer_service_policy = CustomerServicePolicy()
+        if not hasattr(self, "llm_backend"):
+            self.llm_backend = settings.llm_backend
+        if not hasattr(self, "model"):
+            self.model = settings.ollama_model if self.llm_backend == "ollama" else settings.llm_model
+        if not hasattr(self, "base_url"):
+            self.base_url = (
+                settings.ollama_base_url if self.llm_backend == "ollama" else settings.llm_base_url
+            ).rstrip("/")
+        if not hasattr(self, "vision_model"):
+            self.vision_model = (
+                settings.ollama_vision_model if self.llm_backend == "ollama" else settings.llm_vision_model
+            )
+        if not hasattr(self, "llm_client"):
+            self.llm_client = LLMClient(
+                backend=self.llm_backend,
+                base_url=self.base_url,
+                model=self.model,
+                vision_model=self.vision_model,
+            )
+        if not hasattr(self, "image_skill"):
+            self.image_skill = ImageSkill(
+                llm_backend=self.llm_backend,
+                ollama_base_url=settings.ollama_base_url,
+                ollama_vision_model=settings.ollama_vision_model,
+                llm_base_url=settings.llm_base_url,
+                llm_model=settings.llm_model,
+                llm_vision_model=settings.llm_vision_model,
+            )
         if not hasattr(self, "image_understander"):
             self.image_understander = ImageUnderstander(
-                base_url=self.base_url,
+                base_url=settings.ollama_base_url,
                 http_client=getattr(self, "http_client", None),
                 vision_model=OLLAMA_VISION_MODEL,
             )
 
     def _analyze_uploaded_images(self, request: ChatRequest) -> ImageUnderstandingResult:
         self._ensure_runtime_components()
-        return self.image_understander.analyze_images(
-            request.images or [],
-            question=request.question,
+        images = request.images or []
+        if not images:
+            return ImageUnderstandingResult(has_image_input=False)
+
+        understander = getattr(self, "image_understander", None)
+        if understander is not None and not isinstance(understander, ImageUnderstander):
+            return understander.analyze_images(images, question=request.question)
+
+        skill_result = self.image_skill.execute(images=images, question=request.question)
+        if skill_result.success and isinstance(skill_result.data, ImageUnderstandingResult):
+            return skill_result.data
+        if understander is not None:
+            return understander.analyze_images(images, question=request.question)
+        return ImageUnderstandingResult(
+            has_image_input=True,
+            warnings=[skill_result.error or "图片理解组件不可用"],
         )
 
     # ------------------------------------------------------------------
-    # LLM call — Ollama native /api/chat (supports think=false)
+    # LLM call — unified backend wrapper
     # ------------------------------------------------------------------
 
     def _call_llm(self, messages: list[dict[str, str]]) -> str:
         try:
-            resp = self.http_client.post(
-                f"{self.base_url}/api/chat",
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "stream": False,
-                    "think": False,           # disable qwen3 thinking mode
-                    "options": {
-                        "temperature": 0.3,
-                        "num_predict": 2048,  # max output tokens
-                    },
-                },
+            content = self.llm_client.chat(
+                messages,
+                temperature=0.3,
+                max_tokens=2048,
+                strip_think=True,
             )
-            resp.raise_for_status()
-            data = resp.json()
-            content = data.get("message", {}).get("content", "")
-            content = _strip_thinking(content)
             return content.strip() if content.strip() else "模型未返回有效回答。"
         except Exception as exc:
             return f"LLM 调用失败: {exc}"

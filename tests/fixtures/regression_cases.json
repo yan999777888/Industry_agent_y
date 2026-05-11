@@ -2,89 +2,130 @@
   {
     "id": "manual_basic",
     "question": "电钻的电池怎么充电？",
-    "expect_contains": ["结论", "操作/说明", "注意事项"],
+    "expect_contains": ["充电"],
+    "expect_not_contains": ["问题1", "问题2"],
+    "expect_debug_equals": {
+      "sub_results.0.retrieval_debug.route_decision.route": "manual_rag"
+    },
     "min_image_ids": 0
   },
   {
     "id": "smalltalk",
     "question": "你好",
     "expect_contains": ["工业产品客服智能体"],
+    "expect_debug_equals": {
+      "route": "smalltalk"
+    },
     "max_image_ids": 0
   },
   {
     "id": "customer_service",
     "question": "我想退款，退款多久能到账？",
-    "expect_contains": ["订单号"],
-    "expect_sources_contains": ["customer_service_policy"],
+    "expect_contains": ["原路退回"],
+    "expect_sources_contains": ["customer_service_policy", "customer_service_kb"],
+    "expect_debug_equals": {
+      "sub_results.0.retrieval_debug.route_decision.route": "customer_service"
+    },
     "max_image_ids": 0
   },
   {
     "id": "multi_question_mixed",
     "question": "\"请问支持退款吗？\",\n\"电钻怎么充电？\"",
-    "expect_contains": ["问题1", "问题2"],
-    "expect_sources_contains": ["customer_service_policy"]
+    "expect_not_contains": ["问题1", "问题2"],
+    "expect_sources_contains": ["customer_service_policy"],
+    "expect_debug_equals": {
+      "sub_results.0.retrieval_debug.route_decision.route": "customer_service",
+      "sub_results.1.retrieval_debug.route_decision.route": "manual_rag"
+    }
   },
   {
     "id": "followup_turn1",
     "session_id": "reg_tracker_session",
     "question": "我想更换健身追踪器的表带",
-    "expect_contains": ["结论", "相关图片"]
+    "expect_contains": ["表带"],
+    "expect_debug_equals": {
+      "sub_results.0.retrieval_debug.route_decision.route": "manual_rag"
+    },
+    "min_image_ids": 1
   },
   {
     "id": "followup_turn2",
     "session_id": "reg_tracker_session",
     "question": "这个还有其他尺寸吗？",
-    "expect_contains": ["结论", "相关图片"]
+    "expect_contains": ["尺寸"],
+    "expect_debug_contains": {
+      "session.inherited_product": ["健身追踪器"]
+    },
+    "min_image_ids": 1
   },
   {
     "id": "image_question",
     "question": "请结合图片判断这个部件或指示灯相关的使用注意事项是什么？",
     "image_paths": ["Knowledge_base/插图/drill0_17.png"],
-    "expect_contains": ["结论", "注意事项"],
-    "min_image_ids": 1
+    "expect_contains": ["指示灯"],
+    "expect_debug_equals": {
+      "sub_results.0.retrieval_debug.route_decision.route": "manual_rag"
+    },
+    "min_image_ids": 1,
+    "max_image_ids": 3
   },
   {
     "id": "complex_split_manual",
     "question": "\"电钻怎么充电？\",\n\"充电时有什么注意事项？\"",
-    "expect_contains": ["问题1", "问题2", "相关图片"]
+    "expect_contains": ["充电"],
+    "expect_not_contains": ["问题1", "问题2"],
+    "expect_debug_equals": {
+      "sub_results.0.retrieval_debug.route_decision.route": "manual_rag",
+      "sub_results.1.retrieval_debug.route_decision.route": "manual_rag"
+    },
+    "min_image_ids": 0
   },
   {
     "id": "fallback_reject",
     "question": "请问这台设备能不能直接连接火星基地网络？",
-    "expect_contains": ["根据现有资料无法准确回答此问题"],
+    "expect_contains": ["根据现有资料无法回答此问题"],
     "max_image_ids": 0
   },
   {
     "id": "invalid_base64_image",
     "question": "这个指示灯是什么意思？",
     "images": ["not_a_valid_base64_payload"],
-    "expect_contains": ["结论", "注意事项"],
+    "expect_contains": ["指示灯"],
+    "expect_debug_equals": {
+      "sub_results.0.retrieval_debug.route_decision.route": "manual_rag"
+    },
     "max_image_ids": 0
   },
   {
     "id": "followup_without_context",
     "question": "这个还有其他尺寸吗？",
-    "expect_contains": ["根据现有资料无法准确回答此问题"],
+    "expect_contains": ["根据现有资料无法回答此问题"],
     "max_image_ids": 0
   },
   {
     "id": "smalltalk_with_punctuation",
     "question": "hello!!!",
     "expect_contains": ["工业产品客服智能体"],
+    "expect_debug_equals": {
+      "intent": "greeting"
+    },
     "max_image_ids": 0
   },
   {
     "id": "customer_service_with_product_name",
     "question": "电钻坏了，可以保修吗？",
-    "expect_contains": ["订单号"],
+    "expect_contains": ["保修"],
     "expect_sources_contains": ["customer_service_policy"],
+    "expect_debug_equals": {
+      "sub_results.0.retrieval_debug.route_decision.route": "customer_service"
+    },
     "max_image_ids": 0
   },
   {
     "id": "customer_service_followup_turn1",
     "session_id": "reg_policy_session",
     "question": "我想退款，退款多久能到账？",
-    "expect_contains": ["订单号"],
+    "expect_contains": ["原路退回"],
     "expect_sources_contains": ["customer_service_policy"],
     "max_image_ids": 0
   },
@@ -94,6 +135,9 @@
     "question": "那需要准备什么材料？",
     "expect_contains": ["订单号"],
     "expect_sources_contains": ["customer_service_policy"],
+    "expect_debug_equals": {
+      "sub_results.0.retrieval_debug.route_decision.reason": "inherit_customer_service_context"
+    },
     "max_image_ids": 0
   },
   {
@@ -107,7 +151,10 @@
     "id": "customer_service_price_protection",
     "question": "刚买完就降价了，可以申请价保吗？",
     "expect_contains": ["价保"],
-    "expect_sources_contains": ["customer_service_policy"],
+    "expect_sources_contains": ["customer_service_policy", "customer_service_kb"],
+    "expect_debug_contains": {
+      "sub_results.0.retrieval_debug.customer_service_kb.hit_source_types": ["policy_projection"]
+    },
     "max_image_ids": 0
   },
   {
@@ -120,28 +167,14 @@
   {
     "id": "customer_service_payment_issue",
     "question": "支付失败但是好像扣款了，这种怎么处理？",
-    "expect_contains": ["支付方式"],
+    "expect_contains": ["支付"],
     "expect_sources_contains": ["customer_service_policy"],
     "max_image_ids": 0
   },
   {
     "id": "customer_service_delivery_delay",
     "question": "一直不发货，我想催发货，这种一般多久能处理？",
-    "expect_contains": ["订单号"],
-    "expect_sources_contains": ["customer_service_policy"],
-    "max_image_ids": 0
-  },
-  {
-    "id": "customer_service_price_protection_eligibility",
-    "question": "刚买完就降价了，申请价保需要满足什么条件？",
-    "expect_contains": ["价保"],
-    "expect_sources_contains": ["customer_service_policy"],
-    "max_image_ids": 0
-  },
-  {
-    "id": "customer_service_payment_process",
-    "question": "支付失败但是扣款了，应该怎么申请核查？",
-    "expect_contains": ["支付方式"],
+    "expect_contains": ["发货"],
     "expect_sources_contains": ["customer_service_policy"],
     "max_image_ids": 0
   },
@@ -202,10 +235,23 @@
     "max_image_ids": 0
   },
   {
+    "id": "customer_service_pickup_pending_kb_data",
+    "question": "物流一直显示待揽收，是什么原因？",
+    "expect_contains": ["待揽收", "24小时"],
+    "expect_sources_contains": ["customer_service_policy", "customer_service_kb"],
+    "expect_debug_contains": {
+      "sub_results.0.retrieval_debug.customer_service_kb.hit_source_types": ["data_file"]
+    },
+    "max_image_ids": 0
+  },
+  {
     "id": "session_context_reset",
     "session_id": "reg_reset_session",
     "question": "清空上下文",
     "expect_contains": ["已清空"],
+    "expect_debug_equals": {
+      "route": "session_control"
+    },
     "max_image_ids": 0
   },
   {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -19,8 +20,10 @@ from industry_agent.agent.service import (
     _merge_retrieval_candidates,
 )
 from industry_agent.agent.context_manager import ContextManager
+from industry_agent.agent.customer_service_kb import CustomerServiceKnowledgeBase
 from industry_agent.agent.customer_service_policy import CustomerServicePolicy
 from industry_agent.agent.image_understanding import ImageObservation, ImageUnderstandingResult, ImageUnderstander
+from industry_agent.agent.orchestrator import AgentOrchestrator
 from industry_agent.agent.question_router import QuestionRouter
 from industry_agent.agent.response_formatter import (
     format_customer_service_answer,
@@ -68,6 +71,111 @@ class StubImageUnderstander:
         )
 
 
+class RescueRetriever:
+    def search(self, query: str, *, limit: int = 5) -> list[dict[str, object]]:
+        return [
+            {
+                "chunk_id": "chunk_battery_1",
+                "title": "安装电池",
+                "text": "使用遥控器前，请先安装电池。1 取下电池盖。2 装入新电池，确保电池正、负极安装正确。",
+                "product_name": "空调",
+                "image_ids": "[]",
+                "_score": 18.0,
+            }
+        ]
+
+    def retrieval_status(self) -> dict[str, str]:
+        return {"mode": "stub"}
+
+
+class FakeFallbackLLMClient:
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    def chat(self, messages, **kwargs) -> str:
+        return "根据现有资料无法准确回答此问题。"
+
+
+class FakeEnglishMixedLLMClient:
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    def chat(self, messages, **kwargs) -> str:
+        return "您需要在发动机停机且船只处于水平状态下检查机油液位，并通过油尺确认液位在最低和最高标记之间。"
+
+
+class FakeLooseManualLLMClient:
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    def chat(self, messages, **kwargs) -> str:
+        return "结论：请根据说明书操作。操作/说明：按提示继续。注意事项：注意安全。"
+
+
+class EnglishRescueRetriever:
+    def search(self, query: str, *, limit: int = 5) -> list[dict[str, object]]:
+        return [
+            {
+                "chunk_id": "chunk_en_oil_1",
+                "title": "To check the engine oil level",
+                "text": (
+                    "To check the engine oil level: With the engine stopped, place the boat in a precisely "
+                    "level position and check the dipstick."
+                ),
+                "product_name": "汇总英文",
+                "image_ids": "[]",
+                "_score": 22.0,
+            },
+            {
+                "chunk_id": "chunk_en_oil_2",
+                "title": "Engine oil level check",
+                "text": "Make sure that the engine oil level is between the minimum and maximum level marks on the dipstick.",
+                "product_name": "汇总英文",
+                "image_ids": "[]",
+                "_score": 20.0,
+            },
+        ]
+
+    def retrieval_status(self) -> dict[str, str]:
+        return {"mode": "stub"}
+
+
+class ImageGroundingRetriever:
+    def search(self, query: str, *, limit: int = 5) -> list[dict[str, object]]:
+        return [
+            {
+                "chunk_id": "chunk_light",
+                "title": "充电指示灯说明",
+                "text": "红灯闪烁表示正在充电，绿灯常亮表示已充满。",
+                "product_name": "电钻",
+                "image_ids": "[\"drill0_17\"]",
+                "_score": 22.0,
+                "_variant_hits": 2,
+            },
+            {
+                "chunk_id": "chunk_install",
+                "title": "电池安装步骤",
+                "text": "安装电池时请按压卡扣并确认电池锁定到位。",
+                "product_name": "电钻",
+                "image_ids": "[\"drill0_03\"]",
+                "_score": 18.5,
+                "_variant_hits": 1,
+            },
+            {
+                "chunk_id": "chunk_clean",
+                "title": "日常清洁",
+                "text": "清洁前请先断电，并使用干布擦拭外壳。",
+                "product_name": "电钻",
+                "image_ids": "[]",
+                "_score": 16.0,
+                "_variant_hits": 1,
+            },
+        ]
+
+    def retrieval_status(self) -> dict[str, str]:
+        return {"mode": "stub"}
+
+
 class DummyAgentService(AgentService):
     """Test double that avoids real retrieval and LLM calls."""
 
@@ -80,8 +188,10 @@ class DummyAgentService(AgentService):
         self.context_manager = ContextManager()
         self.question_router = QuestionRouter()
         self.customer_service_policy = CustomerServicePolicy()
+        self.customer_service_kb = CustomerServiceKnowledgeBase()
         self.image_understander = ImageUnderstander(base_url=self.base_url, http_client=None, vision_model="")
         self.queries: list[str] = []
+        self.llm_messages: list[list[dict[str, str]]] = []
 
     def generate_response(self, query: str, history=None, image_input=None, dialog_summary=None, image_context=None, image_terms=None, image_features=None):  # type: ignore[override]
         self.queries.append(query)
@@ -101,14 +211,20 @@ class DummyAgentService(AgentService):
         }
 
     def _call_llm(self, messages):  # type: ignore[override]
+        self.llm_messages.append(messages)
+        if messages and messages[0].get("role") == "system" and "【客服策略骨架】" in messages[0].get("content", ""):
+            return "LLM 调用失败: dummy customer service fallback"
         return messages[0]["content"]
 
     def _merge_subquestion_answers(self, *, original_question, sub_questions, sub_results):  # type: ignore[override]
-        lines = []
-        for index, (sub_question, result) in enumerate(zip(sub_questions, sub_results), start=1):
-            lines.append(f"问题{index}：{sub_question.normalized_text}")
-            lines.append(result["answer"])
-        return "\n".join(lines)
+        if len(sub_results) == 1:
+            return str(sub_results[0]["answer"])
+        return format_multi_question_answer(
+            [
+                (sub_question.normalized_text, str(result["answer"]))
+                for sub_question, result in zip(sub_questions, sub_results)
+            ]
+        )
 
 
 class QuestionSplitterTests(unittest.TestCase):
@@ -126,6 +242,19 @@ class QuestionSplitterTests(unittest.TestCase):
         self.assertIn("退款", sub_questions[0].normalized_text)
         self.assertIn("到账", sub_questions[1].normalized_text)
 
+    def test_split_outer_quoted_single_question_with_inner_quotes(self) -> None:
+        question = '"How to set the camera model to "P" model?"'
+        sub_questions = split_complex_question(question)
+        self.assertEqual(len(sub_questions), 1)
+        self.assertEqual(sub_questions[0].normalized_text, 'How to set the camera model to "P" model?')
+
+    def test_split_mixed_clauses_by_question_mark_and_commas(self) -> None:
+        question = "请问支持退款吗，电钻怎么充电？"
+        sub_questions = split_complex_question(question)
+        self.assertEqual(len(sub_questions), 2)
+        self.assertIn("退款", sub_questions[0].normalized_text)
+        self.assertIn("充电", sub_questions[1].normalized_text)
+
 
 class AgentFlowTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -135,8 +264,10 @@ class AgentFlowTests(unittest.TestCase):
         response = self.agent.chat(
             ChatRequest(question='"请问你们家的商品支持7天无理由退换货吗？",\n"需要自己承担运费吗？"')
         )
-        self.assertIn("问题1", response.answer)
-        self.assertIn("问题2", response.answer)
+        self.assertIn("结论：", response.answer)
+        self.assertIn("处理步骤：", response.answer)
+        self.assertNotIn("问题1：", response.answer)
+        self.assertNotIn("问题2：", response.answer)
         self.assertEqual(response.image_ids, [])
         self.assertIn("customer_service_policy", response.sources)
         self.assertEqual(
@@ -151,7 +282,8 @@ class AgentFlowTests(unittest.TestCase):
 
     def test_agent_keeps_single_question_shape(self) -> None:
         response = self.agent.chat(ChatRequest(question="洗碗机安装有什么要求？"))
-        self.assertIn("问题1", response.answer)
+        self.assertNotIn("问题1：", response.answer)
+        self.assertIn("回答(洗碗机安装有什么要求？)", response.answer)
         self.assertEqual(response.image_ids, ["img_c"])
         self.assertEqual(len(response.retrieval_debug["sub_questions"]), 1)
 
@@ -175,14 +307,75 @@ class AgentFlowTests(unittest.TestCase):
     def test_customer_service_route_bypasses_manual_retrieval(self) -> None:
         response = self.agent.chat(ChatRequest(question="我想退款，退款多久能到账？"))
 
-        self.assertIn("订单号", response.answer)
+        self.assertIn("原支付渠道", response.answer)
+        self.assertIn("结论：", response.answer)
+        self.assertIn("处理步骤：", response.answer)
+        self.assertNotIn("建议一次性准备订单号", response.answer)
         self.assertEqual(response.image_ids, [])
         self.assertEqual(self.agent.queries, [])
+        self.assertEqual(len(self.agent.llm_messages), 1)
         self.assertEqual(
             response.retrieval_debug["sub_results"][0]["retrieval_debug"]["route_decision"]["route"],
             "customer_service",
         )
         self.assertIn("customer_service_policy", response.sources)
+        self.assertIn("customer_service_kb", response.sources)
+        self.assertGreaterEqual(
+            response.retrieval_debug["sub_results"][0]["retrieval_debug"]["customer_service_kb"]["hit_count"],
+            1,
+        )
+        self.assertTrue(
+            response.retrieval_debug["sub_results"][0]["retrieval_debug"]["customer_service_generation"]["used_llm"]
+        )
+        self.assertTrue(
+            response.retrieval_debug["sub_results"][0]["retrieval_debug"]["customer_service_generation"]["used_policy_fallback"]
+        )
+
+    def test_size_exchange_question_routes_to_customer_service(self) -> None:
+        response = self.agent.chat(ChatRequest(question="我想把商品换成更大的尺寸，差价怎么处理？"))
+
+        self.assertIn("customer_service_policy", response.sources)
+        self.assertEqual(response.retrieval_debug["sub_results"][0]["retrieval_debug"]["route_decision"]["route"], "customer_service")
+        self.assertEqual(self.agent.queries, [])
+
+    def test_customer_service_answer_is_direct_for_seven_day_refund(self) -> None:
+        response = self.agent.chat(
+            ChatRequest(question='"请问你们家的商品支持7天无理由退换货吗？","需要自己承担运费吗？"')
+        )
+
+        self.assertIn("通常可以申请退货", response.answer)
+        self.assertIn("运费通常由买家承担", response.answer)
+        self.assertEqual(self.agent.queries, [])
+
+    def test_invoice_type_question_routes_to_customer_service_with_direct_answer(self) -> None:
+        response = self.agent.chat(
+            ChatRequest(question='"请问你们的商品能开发票吗？发票类型是什么？","多久能收到呢？"')
+        )
+
+        self.assertIn("电子发票、普通发票还是专用发票", response.answer)
+        self.assertIn("customer_service_policy", response.sources)
+        self.assertEqual(self.agent.queries, [])
+
+    def test_human_damage_uses_paid_repair_wording(self) -> None:
+        response = self.agent.chat(
+            ChatRequest(question="如果是人为损坏的，能维修吗？维修费用怎么算？")
+        )
+
+        self.assertIn("不能按免费保修处理", response.answer)
+        self.assertIn("付费检测或付费维修", response.answer)
+        self.assertEqual(self.agent.queries, [])
+
+    def test_packaging_damage_question_stays_on_customer_service_route(self) -> None:
+        response = self.agent.chat(
+            ChatRequest(question="我收到商品后发现外包装破损了，这会影响退换货吗？")
+        )
+
+        self.assertIn("先别急着定性为不能退换", response.answer)
+        self.assertIn("customer_service_policy", response.sources)
+        self.assertEqual(
+            response.retrieval_debug["sub_results"][0]["retrieval_debug"]["route_decision"]["route"],
+            "customer_service",
+        )
 
     def test_customer_service_follow_up_inherits_policy_context(self) -> None:
         session_id = "s_policy_followup"
@@ -205,12 +398,42 @@ class AgentFlowTests(unittest.TestCase):
         self.assertEqual(response.image_ids, [])
         self.assertIn("customer_service_policy", response.sources)
 
+    def test_platform_service_questions_route_to_customer_service(self) -> None:
+        response = self.agent.chat(ChatRequest(question="请问你们支持以旧换新服务吗？"))
+
+        self.assertIn("以旧换新", response.answer)
+        self.assertEqual(response.image_ids, [])
+        self.assertEqual(self.agent.queries, [])
+        self.assertIn("customer_service_policy", response.sources)
+
+    def test_trial_questions_route_to_customer_service(self) -> None:
+        response = self.agent.chat(
+            ChatRequest(question="试用期间商品出现故障，还能延长试用期限吗？故障商品可以更换吗？")
+        )
+
+        self.assertEqual(self.agent.queries, [])
+        self.assertIn("customer_service_policy", response.sources)
+        self.assertEqual(
+            response.retrieval_debug["sub_results"][0]["retrieval_debug"]["route_decision"]["route"],
+            "customer_service",
+        )
+
+    def test_manual_copy_request_routes_to_customer_service(self) -> None:
+        response = self.agent.chat(ChatRequest(question="商品能提供纸质版说明书吗？电子版在哪里？"))
+
+        self.assertIn("电子版", response.answer)
+        self.assertEqual(response.image_ids, [])
+        self.assertEqual(self.agent.queries, [])
+        self.assertIn("customer_service_policy", response.sources)
+
     def test_mixed_question_uses_different_routes_per_subquestion(self) -> None:
         response = self.agent.chat(
             ChatRequest(question='"请问支持退款吗？",\n"电钻怎么充电？"')
         )
 
-        self.assertIn("问题1", response.answer)
+        self.assertIn("结论：", response.answer)
+        self.assertNotIn("问题1：", response.answer)
+        self.assertNotIn("问题2：", response.answer)
         self.assertEqual(len(response.retrieval_debug["sub_results"]), 2)
         self.assertEqual(
             response.retrieval_debug["sub_results"][0]["retrieval_debug"]["route_decision"]["route"],
@@ -222,6 +445,22 @@ class AgentFlowTests(unittest.TestCase):
         )
         self.assertEqual(len(self.agent.queries), 1)
         self.assertIn("电钻怎么充电？", self.agent.queries[0])
+
+    def test_same_turn_customer_service_follow_up_inherits_previous_subquestion_context(self) -> None:
+        response = self.agent.chat(
+            ChatRequest(question='"请问你们的商品能开发票吗？发票类型是什么？",\n"多久能收到呢？"')
+        )
+
+        self.assertEqual(response.image_ids, [])
+        self.assertEqual(len(self.agent.queries), 0)
+        self.assertEqual(
+            response.retrieval_debug["sub_results"][1]["retrieval_debug"]["route_decision"]["route"],
+            "customer_service",
+        )
+        self.assertEqual(
+            response.retrieval_debug["sub_results"][1]["retrieval_debug"]["route_decision"]["reason"],
+            "inherit_current_turn_customer_service_context",
+        )
 
     def test_follow_up_inherits_product_context(self) -> None:
         session_id = "s_drill"
@@ -299,6 +538,39 @@ class AgentFlowTests(unittest.TestCase):
         )
 
 
+class QuestionRouterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.router = QuestionRouter()
+
+    def test_router_prefers_manual_for_product_operation_question(self) -> None:
+        decision = self.router.route("健身追踪器的表带怎么更换？")
+
+        self.assertEqual(decision.route, "manual_rag")
+        self.assertEqual(decision.reason, "prefer_manual_rag_with_manual_signal")
+
+    def test_router_prefers_manual_for_howto_even_with_ambiguous_service_term(self) -> None:
+        decision = self.router.route("这个配件怎么安装？")
+
+        self.assertEqual(decision.route, "manual_rag")
+        self.assertGreaterEqual(decision.manual_score, decision.service_score)
+
+    def test_router_keeps_size_exchange_on_customer_service_route(self) -> None:
+        decision = self.router.route("我想把商品换成更大的尺寸，差价怎么处理？")
+
+        self.assertEqual(decision.route, "customer_service")
+
+
+class OrchestratorSmokeTests(unittest.TestCase):
+    def test_orchestrator_handles_smalltalk_without_retrieval(self) -> None:
+        orchestrator = AgentOrchestrator()
+
+        response = orchestrator.chat(ChatRequest(question="hello"))
+
+        self.assertIn("工业产品客服智能体", response.answer)
+        self.assertEqual(response.image_ids, [])
+        self.assertEqual(response.retrieval_debug["route"], "smalltalk")
+
+
 class ImageUnderstandingTests(unittest.TestCase):
     def test_image_understander_parses_png_base64(self) -> None:
         understander = ImageUnderstander(base_url="http://dummy", http_client=None, vision_model="")
@@ -366,8 +638,8 @@ class ResponseFormatterTests(unittest.TestCase):
         self.assertIn("drill0_17", answer)
 
     def test_format_customer_service_answer_is_plain_text(self) -> None:
-        answer = format_customer_service_answer("  这类问题更适合按通用客服流程处理。  ")
-        self.assertEqual(answer, "这类问题更适合按通用客服流程处理。")
+        answer = format_customer_service_answer("  结论：\n  - 这类问题更适合按通用客服流程处理。  ")
+        self.assertEqual(answer, "结论：\n- 这类问题更适合按通用客服流程处理。")
 
     def test_format_manual_answer_splits_plain_text_into_distinct_sections(self) -> None:
         answer = format_manual_answer(
@@ -387,6 +659,18 @@ class ResponseFormatterTests(unittest.TestCase):
         self.assertIn("注意事项：", answer)
         self.assertIn("相关图片：\n- img_1", answer)
 
+    def test_format_manual_answer_compact_mode_flattens_sections(self) -> None:
+        answer = format_manual_answer(
+            "结论：可正常充电\n操作：先插电源，再连接设备\n注意：请勿遮挡散热孔",
+            image_ids=[],
+            compact=True,
+        )
+
+        self.assertNotIn("结论：", answer)
+        self.assertNotIn("操作/说明：", answer)
+        self.assertIn("可正常充电。", answer)
+        self.assertIn("先插电源，再连接设备。", answer)
+
     def test_format_multi_question_answer_merges_without_rewriting(self) -> None:
         answer = format_multi_question_answer(
             [
@@ -394,10 +678,24 @@ class ResponseFormatterTests(unittest.TestCase):
                 ("有哪些注意事项？", "回答：注意事项：\n- 请勿潮湿操作。"),
             ]
         )
-        self.assertIn("问题1：电钻怎么充电？", answer)
+        self.assertIn("结论：", answer)
         self.assertIn("结论：\n- 使用充电器。", answer)
-        self.assertIn("问题2：有哪些注意事项？", answer)
+        self.assertIn("注意事项：", answer)
+        self.assertNotIn("问题1：", answer)
+        self.assertNotIn("问题2：", answer)
         self.assertNotIn("回答：", answer)
+
+    def test_format_multi_question_answer_merges_related_images_without_label_noise(self) -> None:
+        answer = format_multi_question_answer(
+            [
+                ("怎么安装电池？", "结论：\n- 取下电池盖。\n\n相关图片：\n- Manual01_2"),
+                ("还要注意什么？", "注意事项：\n- 确认正负极方向。\n\n相关图片：\n- Manual01_3"),
+            ]
+        )
+
+        self.assertIn("相关图片：", answer)
+        self.assertIn("Manual01_2、Manual01_3", answer)
+        self.assertNotIn("Manual01_2。", answer)
 
     def test_build_extractive_manual_answer_uses_evidence_for_english_query(self) -> None:
         answer = _build_extractive_manual_answer(
@@ -440,14 +738,129 @@ class ResponseFormatterTests(unittest.TestCase):
         self.assertEqual(answer.count("Approval label of emission control certificate"), 1)
         self.assertIn("engine unit", answer)
 
+    def test_agent_service_uses_extractive_rescue_for_chinese_fallback(self) -> None:
+        with patch("industry_agent.agent.service.LLMClient", FakeFallbackLLMClient):
+            agent = AgentService(
+                retriever=RescueRetriever(),
+                llm_backend="openai_compatible",
+                base_url="https://api.example.com/v1",
+                model="demo-model",
+            )
+
+        result = agent.generate_response(query="如何给空调遥控器安装电池？")
+
+        self.assertIn("安装电池", result["answer"])
+        self.assertIn("取下电池盖", result["answer"])
+        self.assertNotIn("根据现有资料无法准确回答此问题", result["answer"])
+
+    def test_agent_service_prefers_extractive_answer_for_english_query_when_llm_returns_chinese(self) -> None:
+        with patch("industry_agent.agent.service.LLMClient", FakeEnglishMixedLLMClient):
+            agent = AgentService(
+                retriever=EnglishRescueRetriever(),
+                llm_backend="openai_compatible",
+                base_url="https://api.example.com/v1",
+                model="demo-model",
+            )
+
+        result = agent.generate_response(
+            query="When I am sailing, how do I check the engine oil level to ensure continued sailing?"
+        )
+
+        self.assertIn("engine oil level", result["answer"])
+        self.assertNotRegex(result["answer"], r"[\u4e00-\u9fff]")
+
+    def test_agent_service_prefers_extractive_answer_for_manual_procedure_queries(self) -> None:
+        with patch("industry_agent.agent.service.LLMClient", FakeLooseManualLLMClient):
+            agent = AgentService(
+                retriever=RescueRetriever(),
+                llm_backend="openai_compatible",
+                base_url="https://api.example.com/v1",
+                model="demo-model",
+            )
+
+        result = agent.generate_response(query="如何给空调遥控器安装电池？")
+
+        self.assertIn("取下电池盖", result["answer"])
+        self.assertIn("装入新电池", result["answer"])
+        self.assertNotIn("请根据说明书操作", result["answer"])
+
+    def test_agent_service_grounds_manual_images_to_selected_evidence(self) -> None:
+        with patch("industry_agent.agent.service.LLMClient", FakeFallbackLLMClient):
+            agent = AgentService(
+                retriever=ImageGroundingRetriever(),
+                llm_backend="openai_compatible",
+                base_url="https://api.example.com/v1",
+                model="demo-model",
+            )
+
+        result = agent.generate_response(query="这个指示灯是什么意思？")
+
+        self.assertIn("红灯闪烁表示正在充电", result["answer"])
+        self.assertEqual(result["image_ids"], ["drill0_17"])
+        self.assertEqual(result["retrieval_debug"]["candidate_image_ids"], ["drill0_17", "drill0_03"])
+        self.assertEqual(result["retrieval_debug"]["grounded_image_ids"], ["drill0_17"])
+        self.assertNotIn("相关配图如下", result["answer"])
+
 
 class CustomerServicePolicyTests(unittest.TestCase):
+    def test_customer_service_kb_retrieves_specific_invoice_entry(self) -> None:
+        kb = CustomerServiceKnowledgeBase()
+        hits = kb.search("请问你们的商品能开发票吗？发票类型是什么？多久能收到呢？")
+
+        self.assertTrue(hits)
+        self.assertEqual(hits[0]["topic"], "invoice")
+        self.assertTrue(any("发票类型" in hit["title"] or "发票处理" in hit["title"] for hit in hits))
+
+    def test_customer_service_kb_prefers_data_file_entry_for_pickup_pending(self) -> None:
+        kb = CustomerServiceKnowledgeBase()
+        hits = kb.search("物流一直显示待揽收，是什么原因？")
+
+        self.assertTrue(hits)
+        self.assertEqual(hits[0]["entry_id"], "shipping::pickup_pending")
+        self.assertEqual(hits[0]["source_type"], "data_file")
+        self.assertIn("24 小时", hits[0]["content"])
+
+    def test_customer_service_kb_keeps_policy_projection_fallback_for_unlisted_topic(self) -> None:
+        kb = CustomerServiceKnowledgeBase()
+        hits = kb.search("刚买完就降价了，可以申请价保吗？")
+
+        self.assertTrue(hits)
+        self.assertEqual(hits[0]["topic"], "price_protection")
+        self.assertEqual(hits[0]["source_type"], "data_file")
+
+    def test_customer_service_kb_retrieves_repeat_charge_data_entry(self) -> None:
+        kb = CustomerServiceKnowledgeBase()
+        hits = kb.search("我好像被重复扣款了，扣了两次怎么办？")
+
+        self.assertTrue(hits)
+        self.assertEqual(hits[0]["entry_id"], "payment_issue::repeat_charge")
+        self.assertEqual(hits[0]["source_type"], "data_file")
+        self.assertIn("支付流水", hits[0]["content"])
+
+    def test_customer_service_kb_retrieves_shipping_signed_missing_data_entry(self) -> None:
+        kb = CustomerServiceKnowledgeBase()
+        hits = kb.search("物流显示已签收但我没收到，这种情况应该怎么处理？")
+
+        self.assertTrue(hits)
+        self.assertTrue(any(hit["entry_id"] == "shipping::signed_missing" for hit in hits))
+        data_hit = next(hit for hit in hits if hit["entry_id"] == "shipping::signed_missing")
+        self.assertEqual(data_hit["source_type"], "data_file")
+        self.assertIn("承运商", data_hit["content"])
+
     def test_policy_uses_context_topics_for_short_follow_up(self) -> None:
         policy = CustomerServicePolicy()
         response = policy.answer("那需要准备什么材料？", context_topics=["refund_exchange"])
 
         self.assertIn("订单号", response.answer)
         self.assertIn("refund_exchange", response.matched_topics)
+
+    def test_policy_uses_context_topics_for_short_timeline_follow_up(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("那多久能收到呢？", context_topics=["invoice"])
+
+        self.assertIn("开票", response.answer)
+        self.assertIn("时效/费用", response.answer)
+        self.assertIn("invoice", response.matched_topics)
 
     def test_policy_covers_price_protection(self) -> None:
         policy = CustomerServicePolicy()
@@ -468,13 +881,14 @@ class CustomerServicePolicyTests(unittest.TestCase):
         policy = CustomerServicePolicy()
         response = policy.answer("催发货一般多久能处理？")
 
-        self.assertIn("时效", response.answer)
+        self.assertIn("时效/费用", response.answer)
         self.assertIn("delivery_delay", response.matched_topics)
 
     def test_policy_answers_fee_intent_with_fee_hint(self) -> None:
         policy = CustomerServicePolicy()
         response = policy.answer("上门安装需要收费吗？")
 
+        self.assertIn("时效/费用", response.answer)
         self.assertIn("收费", response.answer)
         self.assertIn("installation_service", response.matched_topics)
 
@@ -506,6 +920,23 @@ class CustomerServicePolicyTests(unittest.TestCase):
         self.assertIn("质量问题", response.answer)
         self.assertIn("商家或平台承担", response.answer)
         self.assertIn("refund_exchange", response.matched_topics)
+        self.assertNotIn("退换货和退款通常要结合订单状态", response.answer)
+
+    def test_policy_refines_refund_arrival_by_payment_channel(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("退款多久到账？信用卡会原路返回吗？")
+
+        self.assertIn("原路退回", response.answer)
+        self.assertIn("发卡行", response.answer)
+        self.assertIn(response.matched_topics[0], {"refund_exchange", "order_change"})
+
+    def test_policy_refines_size_exchange_and_difference(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("我想把商品换成更大的尺寸，差价怎么处理？")
+
+        self.assertIn("补差价", response.answer)
+        self.assertIn("尺寸", response.answer)
+        self.assertIn("refund_exchange", response.matched_topics)
 
     def test_policy_refines_shipping_status_for_signed_but_missing(self) -> None:
         policy = CustomerServicePolicy()
@@ -515,6 +946,23 @@ class CustomerServicePolicyTests(unittest.TestCase):
         self.assertIn("承运商", response.answer)
         self.assertIn("shipping", response.matched_topics)
 
+    def test_policy_refines_village_or_overseas_shipping(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("你们的商品能送到乡镇吗？需要额外加运费吗？多久能到？")
+
+        self.assertIn("乡镇", response.answer)
+        self.assertIn("运费", response.answer)
+        self.assertIn("shipping", response.matched_topics)
+
+    def test_policy_handles_trial_extension_and_fault(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("试用期间商品出现故障，还能延长试用期限吗？故障商品可以更换吗？")
+
+        self.assertIn("试用", response.answer)
+        self.assertIn("故障", response.answer)
+        self.assertIn("活动规则", response.answer)
+        self.assertIn("platform_service", response.matched_topics)
+
     def test_policy_refines_after_sales_for_human_damage(self) -> None:
         policy = CustomerServicePolicy()
         response = policy.answer("设备进水了，还能走保修吗？")
@@ -522,6 +970,15 @@ class CustomerServicePolicyTests(unittest.TestCase):
         self.assertIn("人为损坏", response.answer)
         self.assertIn("付费维修", response.answer)
         self.assertIn("after_sales", response.matched_topics)
+
+    def test_policy_refines_repair_delay_or_repeat_failure(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("我送修半个月了还没修好，而且返修后又是同样的故障，怎么办？")
+
+        self.assertIn("复检", response.answer)
+        self.assertIn("重新返修", response.answer)
+        self.assertIn("after_sales", response.matched_topics)
+        self.assertNotIn("售后、维修和保修问题通常需要确认", response.answer)
 
     def test_policy_refines_refund_rejected_status(self) -> None:
         policy = CustomerServicePolicy()
@@ -537,6 +994,32 @@ class CustomerServicePolicyTests(unittest.TestCase):
         self.assertIn("重开", response.answer)
         self.assertIn("invoice", response.matched_topics)
 
+    def test_policy_refines_invoice_after_issued(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("发票已经开出来了，还能改抬头吗？")
+
+        self.assertIn("红冲", response.answer)
+        self.assertIn("重开", response.answer)
+        self.assertIn("invoice", response.matched_topics)
+
+    def test_policy_avoids_generic_support_tail_for_specific_invoice_question(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("请问你们的商品能开发票吗？发票类型是什么？多久能收到呢？")
+
+        self.assertIn("电子发票、普通发票还是专用发票", response.answer)
+        self.assertIn("开票", response.answer)
+        self.assertNotIn("如果你这边已经有订单号和开票截图", response.answer)
+        self.assertNotIn("补充说明：", response.answer)
+
+    def test_policy_can_cover_parallel_customer_service_topics(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("退款多久到账，以及发票抬头写错了还能重开吗？")
+
+        self.assertIn("原支付渠道", response.answer)
+        self.assertIn("重开", response.answer)
+        self.assertIn("refund_exchange", response.matched_topics)
+        self.assertIn("invoice", response.matched_topics)
+
     def test_policy_refines_installation_reschedule_status(self) -> None:
         policy = CustomerServicePolicy()
         response = policy.answer("上门安装已经约好了，但是师傅没来，可以改约吗？")
@@ -544,12 +1027,44 @@ class CustomerServicePolicyTests(unittest.TestCase):
         self.assertIn("改约", response.answer)
         self.assertIn("installation_service", response.matched_topics)
 
+    def test_policy_refines_address_after_shipment(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("订单已经发货了，还能改地址吗？")
+
+        self.assertIn("拦截", response.answer)
+        self.assertIn("改派", response.answer)
+        self.assertIn("address_change", response.matched_topics)
+
+    def test_policy_refines_shipping_lost_or_returned(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("物流显示退回了，但我没有申请退货，怎么办？")
+
+        self.assertIn("物流异常", response.answer)
+        self.assertIn("退回", response.answer)
+        self.assertIn("shipping", response.matched_topics)
+
     def test_policy_refines_accessory_rejected_status(self) -> None:
         policy = CustomerServicePolicy()
         response = policy.answer("我申请补寄配件被驳回了，还能重新提交吗？")
 
         self.assertIn("驳回", response.answer)
         self.assertIn("accessory_request", response.matched_topics)
+
+    def test_policy_refines_after_sales_rejected_or_disputed(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("我的售后申请被驳回了，我觉得判定不合理，能复核吗？")
+
+        self.assertIn("驳回原因", response.answer)
+        self.assertIn("人工复核", response.answer)
+        self.assertIn("after_sales", response.matched_topics)
+
+    def test_policy_refines_repeat_charge(self) -> None:
+        policy = CustomerServicePolicy()
+        response = policy.answer("我好像被重复扣款了，扣了两次怎么办？")
+
+        self.assertIn("重复订单", response.answer)
+        self.assertIn("成功支付", response.answer)
+        self.assertIn("payment_issue", response.matched_topics)
 
 
 class RetrievalFusionTests(unittest.TestCase):
@@ -644,6 +1159,90 @@ class RetrievalFusionTests(unittest.TestCase):
             },
         )
         self.assertEqual(filtered[0]["chunk_id"], "a")
+
+    def test_filter_evidence_for_query_uses_fusion_score(self) -> None:
+        filtered = _filter_evidence_for_query(
+            [
+                {
+                    "chunk_id": "a",
+                    "title": "普通充电说明",
+                    "text": "充电前请确认电池状态。",
+                    "product_name": "电钻",
+                    "image_ids": "[]",
+                    "_score": 18.0,
+                    "_fusion_score": 18.0,
+                    "_variant_hits": 1,
+                },
+                {
+                    "chunk_id": "b",
+                    "title": "电池充电注意事项",
+                    "text": "充电时请使用指定充电器。",
+                    "product_name": "电钻",
+                    "image_ids": "[]",
+                    "_score": 16.0,
+                    "_fusion_score": 22.0,
+                    "_variant_hits": 2,
+                },
+            ],
+            query="电钻充电时有什么注意事项？",
+        )
+
+        self.assertEqual(filtered[0]["chunk_id"], "b")
+
+    def test_filter_evidence_for_query_can_keep_high_overlap_cross_product_evidence(self) -> None:
+        filtered = _filter_evidence_for_query(
+            [
+                {
+                    "chunk_id": "a",
+                    "title": "基本说明",
+                    "text": "可用于日常操作。",
+                    "product_name": "产品A",
+                    "image_ids": "[]",
+                    "_score": 18.0,
+                    "_variant_hits": 1,
+                },
+                {
+                    "chunk_id": "b",
+                    "title": "默认密码说明",
+                    "text": "默认密码是 1234，首次登录后建议修改。",
+                    "product_name": "产品B",
+                    "image_ids": "[]",
+                    "_score": 17.6,
+                    "_variant_hits": 2,
+                },
+            ],
+            query="默认密码是多少？",
+        )
+
+        self.assertEqual(filtered[0]["chunk_id"], "b")
+        self.assertIn("产品B", {item["product_name"] for item in filtered})
+
+    def test_filter_evidence_for_query_keeps_same_product_lock_when_query_is_explicit(self) -> None:
+        filtered = _filter_evidence_for_query(
+            [
+                {
+                    "chunk_id": "a",
+                    "title": "电钻默认密码说明",
+                    "text": "电钻默认密码是 1234。",
+                    "product_name": "电钻",
+                    "image_ids": "[]",
+                    "_score": 18.2,
+                    "_variant_hits": 1,
+                },
+                {
+                    "chunk_id": "b",
+                    "title": "温控器默认密码说明",
+                    "text": "温控器默认密码是 9999。",
+                    "product_name": "可编程温控器",
+                    "image_ids": "[]",
+                    "_score": 17.9,
+                    "_variant_hits": 2,
+                },
+            ],
+            query="电钻的默认密码是多少？",
+        )
+
+        self.assertEqual([item["chunk_id"] for item in filtered], ["a"])
 
 
 if __name__ == "__main__":
