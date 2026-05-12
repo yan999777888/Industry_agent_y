@@ -39,12 +39,12 @@ except ImportError:  # pragma: no cover - optional for test environments
 # Configuration
 # ---------------------------------------------------------------------------
 
-RETRIEVAL_LIMIT = 10        # chunks to retrieve before evidence filtering
-FINAL_CONTEXT_CHUNKS = 5    # chunks passed into the LLM
-MAX_CONTEXT_CHARS = 6000    # truncate context to fit model window
+RETRIEVAL_LIMIT = 15        # chunks to retrieve before evidence filtering
+FINAL_CONTEXT_CHUNKS = 7    # chunks passed into the LLM
+MAX_CONTEXT_CHARS = 8000    # truncate context to fit model window
 MAX_HISTORY_TURNS = 5       # keep last N turns per session
-MIN_TOP_SCORE = 3.0         # below this, do not ask LLM to hallucinate
-MIN_KEEP_SCORE = 2.0        # chunks below this score are discarded
+MIN_TOP_SCORE = 1.5         # below this, do not ask LLM to hallucinate
+MIN_KEEP_SCORE = 1.0        # chunks below this score are discarded
 MULTIMODAL_RETRIEVAL_LIMIT = 6
 
 OLLAMA_BASE_URL = settings.ollama_base_url
@@ -897,9 +897,9 @@ def _assemble_context(
         part = f"{header}\n{body}"
 
         if total_chars + len(part) > MAX_CONTEXT_CHARS:
-            remaining = MAX_CONTEXT_CHARS - total_chars
-            if remaining > 200:
-                parts.append(part[:remaining] + "……")
+            # Skip this chunk if it won't fit, try to fit smaller chunks
+            if total_chars + 200 < MAX_CONTEXT_CHARS:
+                continue
             break
         parts.append(part)
         total_chars += len(part)
@@ -1119,6 +1119,39 @@ class AgentService:
             turn_context=turn_context,
         )
 
+    def _rerank_chunks_by_relevance(
+        self,
+        query: str,
+        chunks: list[dict[str, Any]],
+        limit: int = FINAL_CONTEXT_CHUNKS,
+    ) -> list[dict[str, Any]]:
+        """Re-rank evidence chunks by relevance to the query before LLM call."""
+        if not chunks:
+            return []
+        analysis = analyze_query(query)
+        query_terms = set()
+        for kw in analysis.keywords:
+            query_terms.add(_normalize(kw))
+        for phrase in analysis.phrases:
+            query_terms.add(_normalize(phrase))
+        for prod in analysis.products:
+            query_terms.add(_normalize(prod))
+        query_terms.discard("")
+        if not query_terms:
+            return chunks[:limit]
+        scored: list[tuple[float, int, dict[str, Any]]] = []
+        for idx, chunk in enumerate(chunks):
+            title = _normalize(str(chunk.get("title", "")))
+            text = _normalize(str(chunk.get("text", "")))
+            combined = title + " " + text
+            overlap = sum(1 for t in query_terms if t in combined)
+            title_overlap = sum(1 for t in query_terms if t in title)
+            score = overlap + title_overlap * 2.0
+            score += float(chunk.get("_evidence_score", 0)) * 0.5
+            scored.append((score, idx, chunk))
+        scored.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+        return [chunk for _, _, chunk in scored[:limit]]
+
     def generate_response(
         self,
         query: str,
@@ -1157,7 +1190,10 @@ class AgentService:
         )
 
         if not evidence_chunks and chunks:
-            evidence_chunks = chunks[:3]
+            evidence_chunks = chunks[:5]
+
+        # Re-rank by relevance to ensure most useful chunks are passed to LLM
+        evidence_chunks = self._rerank_chunks_by_relevance(query, evidence_chunks)
 
         if not evidence_chunks:
             return {

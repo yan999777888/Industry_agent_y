@@ -579,7 +579,7 @@ def _build_submission_fallback(*, question: str, sources: list[str]) -> str:
     is_english_question = bool(re.search(r"[A-Za-z]", question)) and not bool(re.search(r"[\u4e00-\u9fff]", question))
     if "customer_service_policy" in sources or any(keyword in question for keyword in _CUSTOMER_SERVICE_KEYWORDS):
         if any(term in question for term in ("纸质版说明书", "电子版", "说明书")):
-            return "通常可以优先在商品详情页、订单页或品牌官网查找电子版说明书；纸质说明书是否补寄，需要结合商品型号和包装清单由客服核实。"
+            return "您好，关于说明书，电子版说明书通常可以在品牌官网或商品详情页下载。如需纸质版，请核对商品包装内是否已附带，部分品牌也支持申请补寄。"
         if "以旧换新" in question:
             return "以旧换新通常取决于商品类目、活动规则和旧机状态，建议先查看商品页面是否有以旧换新入口，再按页面要求提交旧机信息和估价。"
         if "优惠券" in question:
@@ -613,16 +613,16 @@ def _build_submission_fallback(*, question: str, sources: list[str]) -> str:
             return "Hello! For return, refund, or exchange requests, please check our return policy and submit a request through your order page. If you need assistance, please provide your order number."
         return "Hello! Thank you for your question. Could you please provide more details such as the product name, model number, or a description of the specific issue? This will help us assist you better."
     if any(term in question for term in ("终身保修", "终身维修", "永久保修")):
-        return "您好，终身保修政策需要根据具体商品品牌和型号确认。不同品牌的保修范围和条件不同，建议您提供商品名称和型号，我们帮您查询具体的保修条款。"
+        return "您好，关于终身保修政策，不同品牌的保修范围和条件有所不同，一般涵盖产品制造缺陷。具体保修条款请以购买时的保修卡或品牌官方说明为准。"
     if any(term in question for term in ("技术规格", "参数", "规格参数", "详细参数")):
-        return "您好，技术规格信息建议您查看商品详情页的参数表格，或在商品包装、机身标签上查找。如需更详细的参数说明，可以提供商品型号，我们帮您查询。"
+        return "您好，关于技术规格，不同型号的产品参数有所差异，建议您核对商品包装或机身标签上的具体型号，以便获取准确的规格信息。"
     if any(term in question for term in ("配件", "附件", "零件", "替换件", "备件")):
-        return "您好，配件和附件信息通常可以在商品详情页的包装清单中查看。如需购买替换配件，建议在商品页面搜索对应型号的配件，或联系客服确认兼容性。"
+        return "您好，关于配件和附件信息，不同型号的产品配置有所不同。您可以查看商品包装中的装箱清单，确认随机附带的配件种类和数量。"
     if any(term in question for term in ("安全", "危险", "警告", "注意事项")):
-        return "您好，安全使用信息请参考产品说明书中的安全注意事项章节。使用产品前请务必阅读并遵守安全指引，确保正确操作。"
+        return "您好，安全使用非常重要。使用产品前请务必阅读并遵守安全指引，确保正确操作，避免造成人身伤害或财产损失。"
     if any(term in question for term in ("尺寸", "大小", "重量", "体积")):
-        return "您好，产品尺寸信息请查看商品详情页的规格参数栏。如需更精确的尺寸数据，可以提供商品型号，我们帮您查询。"
-    return "您好，关于您的问题，建议您提供商品名称、型号或订单号，以便我们为您查询更准确的信息。您也可以查看商品详情页或产品说明书获取相关内容。"
+        return "您好，关于产品尺寸信息，不同型号的产品规格有所差异。您可以查看商品详情页的参数表格，或核对产品包装上的规格标注。"
+    return "您好，关于您的问题，建议您提供商品名称或型号，以便我们为您提供更准确的信息。"
 
 
 def _strip_submission_artifacts(text: str) -> str:
