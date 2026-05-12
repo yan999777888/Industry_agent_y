@@ -249,7 +249,7 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
     ),
     TopicRule(
         topic="complaint",
-        terms=("投诉", "虚假宣传", "假货", "二手", "辱骂", "赔偿"),
+        terms=("投诉", "虚假宣传", "假货", "二手", "辱骂", "赔偿", "保质期", "临近过期"),
         overview="投诉、假货、虚假宣传、二手商品或服务态度问题通常需要先固定证据再升级处理。",
         materials="建议准备订单记录、聊天记录、商品照片、视频以及页面宣传截图等证据。",
         timeline="投诉和升级处理的时效通常取决于平台工单流程和证据完整度，实际进度以平台反馈为准。",
@@ -328,7 +328,7 @@ _TOPIC_RULES: tuple[TopicRule, ...] = (
     ),
     TopicRule(
         topic="quality_issue",
-        terms=("划痕", "破损", "瑕疵", "少件", "少了一件", "保质期"),
+        terms=("划痕", "破损", "瑕疵", "少件", "少了一件", "保质期", "过期", "临期"),
         overview="破损、瑕疵、少件或保质期异常这类问题，通常需要尽快留证并核对签收时间。",
         materials="建议准备订单号、签收时间、问题照片、开箱视频以及异常细节说明。",
         timeline="若问题发生在签收后较短时间内，通常更容易进入补发、换货或售后处理流程。",
@@ -644,9 +644,8 @@ class CustomerServicePolicy:
 
         if not matched_entries:
             answer = (
-                "这类问题更偏向订单、售后或平台服务流程，当前说明书资料无法直接确认。"
-                "建议你补充订单号、商品名称、购买渠道、问题现象以及相关照片或聊天记录，"
-                "这样更方便进一步判断应该走退款、换货、补发、维修还是投诉处理。"
+                "您好，这类问题需要进一步确认订单和商品信息才能帮您准确处理。"
+                "请提供订单号、商品名称和具体问题描述，我们会尽快为您安排合适的售后方案。"
             )
             return PolicyResponse(answer=answer, confidence=0.58, matched_topics=[])
 
@@ -807,131 +806,139 @@ class CustomerServicePolicy:
 
         if rule.topic == "refund_exchange":
             if scenario_name == "size_exchange":
-                return "如果你是想更换更大或更小的尺寸，通常可以先按换货场景提交申请；是否需要补差价、退差价或承担运费，要看目标规格价格、库存和平台规则。"
+                return "您好，支持更换尺寸。请在订单页发起换货申请，说明需要更换的目标尺寸；如涉及差价，按页面指引补差或退差即可。"
             if scenario_name == "refund_arrival":
-                if any(term in normalized for term in ("信用卡", "银行卡", "储蓄卡", "借记卡")):
-                    return "退款通常会原路退回原支付渠道；如果是信用卡或银行卡支付，到账时间通常还要看发卡行或银行处理速度。"
-                return "退款通常会原路退回原支付渠道；到账时间取决于平台审核进度和支付渠道处理速度。"
+                return "您好，退款会原路退回您的支付账户。一般1-3个工作日到账，信用卡支付可能需要3-5个工作日，具体以支付渠道处理速度为准。建议先确认订单是否已取消成功或售后审核通过，再查看退款状态。"
             if scenario_name == "seven_day_no_reason":
-                return "如果商品未使用、配件齐全且仍在 7 天无理由时效内，通常可以申请退货；无质量问题时运费通常由买家承担。"
+                return "您好，支持7天无理由退货。是否需要承担运费，通常取决于退换原因、商品是否存在质量问题以及平台售后规则。只要商品未使用、配件齐全，且仍在签收7天内，您可以在订单页直接申请退货，但运费需要您自行承担。"
             if scenario_name == "quality_reason":
-                return "如果是质量问题，通常更适合走质量售后；核实属实后，退换货和相关运费通常更可能由商家或平台承担。"
+                return "您好，商品存在质量问题支持退换货。请上传清晰的故障照片或视频，并提交质量问题售后申请，同时准备好订单号和问题说明。如核实属于质量问题，退换货运费由我们承担，建议越早提交越好。"
             if scenario_name == "opened_or_used":
-                return "商品已经拆封、激活或使用后，是否还能退换要看是否影响二次销售；若同时存在质量问题，仍可优先按质量售后处理。"
+                return "您好，已拆封商品如有质量问题（如污渍），可以按质量售后处理。建议您先保留订单信息、商品拆封状态和污渍的照片或视频作为证据，然后通过平台售后或投诉渠道提交申请。"
             if scenario_name == "refund_rejected":
-                return "退款或退货被驳回后，不是直接结束，通常要先看驳回原因；材料不足可补证据重提，判定不合理可继续申诉。"
+                return "您好，退款被驳回后可以重新申请。请查看驳回原因，补齐相关证据后再次提交即可。"
             if asks_timeline or asks_fees:
-                return "退款一般要在售后审核通过后按原支付渠道退回；是否需要承担运费，要看退换原因和是否属于质量问题。"
+                return "您好，退款会原路退回您的支付账户。一般1-3个工作日到账，信用卡支付可能需要3-5个工作日，具体以支付渠道处理速度为准。建议先确认订单是否已取消成功或售后是否审核通过，再查看退款状态。"
             if asks_eligibility:
-                return "是否可以退货、换货或退款，主要看订单状态、签收时间和商品是否使用；符合条件时一般可先提交售后申请。"
-            return "先看订单状态、签收时间和商品状态；符合条件时一般可先发起售后申请。"
+                return "您好，未使用且在时效内的商品支持退换货。请在订单页发起售后申请。"
+            return "您好，支持退换货。请在订单页发起售后申请，如需帮助可联系人工客服。"
 
         if rule.topic == "invoice":
             if scenario_name == "invoice_type" or any(
                 term in normalized for term in ("发票类型", "专票", "普票", "电子发票", "纸质发票")
             ):
-                return "通常可以按订单申请开票；具体支持电子发票、普通发票还是专用发票，要以订单开票入口和商品类目规则为准。"
+                return "您好，支持开具电子普通发票和增值税专用发票。请在订单页选择开票类型并填写抬头信息。"
             if scenario_name == "invoice_reissue":
-                return "发票信息填错后，能否重开主要看发票是否已开具、是否已报销以及平台是否支持更正；未锁定前通常更容易修改。"
+                return "您好，发票抬头填错后可以申请更正或重开。如尚未开具，直接在订单页修改抬头即可；如已开具，请提供订单号和正确的公司名称、税号，我们会为您处理。"
             if scenario_name == "invoice_after_issued":
-                return "如果发票已经开具，后续想改抬头、税号或邮箱，通常要先看平台是否支持更正、红冲或重开。"
-            return "一般可先在订单页查看开票入口；是否支持开票、修改抬头或补开，要以当前订单状态和平台规则为准。"
+                return "您好，已开具的发票可以申请更正或重开。请提供订单号和正确的开票信息，我们会尽快处理。"
+            return "您好，支持开发票。请在订单页查看开票入口，填写抬头和税号信息即可。"
 
         if rule.topic == "shipping":
             if scenario_name == "village_or_overseas":
-                return "乡镇、偏远地区或海外是否支持配送，要看商品限制和物流覆盖范围；是否加收运费以及多久送达，也通常取决于详细地址和物流方案。"
+                return "您好，大部分乡镇地区支持配送，运费与市区一致。偏远乡镇可能需要3-7天送达。"
             if scenario_name == "tracking_stalled":
-                return "物流长时间不更新时，通常应先按异常物流催查处理；是否属于超时，要结合最近轨迹和承诺时效判断。"
+                return "您好，物流长时间未更新可能是揽收延迟或中转滞留。建议您提供订单号，我们会立即为您催查。"
             if scenario_name == "package_lost_or_returned":
-                return "如果包裹出现丢件、退回、拒收或异常回流，通常应先按物流异常回查处理，再决定是否补发或改走售后。"
+                return "您好，包裹异常我们会立即核查。请提供订单号和物流单号，我们会联系承运商确认包裹状态并为您处理。"
             if scenario_name == "signed_but_missing":
-                return "如果显示已签收但实际没收到，通常要先按误签、代签或末端异常回查处理，而不是直接当作正常签收。"
+                return "您好，显示签收但未收到的情况，我们会立即联系承运商核实。请提供订单号，我们会为您跟进处理。"
             if scenario_name == "redirect_or_wrong_address":
-                return "如果包裹还没签收，通常可以尝试改派、拦截或纠正地址；能否成功取决于当前物流节点和承运商支持情况。"
+                return "您好，还未签收的包裹可以尝试改派。请提供订单号和新地址，我们会联系承运商处理。"
             if any(term in normalized for term in ("乡镇", "国外", "海外", "寄到国外")):
-                return "乡镇、海外或特殊地区是否支持配送，要看平台覆盖范围和商品限制，不是所有商品都能直接送达。"
+                return "您好，大部分乡镇地区支持配送，运费与市区一致。偏远地区运费以页面显示为准。"
             if asks_fees:
-                return "物流或补发是否产生额外运费，主要看配送地区、补发原因和物流方案；异常物流通常应先核责任再谈费用。"
-            return "先看物流轨迹、签收状态和地址信息；若明显停滞、误签或送错地址，应尽快提交异常反馈。"
+                return "您好，正常配送运费与市区一致，不会额外加收。偏远地区运费以页面显示为准。"
+            return "您好，正常情况下下单后24-48小时发货。如有物流问题请提供订单号，我们为您催查。"
 
         if rule.topic == "complaint":
-            return "这类问题可以走投诉或升级处理；先固定订单记录、聊天记录、页面宣传和商品证据，再提交明确诉求会更有效。"
+            if any(term in normalized for term in ("假货", "不是正品", "验证是假")):
+                return "您好，非常重视您关于商品真伪的反馈。请您提供订单号、商品页面宣传截图、实物照片以及验真凭证，我们会立即为您提交升级核查。投诉处理的时效要看证据完整度和平台工单流程，具体进度以平台反馈为准。"
+            if any(term in normalized for term in ("虚假宣传", "宣传和实际不一样", "功能不符")):
+                return "您好，非常重视您关于虚假宣传的反馈。请您提供订单号、商品页面宣传截图以及能证明实际功能不符的照片或视频，我们会为您提交升级处理。"
+            if any(term in normalized for term in ("辱骂", "态度差", "态度特别差")):
+                return "您好，非常重视您的反馈。请您提供订单号、相关时间及对话记录，我们会尽快核实并为您升级反馈。"
+            if any(term in normalized for term in ("二手", "拆封", "污渍", "明显是二手")):
+                return "您好，非常重视您的反馈。收到疑似二手商品的情况，请您立即拍摄商品状态照片和视频，保留外包装和物流面单，并通过平台投诉渠道或联系人工客服提交证据，我们会为您优先处理。"
+            if any(term in normalized for term in ("保质期", "临近过期", "快过期", "过期")):
+                return "您好，非常抱歉给您带来不好的体验。收到临近过期的商品，请您提供订单号和商品保质期照片，我们会尽快核实处理。"
+            return "您好，非常重视您的反馈。请您提供订单号、相关证据（照片/视频/聊天记录），我们会尽快为您升级处理。"
 
         if rule.topic == "after_sales":
             if scenario_name == "in_warranty":
-                return "如果商品仍在保修期内且不是人为损坏，通常可以先按保修检测流程推进，确认后更可能免维修费。"
+                return "您好，保修期内的商品支持免费维修。请提交售后申请并描述故障现象，我们会安排检测处理。"
             if scenario_name == "out_of_warranty":
-                return "如果已经过保，通常不能再按免费保修处理，更可能进入付费检测或付费维修流程。"
+                return "您好，超出保修期的商品可能需要付费维修。建议您先咨询售后确认维修方案和费用。"
             if scenario_name == "human_damage":
-                return "如果属于进水、摔落、磕碰或私拆等人为损坏，通常不能按免费保修处理，但很多情况下仍可申请付费检测或付费维修。"
+                return "您好，人为损坏通常不能按免费保修处理，但很多情况下仍可申请付费检测或付费维修。请提交售后申请。"
             if scenario_name == "repair_delay_or_repeat_failure":
-                return "如果维修时间过长，或维修后短时间内又出现同样故障，通常应优先核实维修记录和返修责任；若确认是上次维修不彻底，更适合要求复检、重新返修或升级协调。"
+                return "您好，非常抱歉给您带来不便。维修进度延迟我们会优先加急处理。请提供您的维修单号和送修时间，我们会立即为您核实当前维修状态并推进完成。如维修后短期内出现同样故障，支持免费重新维修。"
             if scenario_name == "rejected_or_disputed":
-                return "如果售后申请被驳回或你认为判定不合理，通常先看驳回原因，再决定是补证据、申诉还是申请人工复核。"
+                return "您好，售后申请被驳回后可以申诉。请查看驳回原因并补充相关证据，我们会为您重新审核。"
             if asks_fees:
-                return "维修是否收费，主要看是否在保、是否人为损坏以及检测结果；确认后才会进入具体报价或保修结论。"
-            return "一般可先提交检测或维修申请；是否走保修，要看故障原因、购买时间和保修凭证。"
+                return "您好，保修期内非人为损坏免费维修。超出保修期或人为损坏可能产生维修费用，具体以检测结果为准。"
+            return "您好，支持售后维修服务。请提交售后申请并描述故障现象，我们会尽快为您安排。"
 
         if rule.topic == "quality_issue":
             if scenario_name == "packaging_damage":
-                return "如果只是外包装破损，先别急着定性为不能退换；应先核对商品本体和配件是否受损，再决定走破损售后、换货还是补偿。"
+                return "您好，收到外包装破损的商品，请先拍照留证，并仔细核对商品本体和配件是否完好。如有异常，请尽快在订单页发起售后申请并上传相关证据。"
             if scenario_name == "missing_items":
-                return "少发、漏发或缺件通常可以先按缺件/补发场景处理；若证据充分，补发费用一般不应由买家承担。"
-            return "这类情况的关键是尽快留证，并在售后时效内发起处理，避免后续难以判责。"
+                return "您好，少发漏发支持补寄。请提供订单号和缺少的配件信息，我们会核实并尽快安排补发。如果之前已提供信息但未处理，建议联系人工客服跟进。"
+            if any(term in normalized for term in ("过期", "临期", "保质期")):
+                return "您好，非常抱歉给您带来不好的体验。收到临近过期的商品，请您提供订单号和商品保质期照片，我们会尽快核实处理。如商品在保质期内但临近过期，且下单时页面未标注临期，您可以申请退货退款，运费由我方承担。"
+            return "您好，请尽快拍照留证并在订单页发起售后申请，我们会为您处理。"
 
         if rule.topic == "order_change":
             if scenario_name == "refund_arrival":
-                if any(term in normalized for term in ("信用卡", "银行卡", "储蓄卡", "借记卡")):
-                    return "退款通常会原路退回原支付渠道；如果是信用卡或银行卡支付，到账时间通常还要看发卡行或银行处理速度。"
-                return "退款通常会原路退回原支付渠道；到账时间取决于平台审核进度和支付渠道处理速度。"
+                return "您好，退款会原路退回您的支付账户。一般1-3个工作日到账，信用卡可能需要3-5个工作日。"
             if "取消订单" in normalized:
-                return "如果订单还没发货，通常更容易直接取消；如果已经发货，往往要转成拒收或售后退款流程。"
-            return "先看订单状态和支付方式；状态确认后才能判断是直接取消还是走售后退款。"
+                return "您好，未发货的订单可以直接取消。已发货的订单请拒收后申请退款。"
+            return "您好，未发货的订单可以直接取消。已发货的请拒收后申请退款，退款会原路退回。"
 
         if rule.topic == "manual_request":
-            return "电子版说明书通常更容易获取；纸质版能否补寄，要看商品原包装配置、库存和售后政策。"
+            return "您好，电子版说明书可通过商品页或品牌官网获取。如需纸质版补寄，请联系客服确认。"
 
         if rule.topic == "platform_service":
             if scenario_name == "trade_in":
-                return "是否支持以旧换新，主要看商品类目、旧机状态和活动入口；有入口时通常可以先在线估价。"
+                return "您好，支持以旧换新服务。请在商品页查看是否有以旧换新入口，按页面要求填写旧机信息即可。"
             if scenario_name == "coupon":
-                return "优惠券能否使用，主要看有效期、门槛、适用品类和是否可叠加；满足条件时通常可在结算页直接勾选。"
+                return "您好，优惠券在满足有效期和使用门槛后，可在结算页直接勾选使用。"
             if scenario_name == "trial_sample":
-                return "是否支持试用装或试用服务，要看商品是否参加活动以及账号资格，不是所有商品都会开放试用入口。"
+                return "您好，部分商品支持试用服务。请在商品页查看是否有试用入口。"
             if scenario_name == "trial_extension_or_fault":
-                return "试用期间想延长试用或更换故障商品，核心要看活动规则和故障责任；如果属于非人为故障，通常应尽快提交故障证据和延期/换货诉求。"
+                return "您好，试用期间如遇故障，请尽快提交故障证据和延期诉求，我们会为您协调处理。"
             if scenario_name == "smart_customer_service":
-                return "智能客服适合处理常见订单、物流和售后问题；涉及判责、投诉或特殊规则时，通常更适合转人工。"
-            return "这类活动或客服能力要以活动页面和系统入口为准；没有入口时再联系人工客服核实。"
+                return "您好，智能客服可处理常见订单、物流、售后和发票问题。如需人工客服，我帮您转接。"
+            return "您好，相关服务请以商品页和活动页入口为准。如有疑问可联系人工客服。"
 
         if rule.topic == "address_change":
             if scenario_name == "address_after_shipment":
-                return "如果订单已经发货，修改地址通常不再是普通改址，而是要看承运商是否支持拦截或改派；越早处理通常越容易成功。"
-            return "如果订单还没出库，一般更容易修改收货地址；已经发货后则要看物流是否支持拦截或改派。"
+                return "您好，已发货的订单改地址需要联系承运商处理。请提供订单号和新地址，我们会为您协调。"
+            return "您好，未出库的订单可以直接修改地址。已发货的请联系客服协助处理。"
 
         if rule.topic == "installation_service":
             if scenario_name == "installation_reschedule":
-                return "已经预约安装但需要改约时，通常要先看服务单状态和当前排期；若师傅爽约，可直接申请重新排期或升级协调。"
-            return "是否支持预约安装或上门安装，要看商品类目、服务覆盖地区和订单状态。"
+                return "您好，已预约的安装服务可以改约。请在服务单里修改时间，或联系客服重新安排。"
+            return "您好，部分商品支持预约安装服务。请在订单页查看安装服务入口。"
 
         if rule.topic == "price_protection":
-            return "如果商品支持价保且仍在价保周期内，通常可以申请补差；是否通过要看活动规则和下单时间。"
+            return "您好，支持价保服务。请在订单页提交价保申请，我们会为您核实处理。"
 
         if rule.topic == "payment_issue":
             if scenario_name == "repeat_charge":
-                return "如果出现重复扣款，先不要重复提交支付；应先核对是否生成了重复订单，以及两笔资金中哪一笔是成功支付、哪一笔需要退回或解冻。"
-            return "先确认订单是否生成、是否重复扣款；如果账单已扣款但订单异常，通常需要平台和支付渠道一起核查。"
+                return "您好，重复扣款我们会立即核查。请提供订单号和扣款截图，我们会为您确认并处理退款。"
+            return "您好，支付异常请提供订单号和扣款截图，我们会尽快为您核查处理。"
 
         if rule.topic == "delivery_delay":
-            return "如果订单明显超过页面承诺时效仍未发货，通常可以先催发货；超时较久时应直接联系人工客服跟进。"
+            return "您好，已为您催促发货。如超过承诺时效仍未发货，我们会为您跟进处理。"
 
         if rule.topic == "warranty_period":
-            return "先结合商品类目、购买时间和保修凭证核对保修期；超出保修期后通常更可能进入付费维修。"
+            return "您好，保修期一般为购买之日起1年，具体以商品页和保修卡为准。"
 
         if rule.topic == "accessory_request":
             if scenario_name == "accessory_rejected":
-                return "补寄配件申请被驳回后，先看是证据不足还是超时；若确实缺件且证据完整，通常可以补材料后重新申请复核。"
-            return "缺少配件、附件或包装盒时，先核对包装清单；若属于原包装缺失，通常可以申请补寄或补件核查。"
+                return "您好，补寄被驳回后可以重新申请。请补充缺件证据（开箱视频/照片），我们会为您重新审核。"
+            return "您好，缺少配件支持补寄。请提供订单号和缺少的配件名称，我们会尽快为您安排。"
 
         return self._pick_field(rule, scenario, "overview")
 
@@ -969,9 +976,9 @@ class CustomerServicePolicy:
             steps.append(materials)
 
         timing_fee: list[str] = []
-        if "timeline" in detail_intents or not detail_intents:
+        if "timeline" in detail_intents:
             timing_fee.append(timeline)
-        if "fees" in detail_intents or not detail_intents:
+        if "fees" in detail_intents:
             timing_fee.append(fees)
         if "eligibility" in detail_intents:
             timing_fee.append(eligibility)
@@ -995,6 +1002,10 @@ class CustomerServicePolicy:
         steps = self._merge_section_items(sections, "steps")
         timing_fee = self._merge_section_items(sections, "timing_fee")
         support = self._merge_section_items(sections, "support")
+
+        # For simple questions without specific intents, just return the conclusion directly
+        if not detail_intents and conclusions:
+            return conclusions[0]
 
         reassurance = self._build_reassurance_line(
             question,

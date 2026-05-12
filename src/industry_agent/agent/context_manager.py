@@ -185,7 +185,12 @@ class ContextManager:
         if _SHORT_FOLLOW_UP_RE.search(question.strip()):
             return True
         if not analysis.products and not analysis.models and session.current_product:
-            return True
+            if len(normalized) <= 12:
+                return True
+            has_follow_up_signal = any(term in normalized for term in (_normalize(term) for term in _FOLLOW_UP_TERMS))
+            if has_follow_up_signal:
+                return True
+            return False
         return False
 
     def _is_context_reset(self, question: str) -> bool:
@@ -220,9 +225,9 @@ class ContextManager:
         if session.recent_image_ids:
             parts.append(f"最近相关图片：{', '.join(session.recent_image_ids[-3:])}")
         if session.recent_user_image_summaries:
-            parts.append(f"最近上传图片：{session.recent_user_image_summaries[-1][:120]}")
+            parts.append(f"最近上传图片：{session.recent_user_image_summaries[-1][:200]}")
         if answer.strip():
-            parts.append(f"上一轮回答摘要：{answer.strip()[:120]}")
+            parts.append(f"上一轮回答摘要：{answer.strip()[:300]}")
         return "；".join(parts)
 
 

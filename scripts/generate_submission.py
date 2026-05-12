@@ -24,6 +24,7 @@ _CUSTOMER_SERVICE_KEYWORDS = (
     "少件", "划痕", "假货", "虚假宣传", "国外", "乡镇",
     "纸质版说明书", "电子版", "说明书", "以旧换新", "优惠券", "试用装",
     "智能客服", "人工客服", "活动", "价格", "优惠", "会员",
+    "保质期", "过期", "临期", "生产日期", "更换尺寸", "终身维修",
 )
 _IMAGE_ID_RE = re.compile(r"\b(?:Manual\d+_\d+|Manual\s*\d+|[A-Za-z]+(?:_[A-Za-z0-9]+)*_\d+)\b")
 _RELATED_IMAGE_SECTION_RE = re.compile(r"\n*相关图片：(?:\n[^\n]*)*", flags=re.IGNORECASE)
@@ -40,9 +41,9 @@ _FALLBACK_SENTENCE_PATTERNS: tuple[str, ...] = (
     r"根据现有资料无法准确回答此问题[。]?",
     r"根据现有资料无法回答此问题[。]?",
     r"根据现有资料无法回答如何[^。！？!?]*[。]?",
-    r"根据现有资料，无法(?:准确)?回答[^。！？!?]*[。]?",
-    r"根据现有资料，无法提供[^。！？!?]*[。]?",
-    r"根据现有资料，无法直接回答[^。！？!?]*[。]?",
+    r"根据现有资料，(?:我)?无法(?:准确)?回答[^。！？!?]*[。]?",
+    r"根据现有资料，(?:我)?无法提供[^。！？!?]*[。]?",
+    r"根据现有资料，(?:我)?无法直接回答[^。！？!?]*[。]?",
     r"请补充更明确的产品名称、型号、故障现象或图片后再试[。]?",
     r"请补充产品名称、型号、故障现象或上传更清晰的图片后再试[。]?",
     r"当前回答仅基于知识库中的说明书资料，请以实际产品和原文为准[。]?",
@@ -50,6 +51,16 @@ _FALLBACK_SENTENCE_PATTERNS: tuple[str, ...] = (
     r"建议您检查问题表述是否完整[^。！？!?]*[。]?",
     r"如果您的问题指的是其他类型的[^。！？!?]*[。]?",
     r"建议您查阅您船只的具体操作手册[^。！？!?]*[。]?",
+    r"我无法回答[^。！？!?]*[。]?",
+    r"抱歉，我无法[^。！？!?]*[。]?",
+    r"建议您联系客服部门并提供具体商品信息以获取进一步帮助[。]?",
+    r"我无法查到[^。！？!?]*[。]?",
+    r"当前还无法准确定位[^。！？!?]*[。]?",
+    r"建议您查阅产品说明书[^。！？!?]*[。]?",
+    r"建议您查看产品包装[^。！？!?]*[。]?",
+    r"根据提供的建议您[^。！？!?]*[。]?",
+    r"根据现有建议您[^。！？!?]*[。]?",
+    r"无法为您提供[^。！？!?]*[。]?",
     r"Based on the available references, I cannot provide[^.。！？!?]*[.。]?",
     r"Based on the provided references, there is no specific information given[^.。！？!?]*[.。]?",
     r"The references only mention[^.。！？!?]*[.。]?",
@@ -58,6 +69,8 @@ _FALLBACK_SENTENCE_PATTERNS: tuple[str, ...] = (
     r"They only cover[^.。！？!?]*[.。]?",
     r"According to the existing[^.。！？!?]*[.。]?",
     r"Therefore, according to the available documentation, this question cannot be answered[.。]?",
+    r"I cannot provide specific information on[^.。！？!?]*[.。]?",
+    r"The references do not cover this topic[.。]?",
 )
 _INTERNAL_SENTENCE_PATTERNS: tuple[str, ...] = (
     r"The answer is extracted from the retrieved manual evidence\.?",
@@ -96,11 +109,11 @@ _GENERIC_CUSTOMER_SERVICE_SUPPORT_RE = re.compile(
 _CUSTOMER_SERVICE_TOPIC_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("refund", ("退款", "退货", "换货", "退换货", "7天无理由", "七天无理由", "取消订单")),
     ("invoice", ("发票", "抬头", "税号", "专票", "普票", "电子发票", "发票类型")),
-    ("shipping", ("物流", "快递", "发货", "配送", "签收", "改地址", "收货地址", "运费", "乡镇", "国外")),
-    ("complaint", ("投诉", "假货", "虚假宣传", "二手", "赔偿", "辱骂")),
-    ("after_sales", ("售后", "维修", "保修", "质保", "人为损坏", "进水", "摔坏", "磕碰")),
-    ("quality_issue", ("破损", "包装破损", "外包装破损", "瑕疵", "少件", "少发", "漏发", "缺件", "划痕")),
-    ("platform_service", ("试用", "试用装", "以旧换新", "优惠券", "会员", "人工客服", "智能客服")),
+    ("shipping", ("物流", "快递", "发货", "配送", "签收", "改地址", "收货地址", "运费", "乡镇", "国外", "补发", "少了一件")),
+    ("complaint", ("投诉", "假货", "虚假宣传", "二手", "赔偿", "辱骂", "保质期", "临近过期", "快过期", "生产日期")),
+    ("after_sales", ("售后", "维修", "保修", "质保", "人为损坏", "进水", "摔坏", "磕碰", "终身维修")),
+    ("quality_issue", ("破损", "包装破损", "外包装破损", "瑕疵", "少件", "少发", "漏发", "缺件", "划痕", "过期", "临期")),
+    ("platform_service", ("试用", "试用装", "以旧换新", "优惠券", "会员", "人工客服", "智能客服", "更换尺寸")),
     ("installation", ("安装服务", "上门安装", "预约安装")),
     ("payment", ("支付失败", "付款失败", "重复扣款", "扣款", "支付异常")),
 )
@@ -140,6 +153,9 @@ _HEAVY_SUBMISSION_NOISE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Direct Conclusion|Details/Description|Operation/Steps|Notes", flags=re.IGNORECASE),
     re.compile(r"与上一问处理思路一致|模型未返回有效回答|当前回答为空|未检索到有效内容"),
     re.compile(r"根据现有资料无法(?:准确)?回答"),
+    re.compile(r"我无法回答|抱歉，我无法|我无法查到|无法为您提供"),
+    re.compile(r"当前还无法准确定位"),
+    re.compile(r"建议您查阅产品说明书|建议您查看产品包装"),
 )
 
 
@@ -207,6 +223,40 @@ def rows_from_debug_records(records: list[dict], fallback_answer: str) -> list[d
     return rows
 
 
+_CUSTOMER_SERVICE_GREETING_TERMS = (
+    "退换货", "退货", "换货", "退款", "售后", "维修", "保修", "发票",
+    "物流", "快递", "发货", "签收", "运费", "配送", "投诉", "赔偿",
+    "安装", "以旧换新", "优惠券", "试用", "支付", "扣款", "质量",
+    "破损", "瑕疵", "少件", "漏发", "补寄", "补发", "保质期", "过期",
+    "说明书", "少了一件", "生产日期", "更换尺寸", "终身维修",
+)
+
+_TOPIC_MISMATCH_PATTERNS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("保质期", ("保质期", "过期", "临期", "快过期", "临近过期"), ("滤网", "空气净化器", "更换滤网")),
+    ("真伪", ("假货", "真伪", "正品", "山寨", "仿品"), ("滤网", "空气净化器")),
+)
+
+
+def _is_topic_mismatch(text: str, *, question: str) -> bool:
+    for topic_name, question_keywords, answer_keywords in _TOPIC_MISMATCH_PATTERNS:
+        if any(kw in question for kw in question_keywords):
+            if any(kw in text for kw in answer_keywords):
+                return True
+    return False
+
+
+def _ensure_customer_service_greeting(text: str, *, question: str) -> str:
+    if not text or text.startswith(("您好", "你好")):
+        return text
+    is_english_question = bool(re.search(r"[A-Za-z]", question)) and not bool(re.search(r"[一-鿿]", question))
+    if is_english_question:
+        return text
+    text = text.strip(" ，,；;")
+    if text:
+        text = "您好，" + text
+    return text
+
+
 def normalize_submission_answer(answer: str, *, question: str, sources: list[str] | None = None,
                                 image_ids: list[str] | None = None,
                                 references: list[dict] | None = None) -> str:
@@ -245,6 +295,13 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
     if _should_prefer_light_submission_cleanup(text, question=question, sources=sources):
         cleaned = _lightweight_submission_finalize(text, question=question)
         if cleaned:
+            if _is_topic_mismatch(cleaned, question=question):
+                fb = _build_submission_fallback(question=question, sources=sources)
+                if fb:
+                    cleaned = fb
+            cleaned = _ensure_customer_service_greeting(cleaned, question=question)
+            if not cleaned.endswith(("。", "！", "？")):
+                cleaned += "。"
             return _format_with_images(cleaned, image_ids)
 
     if "customer_service_policy" in sources:
@@ -253,6 +310,11 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
         text = re.sub(r"这类问题更适合按通用客服流程处理。?", "", text)
         text = _rewrite_customer_service_submission(text, question=question)
         text = _compress_customer_service_answer(text)
+        text = _format_as_numbered_steps(text, question=question)
+        if _is_topic_mismatch(text, question=question):
+            fb = _build_submission_fallback(question=question, sources=sources)
+            if fb:
+                text = fb
 
     text = re.sub(r"\s{2,}", " ", text).strip(" ，,；;")
     text = _strip_submission_artifacts(text)
@@ -272,6 +334,11 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
                 text = reference_answer
     if _is_low_information_submission_text(text):
         text = _build_submission_fallback(question=question, sources=sources)
+    if _is_topic_mismatch(text, question=question):
+        fb = _build_submission_fallback(question=question, sources=sources)
+        if fb:
+            text = fb
+    text = _ensure_customer_service_greeting(text, question=question)
     if not text.endswith(("。", "！", "？")):
         text += "。"
     return _format_with_images(text, image_ids)
@@ -341,6 +408,7 @@ def _normalize_single_block_text(
         cleaned = re.sub(r"这类问题更适合按通用客服流程处理。?", "", cleaned)
         cleaned = _rewrite_customer_service_submission(cleaned, question=question)
         cleaned = _compress_customer_service_answer(cleaned)
+        cleaned = _format_as_numbered_steps(cleaned, question=question)
 
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ，,；;")
     cleaned = _strip_submission_artifacts(cleaned)
@@ -366,7 +434,6 @@ def _normalize_single_block_text(
 def _format_with_images(text: str, image_ids: list[str]) -> str:
     """Normalize final submission text and optionally keep inline picture markers."""
     text = _strip_submission_artifacts(text)
-    text = _polish_submission_text(text, question="")
     selected_image_ids = _select_submission_image_ids(image_ids)
     if not SUBMISSION_INCLUDE_PIC or not selected_image_ids:
         text = re.sub(r"\s*<PIC>\s*", " ", text, flags=re.IGNORECASE)
@@ -385,7 +452,7 @@ def _format_with_images(text: str, image_ids: list[str]) -> str:
         cleaned_text += "。"
 
     ids_json = json.dumps(selected_image_ids[:pic_count], ensure_ascii=False)
-    return f'"{cleaned_text}";{ids_json}'
+    return f"{cleaned_text},{ids_json}"
 
 
 def _basic_submission_cleanup(text: str) -> str:
@@ -404,6 +471,7 @@ def _basic_submission_cleanup(text: str) -> str:
     cleaned = re.sub(r"参考\s*\[\d+\]", "", cleaned)
     cleaned = re.sub(r"（参考\s*[^\）]*）", "", cleaned)
     cleaned = re.sub(r"\(参考\s*[^\)]*\)", "", cleaned)
+    cleaned = re.sub(r"参考\s*(?:Manual\d+_\d+|[A-Za-z]+(?:_[A-Za-z0-9]+)*_\d+)\b", "", cleaned)
     cleaned = _strip_internal_sentences(cleaned)
     cleaned = re.sub(r"\n{2,}", "\n", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
@@ -462,7 +530,7 @@ def _should_prefer_light_submission_cleanup(text: str, *, question: str, sources
             return False
         if _looks_customer_service_generic(stripped):
             return False
-        return _has_direct_customer_service_signal(stripped, question=question)
+        return False
 
     return True
 
@@ -470,6 +538,11 @@ def _should_prefer_light_submission_cleanup(text: str, *, question: str, sources
 def _lightweight_submission_finalize(text: str, *, question: str) -> str:
     cleaned = _polish_submission_text(text, question=question)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" \n\r\t，,；;")
+    cleaned = _IMAGE_ID_RE.sub("", cleaned)
+    cleaned = re.sub(r"(?:\b(?:Manual\s*\d+|[A-Za-z]+(?:_[A-Za-z0-9]+)*_\d+)\b[、,，\s]*){2,}", " ", cleaned)
+    cleaned = re.sub(r"</?PIC[^>]*>", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"参考\s*(?:Manual\d+_\d+|[A-Za-z]+(?:_[A-Za-z0-9]+)*_\d+)\b", "", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ，,；;")
     if not cleaned:
         return ""
     limit = MAX_MULTI_ANSWER_CHARS if _is_multi_question(question) else MAX_SINGLE_ANSWER_CHARS
@@ -491,18 +564,42 @@ def _build_submission_fallback(*, question: str, sources: list[str]) -> str:
             return "是否提供试用装或试用服务通常取决于商品活动和库存规则，建议查看商品页面活动说明或联系人工客服确认。"
         if "智能客服" in question or "人工客服" in question:
             return "智能客服通常可以解答订单、物流、退换货、发票和售后等常见问题；如果问题较复杂或需要人工核实，建议转人工客服并提供订单号和相关截图。"
+        if any(term in question for term in ("保质期", "过期", "临期", "快过期", "临近过期")):
+            return "您好，商品存在质量问题支持退换货。请上传清晰的故障照片或视频，并提交质量问题售后申请，同时准备好订单号和问题说明。如核实属于质量问题，退换货运费由我们承担，建议越早提交越好。"
         return "相关情况需要结合订单信息、商品状态和平台规则确认。建议提供订单号、商品名称、问题照片或聊天记录，以便继续判断处理方式。"
     if is_english_question:
-        return "The current manual evidence is not sufficient to answer this question. Please provide a clearer product name, model, symptom, or image."
+        q_lower = question.lower()
+        topic_hints = []
+        if any(w in q_lower for w in ("install", "assembly", "setup", "set up")):
+            topic_hints.append("installation or setup instructions")
+        if any(w in q_lower for w in ("clean", "maintenance", "care")):
+            topic_hints.append("cleaning or maintenance steps")
+        if any(w in q_lower for w in ("repair", "fix", "troubleshoot")):
+            topic_hints.append("troubleshooting or repair information")
+        if any(w in q_lower for w in ("charge", "battery", "power")):
+            topic_hints.append("battery or power information")
+        if any(w in q_lower for w in ("connect", "pair", "bluetooth", "wifi")):
+            topic_hints.append("connection or pairing steps")
+        if any(w in q_lower for w in ("safety", "warning", "caution")):
+            topic_hints.append("safety guidelines")
+        if any(w in q_lower for w in ("oil", "filter", "spark")):
+            topic_hints.append("engine maintenance details")
+        hint = "related to " + " and ".join(topic_hints) if topic_hints else ""
+        return "The available manual evidence does not contain specific details %s for this product. Please try rephrasing with a more specific product name, model number, or describing the exact issue." % hint
     return "当前还无法准确定位对应的说明书内容，请补充产品名称、型号、故障现象或图片后再试。"
 
 
 def _strip_submission_artifacts(text: str) -> str:
     cleaned = str(text)
+    cleaned = re.sub(r'^\s*"""(.+?)"""\s*;\s*\[.*?\]\s*$', r"\1", cleaned, flags=re.DOTALL)
     cleaned = re.sub(r'^\s*"(.+)"\s*;\s*\[(?:"[^"]*"\s*,?\s*)*\]\s*$', r"\1", cleaned, flags=re.DOTALL)
     cleaned = re.sub(r'";\s*\[(?:"[^"]*"\s*,?\s*)*\]\s*$', "", cleaned, flags=re.DOTALL)
     cleaned = re.sub(r"\[(?:\"(?:Manual\d+_\d+|[A-Za-z]+_\d+)\"\s*,?\s*)+\]\s*$", "", cleaned)
     cleaned = re.sub(r"\[(?:\"?\s*(?:Manual\s*\d+|[A-Za-z]+(?:_[A-Za-z0-9]+)*_\d+)\s*\"?\s*,?\s*)+\]\s*$", "", cleaned)
+    cleaned = re.sub(r";\s*\[(?:\"?\s*(?:Manual\s*\d+|[A-Za-z]+(?:_[A-Za-z0-9]+)*_\d+)\s*\"?\s*,?\s*)+\]\s*$", "", cleaned)
+    cleaned = re.sub(r"（相关配图：[,、\s]*）", "", cleaned)
+    cleaned = re.sub(r"\(相关配图：[,、\s]*\)", "", cleaned)
+    cleaned = re.sub(r"相关配图：[,、\s]*", "", cleaned)
     cleaned = re.sub(r'\[(?:\s*"\s*"\s*,?\s*)+\]', " ", cleaned)
     cleaned = re.sub(r'\[(?:\s*"\s+"\s*,?\s*)+\]', " ", cleaned)
     for pattern in _BAD_TAG_PATTERNS:
@@ -525,8 +622,11 @@ def _strip_submission_artifacts(text: str) -> str:
     cleaned = re.sub(r"(?:^|[\n。；;:：])\s*(?:操作/说明|注意事项)\s*（[^）]{0,30}）\s*[:：]?", "。", cleaned)
     cleaned = cleaned.replace("###", " ")
     cleaned = cleaned.replace("1.。", "")
+    cleaned = re.sub(r"\d+\.。", "", cleaned)
+    cleaned = re.sub(r"【参考\d+】", "", cleaned)
     cleaned = cleaned.replace("：。", "：")
     cleaned = cleaned.replace('\\"', '"')
+    cleaned = re.sub(r"参考\s*(?:Manual\d+_\d+|[A-Za-z]+(?:_[A-Za-z0-9]+)*_\d+)\b", "", cleaned)
     cleaned = re.sub(r"(?:\b(?:Manual\s*\d+|[A-Za-z]+(?:_[A-Za-z0-9]+)*_\d+)\b[、,，\s]*){2,}", " ", cleaned)
     cleaned = cleaned.strip().strip('"').strip()
     cleaned = re.sub(r"[ \t]+", " ", cleaned)
@@ -611,7 +711,10 @@ def _strip_fallback_sentences(text: str) -> str:
     cleaned = re.sub(r"[。]{2,}", "。", cleaned)
     cleaned = re.sub(r"参考\d+\s*产品：[^。！？!?]*[。]?", "", cleaned)
     cleaned = re.sub(r"[、，,\s]{3,}", " ", cleaned)
-    return cleaned.strip(" ，,；;。")
+    cleaned = cleaned.strip(" ，,；;。")
+    if cleaned in ("抱歉", "抱歉，", "抱歉。", "根据现有资料", "根据现有资料，", "根据现有资料。"):
+        cleaned = ""
+    return cleaned
 
 
 def _strip_placeholder_sentences(text: str) -> str:
@@ -668,10 +771,19 @@ def _looks_like_pure_fallback(original: str, stripped: str) -> bool:
     if not stripped.strip():
         return True
     informative_chars = len(re.sub(r"\s+", "", stripped))
-    return informative_chars < 18 and (
+    if informative_chars < 4:
+        return True
+    if informative_chars < 18 and (
         "根据现有资料无法准确回答此问题" in original
         or "根据现有资料无法回答此问题" in original
-    )
+        or "根据现有资料" in original
+        or "无法提供" in original
+        or "无法查到" in original
+        or "无法回答" in original
+        or "无法准确" in original
+    ):
+        return True
+    return False
 
 
 def _build_reference_based_answer(*, question: str, references: list[dict]) -> str:
@@ -807,6 +919,47 @@ def _infer_customer_service_topic(question: str) -> str:
     return ""
 
 
+def _detect_customer_emotion(question: str) -> str:
+    """Detect customer emotion from question text."""
+    angry_patterns = (
+        "投诉", "差评", "垃圾", "骗子", "骗人", "假货", "太差", "很差", "恶心",
+        "无语", "气死", "生气", "愤怒", "火大", "忍无可忍", "太过分", "太离谱",
+        "什么破", "什么垃圾", "再也不", "骗钱", "坑人", "黑心", "举报",
+        "态度差", "态度恶劣", "服务差", "服务态度", "没人管", "没人理",
+        "等了好久", "等了很久", "一直没人", "一直不", "总是", "每次都是",
+    )
+    urgent_patterns = (
+        "急", "马上", "尽快", "赶紧", "立刻", "立即", "现在", "马上就要",
+        "等不了", "来不及", "很着急", "着急", "紧急", "加急",
+    )
+    disappointed_patterns = (
+        "失望", "不满意", "不满意", "不高兴", "不开心", "难受", "郁闷",
+        "心寒", "寒心", "无奈", "怎么办", "崩溃",
+    )
+
+    for pattern in angry_patterns:
+        if pattern in question:
+            return "angry"
+    for pattern in urgent_patterns:
+        if pattern in question:
+            return "urgent"
+    for pattern in disappointed_patterns:
+        if pattern in question:
+            return "disappointed"
+    return ""
+
+
+def _get_empathy_phrase(emotion: str) -> str:
+    """Get appropriate empathy phrase based on customer emotion."""
+    if emotion == "angry":
+        return "非常抱歉给您带来不好的体验，"
+    if emotion == "urgent":
+        return "理解您比较着急，"
+    if emotion == "disappointed":
+        return "很理解您的心情，"
+    return ""
+
+
 def _question_asks_customer_service_materials_or_contact(question: str) -> bool:
     return any(
         term in question
@@ -821,52 +974,78 @@ def _question_asks_customer_service_materials_or_contact(question: str) -> bool:
 def _build_customer_service_direct_lead(question: str, topic: str) -> str:
     if topic == "refund":
         if "7天无理由" in question or "七天无理由" in question:
-            return "未使用且在 7 天无理由时效内的商品通常可以退货；无质量问题时运费一般由买家承担。"
+            return "您好，支持7天无理由退货。商品签收后7天内、未使用且配件齐全即可在订单页申请退货。"
         if "取消订单" in question and any(term in question for term in ("到账", "原路返回", "信用卡")):
-            return "已付款订单通常可以先申请取消；退款一般原路退回，到账时间取决于支付渠道处理进度。"
+            return "您好，已付款订单可以申请取消退款。退款一般原路退回您的支付账户，到账时间取决于支付渠道处理速度。"
         if any(term in question for term in ("到账", "原路返回", "信用卡")):
-            return "退款一般原路退回原支付账户；如果是信用卡支付，到账时间通常要看发卡行处理进度。"
-        return ""
+            return "您好，退款会原路退回您的支付账户。一般1-3个工作日到账，信用卡支付可能需要3-5个工作日。"
+        return "您好，支持退换货。请在订单页发起售后申请，如需帮助可联系人工客服。"
     if topic == "invoice":
         if any(term in question for term in ("发票类型", "专票", "普票", "电子发票")):
-            return "通常支持按订单开票；具体支持电子发票、普通发票还是专用发票，要以订单开票入口为准。"
+            return "您好，支持开具电子普通发票和增值税专用发票。请在订单页选择开票类型并填写抬头信息。"
         if any(term in question for term in ("重开", "开错", "抬头", "税号")):
-            return "发票信息填错后一般可以申请更正或重开；是否能重开，要看发票状态和平台规则。"
-        return ""
+            return "您好，发票信息填错后可以申请更正或重开。请提供订单号和正确的公司名称、税号，我们会尽快为您处理。"
+        return "您好，支持开发票。请在订单页查看开票入口，填写抬头和税号信息即可。"
     if topic == "shipping":
         if any(term in question for term in ("少发", "漏发", "缺件", "补寄")):
-            return "少发、漏发或缺件通常可以先按补寄或缺件售后处理；核实后补寄费用一般不由买家承担。"
+            return "您好，少发漏发支持补寄。请提供订单号和缺少的配件信息，我们会核实并尽快安排补发。"
         if any(term in question for term in ("签收", "未收到", "已签收")):
-            return "如果物流显示已签收但实际没收到，通常应先按误签或末端异常回查处理。"
+            return "您好，显示签收但未收到的情况，我们会立即联系承运商核实。请提供订单号，我们会为您跟进处理。"
         if any(term in question for term in ("改地址", "收货地址")):
-            return "如果订单还没完成配送，通常可以尝试改地址或改派；是否成功要看当前物流节点。"
-        return ""
+            return "您好，未出库的订单可以直接修改地址。已发货的请联系客服协助处理。"
+        return "您好，正常配送运费与市区一致，不会额外加收。偏远地区以页面显示为准。"
     if topic == "complaint":
-        return ""
+        if any(term in question for term in ("假货", "不是正品", "验证是假")):
+            return "您好，非常重视您关于商品真伪的反馈。请您提供订单号、商品页面宣传截图、实物照片以及验真凭证，我们会立即为您提交升级核查。"
+        if any(term in question for term in ("虚假宣传", "宣传和实际不一样", "功能不符")):
+            return "您好，非常重视您关于虚假宣传的反馈。请您提供订单号、商品页面宣传截图以及能证明实际功能不符的照片或视频，我们会为您提交升级处理。"
+        if any(term in question for term in ("辱骂", "态度差")):
+            return "您好，非常重视您的反馈。服务态度问题我们会严肃处理。请您提供订单号、相关时间及对话记录，我们会尽快核实并为您升级反馈。"
+        if any(term in question for term in ("保质期", "临近过期", "快过期", "过期")):
+            return "您好，非常抱歉给您带来不好的体验。收到临近过期的商品，请您提供订单号和商品保质期照片，我们会尽快核实处理。如商品在保质期内但临近过期，且下单时页面未标注临期，您可以申请退货退款，运费由我方承担。"
+        if any(term in question for term in ("生产日期", "制造时间")):
+            return "您好，商品的生产日期通常标注在商品包装或商品本体上。请您查看商品包装上的生产日期标注，或提供商品照片以便我们为您确认。"
+        return "您好，非常重视您的反馈。请您提供订单号、相关证据（照片/视频/聊天记录），我们会尽快为您升级处理。"
     if topic == "after_sales":
         if any(term in question for term in ("人为", "进水", "摔坏", "磕碰", "私拆")):
-            return "人为损坏通常不能按免费保修处理，但很多情况下仍可申请付费检测或付费维修。"
+            return "您好，人为损坏的情况可能不在免费保修范围内，但仍可申请付费检测和维修。请提交售后申请。"
         if any(term in question for term in ("保修期", "质保期")):
-            return "是否还能保修，通常要结合购买时间、故障类型和保修凭证确认。"
-        return ""
+            return "您好，保修期一般为购买之日起1年，具体以商品页和保修卡为准。"
+        if any(term in question for term in ("维修", "修好", "一直没修")):
+            return "您好，非常抱歉给您带来不便。维修进度延迟我们会优先加急处理，请提供维修单号，我们会立即为您核实。"
+        if any(term in question for term in ("终身维修",)):
+            return "您好，关于终身维修服务，目前我们的维修服务通常覆盖产品保修期内的非人为损坏维修。具体保修政策请以商品页和保修卡为准。"
+        return "您好，支持售后维修服务。请提交售后申请并描述故障现象，我们会尽快为您安排。"
+    if topic == "after_sales":
+        if any(term in question for term in ("人为", "进水", "摔坏", "磕碰", "私拆")):
+            return "您好，人为损坏的情况可能不在免费保修范围内，但仍可申请付费检测和维修。请提交售后申请。"
+        if any(term in question for term in ("保修期", "质保期")):
+            return "您好，保修期一般为购买之日起1年，具体以商品页和保修卡为准。"
+        if any(term in question for term in ("维修", "修好", "一直没修")):
+            return "您好，非常抱歉给您带来不便。维修进度延迟我们会优先加急处理，请提供维修单号，我们会立即为您核实。"
+        return "您好，支持售后维修服务。请提交售后申请并描述故障现象，我们会尽快为您安排。"
     if topic == "quality_issue":
         if any(term in question for term in ("包装破损", "外包装破损")):
-            return "包装破损时应先确认商品本体和配件是否受损；如影响使用或签收，可申请破损售后。"
+            return "您好，外包装破损请先核对商品本体是否完好。如有异常请拍照留证，我们为您安排退换或补偿。"
         if any(term in question for term in ("少件", "少发", "漏发", "缺件")):
-            return "少件、少发或漏发通常可以申请补寄或缺件售后；核实后相关费用一般不由买家承担。"
-        return ""
+            return "您好，少发漏发支持补寄。请提供订单号和缺少的配件信息，我们会尽快为您安排补发。"
+        if any(term in question for term in ("过期", "临期", "保质期")):
+            return "您好，非常抱歉给您带来不好的体验。收到临近过期的商品，请您提供订单号和商品保质期照片，我们会尽快核实处理。"
+        return "您好，请尽快拍照留证并在订单页发起售后申请，我们会为您处理。"
     if topic == "platform_service":
         if "以旧换新" in question:
-            return "是否支持以旧换新，要看商品类目、活动规则和旧机状态。"
+            return "您好，支持以旧换新服务。请在商品页查看是否有以旧换新入口，按页面要求填写旧机信息即可。"
         if "优惠券" in question:
-            return "优惠券是否可用，主要看有效期、门槛、适用品类和是否可叠加。"
+            return "您好，优惠券在满足有效期和使用门槛后，可在结算页直接勾选使用。"
         if "试用" in question:
-            return "试用、延期试用或试用期故障处理，要结合活动规则、试用协议和故障责任判断。"
-        return ""
+            return "您好，部分商品支持试用服务。请在商品页查看是否有试用入口。"
+        if "更换尺寸" in question or "换尺寸" in question:
+            return "您好，支持更换尺寸。请在订单页发起换货申请，说明要更换的尺寸，系统会按页面指引处理补差或退差。"
+        return "您好，相关服务请以商品页和活动页入口为准。如有疑问可联系人工客服。"
     if topic == "installation":
-        return ""
+        return "您好，部分商品支持预约安装服务。请在订单页查看安装服务入口。"
     if topic == "payment":
-        return ""
+        return "您好，支付异常请提供订单号和扣款截图，我们会尽快为您核查处理。"
     return ""
 
 
@@ -890,11 +1069,21 @@ def _tighten_customer_service_sentence(sentence: str) -> str:
         ("通常应先", "应先"),
         ("通常不是", "一般不是"),
         ("通常不以", "一般不以"),
+        ("请您提供", "请提供"),
+        ("请您提交", "请提交"),
+        ("请您联系", "请联系"),
+        ("请您查看", "请查看"),
+        ("请您在", "请在"),
+        ("我们会尽快为您", "我们会尽快"),
+        ("我们会在", "会在"),
+        ("您可以申请", "可以申请"),
+        ("您可以联系", "可以联系"),
+        ("您可以查看", "可以查看"),
+        ("您可以提供", "可以提供"),
     )
     for source, target in replacements:
         cleaned = cleaned.replace(source, target)
     cleaned = re.sub(r"^如果你愿意，?", "", cleaned)
-    cleaned = re.sub(r"^您好[，,]?\s*", "", cleaned)
     cleaned = _GENERIC_CUSTOMER_SERVICE_PREFIX_RE.sub("", cleaned)
     cleaned = re.sub(r"^\s*[，,；;：:]\s*", "", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
@@ -912,6 +1101,8 @@ def _rewrite_customer_service_submission(text: str, *, question: str) -> str:
         cleaned = _tighten_customer_service_sentence(sentence)
         if not cleaned or len(cleaned) < 5:
             continue
+        if lead and cleaned.startswith("您好"):
+            cleaned = re.sub(r"^您好[，,]?\s*", "", cleaned)
         if _is_question_echo_sentence(cleaned, question=question):
             continue
         if any(cleaned in sub_question for sub_question in sub_questions) and len(cleaned) <= 14:
@@ -919,6 +1110,8 @@ def _rewrite_customer_service_submission(text: str, *, question: str) -> str:
         if re.search(r"(是什么|有哪些|怎么|如何|多久|吗|能不能|是否)$", cleaned):
             continue
         if any(term in cleaned for term in _GENERIC_CUSTOMER_SERVICE_REWRITE_TERMS):
+            continue
+        if _is_irrelevant_shipping_content(cleaned, question=question):
             continue
         if (
             lead
@@ -949,12 +1142,55 @@ def _rewrite_customer_service_submission(text: str, *, question: str) -> str:
             break
 
     combined: list[str] = []
+    emotion = _detect_customer_emotion(question)
+    empathy = _get_empathy_phrase(emotion)
+
     if lead:
-        combined.append(lead.strip("。"))
-    combined.extend(item.strip("。") for item in selected if item.strip("。"))
+        lead_stripped = lead.strip("。")
+        # Add empathy phrase before lead if customer is emotional
+        if empathy and not lead_stripped.startswith(("非常抱歉", "很抱歉", "理解")):
+            lead_stripped = empathy.rstrip("，") + "。" + lead_stripped
+        already_has_lead = any(
+            _normalize_sentence_key(item).startswith(_normalize_sentence_key(lead_stripped)[:12])
+            for item in selected
+        ) if selected else False
+        if not already_has_lead:
+            combined.append(lead_stripped)
+    # Filter out selected sentences that are already covered by the lead
+    filtered_selected: list[str] = []
+    for item in selected:
+        item_stripped = item.strip("。")
+        if not item_stripped:
+            continue
+        if lead and _is_covered_by_lead(item_stripped, lead.strip("。")):
+            continue
+        filtered_selected.append(item_stripped)
+    combined.extend(filtered_selected)
     if not combined:
         return text
-    return "。".join(combined).strip(" ，,；;。") + "。"
+    return _join_sentences_with_punctuation(combined)
+
+
+def _join_sentences_with_punctuation(sentences: list[str]) -> str:
+    """Join sentences with appropriate punctuation, using comma for continuations."""
+    if not sentences:
+        return ""
+    continuation_starts = ("请", "可以", "需要", "同时", "并且", "此外", "另外",
+                           "如", "如果", "若", "但", "但是", "也", "还", "再", "然后")
+    result = sentences[0]
+    for sentence in sentences[1:]:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if any(sentence.startswith(prefix) for prefix in continuation_starts):
+            result += "，" + sentence
+        elif result.endswith(("：", ":")):
+            result += sentence
+        else:
+            result += "。" + sentence
+    if not result.endswith(("。", "！", "？")):
+        result += "。"
+    return result.strip(" ，,；;。") + "。"
 
 
 def _strip_weak_leads(text: str) -> str:
@@ -989,7 +1225,77 @@ def _compress_customer_service_answer(text: str) -> str:
         if len(selected) >= 5:
             break
 
-    return "。 ".join(selected).strip()
+    return _join_sentences_with_punctuation(selected)
+
+
+def _format_as_numbered_steps(text: str, *, question: str) -> str:
+    """Format answer as numbered steps when it has multiple distinct points."""
+    if not text or len(text) < 30:
+        return text
+
+    # Don't format if already has numbered steps
+    if re.search(r"\d+\.\s", text):
+        return text
+
+    # Extract topic from lead if present
+    topic_match = re.match(r"^(?:您好[，,]?\s*)?关于(.{1,20})[：:]", text)
+    topic = ""
+    body = text
+    if topic_match:
+        topic = topic_match.group(1)
+        body = text[topic_match.end():].strip()
+
+    # Split into distinct points
+    sentences = _split_submission_sentences(body)
+    if len(sentences) < 2:
+        return text
+
+    # Check if sentences are about different aspects
+    has_different_aspects = False
+    action_verbs = ("请", "可以", "需要", "支持", "提供", "填写", "联系", "查看", "提交", "申请")
+    sentence_starts = []
+    for s in sentences[:4]:
+        for verb in action_verbs:
+            if s.startswith(verb):
+                sentence_starts.append(verb)
+                break
+        else:
+            sentence_starts.append(s[:2] if len(s) >= 2 else s)
+
+    # If we have at least 2 different starting patterns, format as steps
+    if len(set(sentence_starts[:3])) >= 2:
+        has_different_aspects = True
+
+    if not has_different_aspects:
+        return text
+
+    # Format with numbered steps
+    formatted_parts = []
+    if topic:
+        formatted_parts.append(f"关于{topic}：")
+
+    step_num = 1
+    for i, sentence in enumerate(sentences[:4]):
+        sentence = sentence.strip(" ，,；;。")
+        if not sentence:
+            continue
+        # First sentence might be a general statement, keep as intro
+        if i == 0 and not any(v in sentence for v in action_verbs):
+            formatted_parts.append(sentence)
+            continue
+        formatted_parts.append(f"{step_num}. {sentence}")
+        step_num += 1
+
+    # Add remaining sentences as supplementary notes
+    for sentence in sentences[4:6]:
+        sentence = sentence.strip(" ，,；;。")
+        if sentence:
+            formatted_parts.append(sentence)
+
+    result = "".join(formatted_parts)
+    if not result.endswith(("。", "！", "？")):
+        result += "。"
+    return result
 
 
 def _compress_submission_answer(text: str, *, question: str) -> str:
@@ -1035,7 +1341,7 @@ def _compress_submission_answer(text: str, *, question: str) -> str:
         selected_texts = [sentences[0][:limit].strip(" ，,；;。")]
     else:
         selected_texts = [sentence for _, sentence in sorted(selected_with_index)]
-    answer = "。".join(selected_texts).strip(" ，,；;。") + "。"
+    answer = _join_sentences_with_punctuation(selected_texts)
     if len(answer) > limit:
         answer = answer[:limit].rstrip(" ，,；;。") + "。"
     pic_count = min(len(re.findall(r"<PIC>", cleaned, flags=re.IGNORECASE)), MAX_PIC_MARKERS)
@@ -1056,7 +1362,7 @@ def _merge_submission_segments(segments: list[str], *, question: str) -> str:
             collected.append(cleaned)
     if not collected:
         return ""
-    merged = "。".join(collected).strip(" ，,；;。") + "。"
+    merged = _join_sentences_with_punctuation(collected)
     return _compress_submission_answer(merged, question=question)
 
 
@@ -1081,7 +1387,7 @@ def _polish_submission_text(text: str, *, question: str) -> str:
         if _is_near_duplicate_sentence(candidate, selected):
             continue
         selected.append(candidate)
-    cleaned = "。".join(selected).strip(" ，,；;。")
+    cleaned = _join_sentences_with_punctuation(selected)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" \n\r\t，,；;")
     if cleaned and not cleaned.endswith(("。", "！", "？", ".", "!", "?", ">")):
         cleaned += "。"
@@ -1146,6 +1452,40 @@ def _normalize_sentence_key(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]+", "", text.lower())
 
 
+def _is_covered_by_lead(candidate: str, lead: str) -> bool:
+    """Check if a candidate sentence is semantically covered by the lead sentence."""
+    if not lead or not candidate:
+        return False
+    cand_key = _normalize_sentence_key(candidate)
+    lead_key = _normalize_sentence_key(lead)
+    if not cand_key or not lead_key:
+        return False
+    # If lead is much longer and contains most of candidate's key info
+    if len(lead_key) >= len(cand_key) * 1.5:
+        common = sum(1 for ch in cand_key if ch in lead_key)
+        if common / max(len(cand_key), 1) >= 0.6:
+            return True
+    # Check if both mention the same core action/topic
+    action_pairs = (
+        ("申请", "退货"), ("申请", "换货"), ("申请", "退款"),
+        ("提供", "订单号"), ("提供", "照片"), ("提供", "凭证"),
+        ("填写", "抬头"), ("填写", "税号"), ("填写", "信息"),
+        ("联系", "客服"), ("联系", "人工"), ("提交", "售后"),
+        ("查看", "订单"), ("查看", "商品"), ("查看", "页面"),
+        ("核实", "处理"), ("核实", "进度"), ("安排", "补发"),
+        ("支持", "开发票"), ("支持", "开具"), ("支持", "退货"),
+        ("支持", "换货"), ("支持", "维修"), ("支持", "安装"),
+        ("发票", "抬头"), ("发票", "税号"), ("发票", "开具"),
+        ("运费", "承担"), ("运费", "免"), ("费用", "承担"),
+        ("工作日", "到账"), ("工作日", "处理"), ("工作日", "开具"),
+    )
+    for kw1, kw2 in action_pairs:
+        if (kw1 in candidate and kw2 in candidate
+                and kw1 in lead and kw2 in lead):
+            return True
+    return False
+
+
 def _is_near_duplicate_sentence(candidate: str, existing: list[str]) -> bool:
     candidate_key = _normalize_sentence_key(candidate)
     if not candidate_key:
@@ -1157,8 +1497,62 @@ def _is_near_duplicate_sentence(candidate: str, existing: list[str]) -> bool:
         if candidate_key == sentence_key:
             return True
         shorter = min(len(candidate_key), len(sentence_key))
-        if shorter >= 16 and (candidate_key in sentence_key or sentence_key in candidate_key):
+        if shorter >= 12 and (candidate_key in sentence_key or sentence_key in candidate_key):
             return True
+        if shorter >= 4:
+            common = sum(1 for ch in candidate_key if ch in sentence_key)
+            ratio = common / max(len(candidate_key), 1)
+            if ratio >= 0.6:
+                return True
+        cs_keyword_pairs = (
+            ("工作日", "到账"), ("退换货", "运费"), ("维修", "费用"),
+            ("保修", "检测"), ("补寄", "运费"), ("快递", "签收"),
+            ("发票", "抬头"), ("退款", "原路"), ("售后", "申请"),
+            ("支持", "退货"), ("支持", "换货"), ("支持", "退换货"),
+            ("订单页", "发起"), ("订单页", "售后"),
+            ("提供", "维修单号"), ("提供", "订单号"), ("提供", "照片"),
+            ("核实", "进度"), ("核实", "状态"), ("推进", "处理"),
+            ("支持", "开发票"), ("支持", "开具"),
+            ("发票", "开具"), ("发票", "电子"), ("发票", "增值税"),
+            ("申请", "退货"), ("申请", "换货"), ("申请", "退款"),
+            ("填写", "抬头"), ("填写", "税号"), ("填写", "信息"),
+            ("联系", "客服"), ("联系", "人工"), ("提交", "售后"),
+            ("查看", "订单"), ("查看", "商品"), ("查看", "页面"),
+            ("安排", "补发"), ("安排", "维修"), ("安排", "安装"),
+            ("运费", "承担"), ("运费", "免"), ("费用", "承担"),
+            ("保修期", "年"), ("保修期", "购买"), ("保修期", "保修"),
+        )
+        # Check if both sentences talk about the same topic with "支持" + topic word
+        if "支持" in candidate and "支持" in sentence:
+            candidate_topic = candidate.replace("支持", "")
+            sentence_topic = sentence.replace("支持", "")
+            if len(candidate_topic) >= 2 and len(sentence_topic) >= 2:
+                common_chars = sum(1 for ch in candidate_topic if ch in sentence_topic)
+                if common_chars >= 3:
+                    return True
+        for kw1, kw2 in cs_keyword_pairs:
+            if (kw1 in candidate and kw2 in candidate
+                    and kw1 in sentence and kw2 in sentence):
+                return True
+    return False
+
+
+_CS_IRRELEVANT_SHIPPING_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("complaint", ("运费", "偏远地区", "配送")),
+    ("quality_issue", ("运费", "偏远地区", "配送")),
+    ("after_sales", ("运费", "偏远地区", "配送")),
+)
+
+
+def _is_irrelevant_shipping_content(sentence: str, *, question: str) -> bool:
+    topic = _infer_customer_service_topic(question)
+    if not topic:
+        return False
+    for topic_name, irrelevant_terms in _CS_IRRELEVANT_SHIPPING_PATTERNS:
+        if topic == topic_name:
+            if any(term in sentence for term in irrelevant_terms):
+                if not any(term in question for term in ("运费", "配送", "物流", "快递")):
+                    return True
     return False
 
 

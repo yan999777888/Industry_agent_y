@@ -120,7 +120,7 @@ class QuestionRouter:
             has_manual_intent_hint
             and not has_platform_service_term
             and not has_hard_service_term
-            and (has_product_or_model or len(manual_terms) >= 2 or (has_explicit_howto and has_strong_manual_term))
+            and (has_product_or_model or len(manual_terms) >= 2 or has_explicit_howto or has_strong_manual_term)
         )
 
         if has_product_or_model and has_strong_manual_term:
@@ -141,7 +141,7 @@ class QuestionRouter:
                 reason="prefer_manual_rag_with_manual_signal",
             )
 
-        if service_score >= max(2, manual_score + 1):
+        if service_score >= max(4, manual_score + 2):
             return RouteDecision(
                 route="customer_service",
                 confidence=min(0.65 + service_score * 0.06, 0.95),

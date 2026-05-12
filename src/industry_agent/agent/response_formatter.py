@@ -34,6 +34,10 @@ def format_manual_answer(answer: str, *, image_ids: list[str], compact: bool = F
 
     sections = _parse_sections(_normalize_section_labels(text))
     if not sections:
+        # No section headers found — return natural prose as-is, just clean it up
+        cleaned = re.sub(r"\n{3,}", "\n\n", text).strip()
+        if cleaned:
+            return cleaned
         sections = _build_sections_from_plain_text(text)
 
     sections = _fill_missing_sections(sections)

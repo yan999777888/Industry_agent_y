@@ -19,37 +19,50 @@ except ImportError:  # pragma: no cover - optional dependency
     Image = None  # type: ignore[assignment]
 
 
-VISION_PROMPT_TEMPLATE = """\
-请根据这张用户上传的产品图片，输出简短描述，帮助客服检索相关说明书内容。要求：
-1. 只描述图片里可以直接观察到的内容，不要编造。
-2. 优先关注产品类型、部件、按钮、指示灯、接口、屏幕、故障现象、安装位置。
-3. 控制在 1-2 句话，使用中文。
-4. 如果看不清，请明确说明“图片信息有限”。
+VISION_PROMPT_TEMPLATE = (
+    "请根据这张用户上传的产品图片，输出简短描述，帮助客服检索相关说明书内容。要求：\n"
+    "1. 只描述图片里可以直接观察到的内容，不要编造。\n"
+    "2. 优先关注产品类型、品牌、型号、部件名称、按钮、指示灯颜色和状态、接口类型、屏幕显示内容、故障现象、安装位置。\n"
+    "3. 如果能识别出产品型号或品牌，务必在描述中提及。\n"
+    "4. 控制在 2-3 句话，使用中文。\n"
+    "5. 如果看不清，请明确说明“图片信息有限”。\n"
+    "\n"
+    "用户问题：{question}\n"
+)
 
-用户问题：{question}
-"""
 _NOISY_VISUAL_TERMS: set[str] = {
-    "图片", "图像", "画面", "设备", "这个", "那个", "其中", "一个", "一些",
-    "可能", "显示", "看到", "部分", "区域", "部件", "位置", "东西", "起来",
-    "相关", "用户", "上传", "内容", "信息", "里的", "中的", "具有", "通过",
-    "可以", "用于", "以及", "还有", "这张", "该图像", "该设备", "一个电子设备",
+    "图片", "图像", "画面", "设备", "这个", "那个",
+    "其中", "一个", "一些", "可能", "显示",
+    "看到", "部分", "区域", "部件", "位置",
+    "东西", "起来", "相关", "用户", "上传",
+    "内容", "信息", "里的", "中的", "具有",
+    "通过", "可以", "用于", "以及", "还有",
+    "这张", "该图像", "该设备", "一个电子设备",
     "电子", "电子设备",
 }
 _VISUAL_DOMAIN_HINTS: tuple[str, ...] = (
-    "指示灯", "按钮", "接口", "屏幕", "电池", "充电", "开关", "表带", "卡扣",
-    "旋钮", "插槽", "线缆", "红灯", "蓝灯", "闪烁", "裂纹", "破损", "划痕",
+    "指示灯", "按钮", "接口", "屏幕",
+    "电池", "充电", "开关", "表带",
+    "卡扣", "旋钮", "插槽", "线缆",
+    "红灯", "蓝灯", "闪烁",
+    "裂纹", "破损", "划痕",
 )
 _VISUAL_COMPONENT_TERMS: tuple[str, ...] = (
-    "指示灯", "按钮", "接口", "屏幕", "电池", "充电器", "电池组", "开关",
-    "表带", "卡扣", "旋钮", "插槽", "线缆", "显示屏", "端口", "插头",
+    "指示灯", "按钮", "接口", "屏幕",
+    "电池", "充电器", "电池组", "开关",
+    "表带", "卡扣", "旋钮", "插槽",
+    "线缆", "显示屏", "端口", "插头",
 )
 _VISUAL_STATUS_TERMS: tuple[str, ...] = (
-    "红灯", "蓝灯", "绿灯", "闪烁", "发亮", "熄灭", "松动", "脱落", "安装",
-    "拆卸", "充电", "断开", "连接", "锁定", "卡住",
+    "红灯", "蓝灯", "绿灯", "闪烁",
+    "发亮", "熄灭", "松动", "脱落",
+    "安装", "拆卸", "充电", "断开",
+    "连接", "锁定", "卡住",
 )
 _VISUAL_ISSUE_TERMS: tuple[str, ...] = (
-    "裂纹", "破损", "划痕", "烧焦", "变形", "故障", "报警", "漏水", "异响",
-    "发热", "过热", "污渍",
+    "裂纹", "破损", "划痕", "烧焦",
+    "变形", "故障", "报警", "漏水",
+    "异响", "发热", "过热", "污渍",
 )
 
 
@@ -59,8 +72,8 @@ class ImageObservation:
     format: str
     mime_type: str
     file_size: int
-    width: int | None = None
-    height: int | None = None
+    width: int = None  # type: ignore[assignment]
+    height: int = None  # type: ignore[assignment]
     summary: str = ""
     visual_summary: str = ""
     source: str = "metadata"
@@ -70,15 +83,15 @@ class ImageObservation:
 @dataclass(frozen=True)
 class ImageUnderstandingResult:
     has_image_input: bool
-    observations: list[ImageObservation] = field(default_factory=list)
+    observations: list = field(default_factory=list)  # list[ImageObservation]
     combined_summary: str = ""
     retrieval_hint: str = ""
-    retrieval_terms: list[str] = field(default_factory=list)
-    visual_features: dict[str, list[str]] = field(default_factory=dict)
+    retrieval_terms: list = field(default_factory=list)  # list[str]
+    visual_features: dict = field(default_factory=dict)  # dict[str, list[str]]
     used_vision_model: str = ""
-    warnings: list[str] = field(default_factory=list)
+    warnings: list = field(default_factory=list)  # list[str]
 
-    def to_debug_dict(self) -> dict[str, Any]:
+    def to_debug_dict(self) -> dict:
         return {
             "has_image_input": self.has_image_input,
             "combined_summary": self.combined_summary,
@@ -97,28 +110,28 @@ class ImageUnderstander:
     def __init__(
         self,
         *,
-        base_url: str,
-        http_client: Any = None,
-        vision_model: str | None = None,
-        max_vision_images: int = 1,
+        base_url,
+        http_client=None,
+        vision_model=None,
+        max_vision_images=2,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.http_client = http_client
         self.vision_model = (vision_model or os.getenv("OLLAMA_VISION_MODEL", "")).strip()
         self.max_vision_images = max_vision_images
 
-    def analyze_images(self, images: list[str] | None, *, question: str = "") -> ImageUnderstandingResult:
+    def analyze_images(self, images, *, question=""):
         if not images:
             return ImageUnderstandingResult(has_image_input=False)
 
-        observations: list[ImageObservation] = []
-        warnings: list[str] = []
-        caption_inputs: list[tuple[int, str]] = []
+        observations = []
+        warnings = []
+        caption_inputs = []
 
         for index, raw_image in enumerate(images, start=1):
             decoded = _decode_base64_image(raw_image)
             if decoded is None:
-                warning = f"图片{index} 不是有效的 Base64 图像数据"
+                warning = "图片%d 不是有效的 Base64 图像数据" % index
                 observations.append(
                     ImageObservation(
                         image_index=index,
@@ -173,6 +186,8 @@ class ImageUnderstander:
                         "source": "ollama_vision",
                     }
                 )
+        elif caption_inputs:
+            warnings.append("视觉模型不可用，仅使用图片元数据进行检索")
 
         combined_summary = "；".join(
             _build_combined_summary_text(item) for item in observations if item.summary or item.visual_summary
@@ -191,15 +206,15 @@ class ImageUnderstander:
             warnings=warnings,
         )
 
-    def _can_use_vision(self) -> bool:
+    def _can_use_vision(self):
         return bool(self.vision_model and self.http_client is not None)
 
-    def _caption_image(self, base64_payload: str, *, question: str) -> str:
+    def _caption_image(self, base64_payload, *, question):
         if not self._can_use_vision():
             return ""
         try:
             response = self.http_client.post(
-                f"{self.base_url}/api/generate",
+                "%s/api/generate" % self.base_url,
                 json={
                     "model": self.vision_model,
                     "prompt": VISION_PROMPT_TEMPLATE.format(question=question or "请描述这张图片"),
@@ -207,7 +222,7 @@ class ImageUnderstander:
                     "stream": False,
                     "options": {
                         "temperature": 0.1,
-                        "num_predict": 160,
+                        "num_predict": 256,
                     },
                 },
             )
@@ -221,9 +236,9 @@ class ImageUnderstander:
         content = re.sub(r"^\d+\.\s*", "", content)
         content = re.sub(r"\s*\d+\.\s*", "；", content)
         content = re.sub(r"；+", "；", content)
-        return content[:200]
+        return content[:300]
 
-    def _extract_visual_features(self, *, question: str, observations: list[ImageObservation]) -> dict[str, list[str]]:
+    def _extract_visual_features(self, *, question, observations):
         visual_text = " ".join(
             item.visual_summary
             for item in observations
@@ -259,7 +274,7 @@ class ImageUnderstander:
             "other_terms": other_terms[:4],
         }
 
-    def _build_retrieval_terms(self, *, visual_features: dict[str, list[str]]) -> list[str]:
+    def _build_retrieval_terms(self, *, visual_features):
         return _unique(
             [
                 *visual_features.get("component_terms", []),
@@ -269,12 +284,12 @@ class ImageUnderstander:
             ]
         )[:8]
 
-    def _build_retrieval_hint(self, *, question: str, observations: list[ImageObservation]) -> str:
+    def _build_retrieval_hint(self, *, question, observations):
         visual_features = self._extract_visual_features(question=question, observations=observations)
         return " ".join(self._build_retrieval_terms(visual_features=visual_features))
 
 
-def _decode_base64_image(value: str) -> tuple[bytes, str] | None:
+def _decode_base64_image(value):
     text = value.strip()
     if not text:
         return None
@@ -293,7 +308,7 @@ def _decode_base64_image(value: str) -> tuple[bytes, str] | None:
         return None
 
 
-def _detect_image_type(image_bytes: bytes) -> tuple[str, str]:
+def _detect_image_type(image_bytes):
     if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
         return "PNG", "image/png"
     if image_bytes.startswith(b"\xff\xd8"):
@@ -305,11 +320,10 @@ def _detect_image_type(image_bytes: bytes) -> tuple[str, str]:
     return "UNKNOWN", "application/octet-stream"
 
 
-def _read_image_size(image_bytes: bytes, format_name: str) -> tuple[int | None, int | None]:
-    if Image is not None:  # pragma: no branch - tiny utility
+def _read_image_size(image_bytes, format_name):
+    if Image is not None:
         try:
             from io import BytesIO
-
             with Image.open(BytesIO(image_bytes)) as image:
                 return int(image.width), int(image.height)
         except Exception:
@@ -328,7 +342,7 @@ def _read_image_size(image_bytes: bytes, format_name: str) -> tuple[int | None, 
     return None, None
 
 
-def _read_jpeg_size(image_bytes: bytes) -> tuple[int | None, int | None]:
+def _read_jpeg_size(image_bytes):
     offset = 2
     length = len(image_bytes)
     while offset + 9 < length:
@@ -353,7 +367,7 @@ def _read_jpeg_size(image_bytes: bytes) -> tuple[int | None, int | None]:
     return None, None
 
 
-def _read_webp_size(image_bytes: bytes) -> tuple[int | None, int | None]:
+def _read_webp_size(image_bytes):
     if len(image_bytes) < 30:
         return None, None
     chunk_type = image_bytes[12:16]
@@ -367,27 +381,21 @@ def _read_webp_size(image_bytes: bytes) -> tuple[int | None, int | None]:
     return None, None
 
 
-def _build_metadata_summary(
-    *,
-    image_index: int,
-    format_name: str,
-    mime_type: str,
-    file_size: int,
-    width: int | None,
-    height: int | None,
-) -> str:
-    size_text = f"{file_size / 1024:.1f}KB" if file_size >= 1024 else f"{file_size}B"
-    dims_text = f"{width}x{height}" if width and height else "未知尺寸"
-    return f"上传图片{image_index}：格式 {format_name}（{mime_type}），尺寸 {dims_text}，大小 {size_text}"
+def _build_metadata_summary(*, image_index, format_name, mime_type, file_size, width, height):
+    size_text = "%.1fKB" % (file_size / 1024) if file_size >= 1024 else "%dB" % file_size
+    dims_text = "%dx%d" % (width, height) if width and height else "未知尺寸"
+    return "上传图片%d：格式 %s（%s），尺寸 %s，大小 %s" % (
+        image_index, format_name, mime_type, dims_text, size_text
+    )
 
 
-def _build_combined_summary_text(observation: ImageObservation) -> str:
+def _build_combined_summary_text(observation):
     if observation.visual_summary:
-        return f"{observation.summary}。视觉描述：{observation.visual_summary}"
+        return "%s。视觉描述：%s" % (observation.summary, observation.visual_summary)
     return observation.summary
 
 
-def _clean_visual_summary(text: str) -> str:
+def _clean_visual_summary(text):
     cleaned = text.strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
     cleaned = re.sub(r"(图片中|图像中|该图像显示了|该设备还有|可以通过连接线来控制|可能是)", " ", cleaned)
@@ -395,7 +403,7 @@ def _clean_visual_summary(text: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
-def _is_useful_visual_keyword(keyword: str, *, question: str) -> bool:
+def _is_useful_visual_keyword(keyword, *, question):
     term = keyword.strip()
     if not term or len(term) < 2:
         return False
@@ -405,16 +413,14 @@ def _is_useful_visual_keyword(keyword: str, *, question: str) -> bool:
         return False
     if "图片" in term or "图像" in term:
         return False
-    if term in question:
-        return False
     if re.fullmatch(r"[0-9A-Za-z]+", term) and len(term) < 3:
         return False
     return True
 
 
-def _unique(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
+def _unique(values):
+    seen = set()
+    result = []
     for value in values:
         text = str(value).strip()
         if not text or text in seen:

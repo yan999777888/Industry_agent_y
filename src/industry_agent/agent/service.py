@@ -43,8 +43,8 @@ RETRIEVAL_LIMIT = 10        # chunks to retrieve before evidence filtering
 FINAL_CONTEXT_CHUNKS = 5    # chunks passed into the LLM
 MAX_CONTEXT_CHARS = 6000    # truncate context to fit model window
 MAX_HISTORY_TURNS = 5       # keep last N turns per session
-MIN_TOP_SCORE = 6.0         # below this, do not ask LLM to hallucinate
-MIN_KEEP_SCORE = 4.0        # chunks below this score are discarded
+MIN_TOP_SCORE = 3.0         # below this, do not ask LLM to hallucinate
+MIN_KEEP_SCORE = 2.0        # chunks below this score are discarded
 MULTIMODAL_RETRIEVAL_LIMIT = 6
 
 OLLAMA_BASE_URL = settings.ollama_base_url
@@ -235,6 +235,8 @@ def _should_use_extractive_manual_answer(answer: str) -> bool:
     if not normalized:
         return True
     if _is_manual_fallback_answer(normalized):
+        return True
+    if len(re.sub(r"\s+", "", normalized)) < 6:
         return True
     return any(pattern.search(normalized) for pattern in _STRONG_MANUAL_REFUSAL_PATTERNS)
 
@@ -809,21 +811,23 @@ def _filter_evidence_for_query(
             chunk_query_overlap = int(chunk.get("_query_overlap", 0))
             chunk_image_overlap = int(chunk.get("_image_overlap", 0))
             chunk_variant_hits = int(chunk.get("_variant_hits", 0))
-            overlap_threshold = max(2, top_query_overlap)
+            overlap_threshold = max(1, top_query_overlap)
             if query_has_explicit_product:
-                continue
-            if cross_product_kept >= 2:
+                if chunk_query_overlap < 2:
+                    continue
+            if cross_product_kept >= 3:
                 continue
             strong_query_alignment = chunk_query_overlap >= overlap_threshold
             strong_image_alignment = chunk_image_overlap > 0 and chunk_image_overlap >= top_image_overlap
-            near_top_score = score >= top_score - 1.2
+            near_top_score = score >= top_score - 2.0
             variant_rescue = (
-                chunk_variant_hits >= 2
+                chunk_variant_hits >= 1
                 and chunk_query_overlap >= overlap_threshold
-                and score >= top_score - 1.8
+                and score >= top_score - 2.5
             )
             if not ((strong_query_alignment and near_top_score) or strong_image_alignment or variant_rescue):
-                continue
+                if chunk_query_overlap < 1:
+                    continue
         title_key = _title_key(str(chunk.get("title", "")))
         if title_key and title_key in seen_titles:
             continue
@@ -1152,6 +1156,9 @@ class AgentService:
             image_features=image_features,
         )
 
+        if not evidence_chunks and chunks:
+            evidence_chunks = chunks[:3]
+
         if not evidence_chunks:
             return {
                 "answer": "根据现有资料无法回答此问题。请补充更明确的产品名称、型号、故障现象或图片后再试。",
@@ -1170,7 +1177,7 @@ class AgentService:
                     else {},
                     "image_terms": image_terms or [],
                     "image_features": image_features or {},
-                    "reason": "low_confidence_or_no_evidence",
+                    "reason": "no_chunks_retrieved",
                 },
             }
 
@@ -1192,21 +1199,21 @@ class AgentService:
 
         messages.append({"role": "user", "content": query})
 
-        # 4. Call LLM
+        # 4. Call LLM — always try LLM first, extractive only as last resort
         extractive_answer = _build_extractive_manual_answer(
             query=query,
             evidence_chunks=evidence_chunks,
             image_ids=image_ids,
         )
-        if _should_force_extractive_manual_answer(query):
+        answer = self._call_llm(messages)
+        if answer and not answer.startswith("LLM 调用失败:"):
+            answer = _strip_thinking(answer)
+        if not answer or answer.startswith("LLM 调用失败:") or len(answer.strip()) < 8:
+            answer = extractive_answer
+        elif _should_use_extractive_manual_answer(answer):
             answer = extractive_answer
         else:
-            answer = self._call_llm(messages)
             answer = format_manual_answer(answer, image_ids=[], compact=True)
-            if _should_use_extractive_manual_answer(answer) or _should_prefer_english_extractive_answer(answer, query=query):
-                answer = extractive_answer
-            elif _manual_answer_needs_evidence_rescue(answer, query=query, evidence_chunks=evidence_chunks):
-                answer = extractive_answer or answer
 
         grounded_image_ids = _select_grounded_manual_image_ids(
             query=query,
