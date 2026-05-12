@@ -29,7 +29,7 @@ class Settings:
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     ollama_model: str = os.getenv("OLLAMA_MODEL", "qwen3.5:2b")
     ollama_vision_model: str = os.getenv("OLLAMA_VISION_MODEL", "llava-phi3")
-    llm_api_key: str = os.getenv("LLM_API_KEY", "sk-c84wz3qtc6sheag1leero7r2i4o8l9g7zowvy8ej0eiva7qd")
+    llm_api_key: str = os.getenv("LLM_API_KEY", "")
     llm_base_url: str = os.getenv("LLM_BASE_URL", "https://api.xiaomimimo.com/v1")
     llm_model: str = os.getenv("LLM_MODEL", "mimo-v2-flash")
     llm_vision_model: str = os.getenv("LLM_VISION_MODEL", "mimo-v2.5")
