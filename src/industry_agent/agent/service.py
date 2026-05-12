@@ -305,93 +305,59 @@ def _clean_manual_markers(text: str) -> str:
 def _build_conversational_answer(query: str, evidence_chunks: list, image_ids: list) -> str:
     """Build a clean, conversational customer service answer from evidence chunks.
 
-    Strategy: try top chunks, extract the most relevant sentences.
-    Score sentences by keyword overlap with the query.
+    Strategy: use the TOP-1 chunk from retrieval (already ranked by relevance).
+    Extract the most informative sentence(s) from it.
     """
     if not evidence_chunks:
         return "您好，根据现有资料，暂时无法提供更详细的信息。如需帮助随时联系我们。"
 
-    # Extract query keywords for relevance scoring
-    query_chars = set(query)
-    query_terms = set()
-    for term in re.findall(r"[一-鿿]{2,}", query):
-        query_terms.add(term)
-    # Also add individual chars for short queries
-    for char in query:
-        if "一" <= char <= "鿿":
-            query_chars.add(char)
+    # Always use top-1 chunk (retriever already ranked by relevance)
+    top_chunk = evidence_chunks[0]
+    text = str(top_chunk.get("text", ""))
+    text = _clean_manual_markers(text)
 
-    best_answer = None
-    best_score = -1
-
-    # Try top 3 chunks, pick the one with best sentences
-    for chunk in evidence_chunks[:3]:
-        text = str(chunk.get("text", ""))
-        text = _clean_manual_markers(text)
-
-        # Split into sentences
-        sentences = re.split(r"[。！？]", text)
-        scored_sentences: list[tuple[float, str]] = []
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence or len(sentence) < 8:
-                continue
-            # Skip pure headers/labels (short text without punctuation)
-            if len(sentence) < 15 and not any(c in sentence for c in "，。、："):
-                continue
-            # Skip manual-style fragments
-            if re.match(r"^(图\d+|第\d+页|注[：:])", sentence):
-                continue
-            # Skip list-like text (space-separated items without verbs)
-            if re.match(r"^[一-鿿\s]+$", sentence) and len(sentence.split()) > 3:
-                continue
-
-            # Score sentence by relevance to query
-            score = 0.0
-            for term in query_terms:
-                if term in sentence:
-                    score += 2.0
-            for char in query_chars:
-                if char in sentence:
-                    score += 0.5
-            # Prefer medium-length sentences (not too short, not too long)
-            if 20 <= len(sentence) <= 100:
-                score += 1.0
-            # Penalize very short sentences
-            if len(sentence) < 15:
-                score -= 1.0
-
-            scored_sentences.append((score, sentence))
-
-        if not scored_sentences:
+    # Split into sentences
+    sentences = re.split(r"[。！？]", text)
+    clean_sentences: list[str] = []
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence or len(sentence) < 8:
             continue
+        # Skip pure headers/labels (short text without punctuation)
+        if len(sentence) < 15 and not any(c in sentence for c in "，。、："):
+            continue
+        # Skip manual-style fragments
+        if re.match(r"^(图\d+|第\d+页|注[：:])", sentence):
+            continue
+        # Skip list-like text (space-separated items without verbs)
+        if re.match(r"^[一-鿿\s]+$", sentence) and len(sentence.split()) > 3:
+            continue
+        # Skip section headers (e.g., "化油器调节（19）", "停机")
+        # Headers are short, contain only Chinese chars and punctuation, no verbs
+        if len(sentence) < 20 and not any(c in sentence for c in "通过使用进行可以需要应该"):
+            if re.match(r"^[一-鿿\s（）\(\)\d\.、]+$", sentence):
+                continue
+        # Remove leading section title from sentences (e.g., "停机 通过停机开关..." -> "通过停机开关...")
+        # Title is typically 2-6 Chinese chars at the start
+        sentence = re.sub(r"^[一-鿿]{2,6}[（）\(\)\d]*\s+", "", sentence)
+        # Remove leading numbered list markers (e.g., "1. 仅在..." -> "仅在...")
+        sentence = re.sub(r"^\d+[\.\、]\s*", "", sentence)
+        if not sentence or len(sentence) < 8:
+            continue
+        clean_sentences.append(sentence)
 
-        # Sort by score descending
-        scored_sentences.sort(key=lambda x: x[0], reverse=True)
+    if not clean_sentences:
+        # Fallback to chunk title
+        title = _clean_manual_markers(str(top_chunk.get("title", "")))
+        return f"您好，{title}。如需帮助随时联系我们。"
 
-        # Take top 2 sentences
-        selected = [s for _, s in scored_sentences[:2]]
-        answer_body = "。".join(selected)
-        if not answer_body.endswith(("。", "！", "？")):
-            answer_body += "。"
-        candidate = f"您好，{answer_body}如需帮助随时联系我们。"
+    # Take first 1-2 substantive sentences
+    selected = clean_sentences[:2]
+    answer_body = "。".join(selected)
+    if not answer_body.endswith(("。", "！", "？")):
+        answer_body += "。"
 
-        # Score this candidate
-        total_score = sum(score for score, _ in scored_sentences[:2])
-        if total_score > best_score:
-            best_score = total_score
-            best_answer = candidate
-
-    if best_answer and best_score > 0:
-        return best_answer
-
-    # Fallback: use chunk title
-    for chunk in evidence_chunks[:3]:
-        title = _clean_manual_markers(str(chunk.get("title", "")))
-        if title and len(title) > 5:
-            return f"您好，{title}。如需帮助随时联系我们。"
-
-    return "您好，根据现有资料，暂时无法提供更详细的信息。如需帮助随时联系我们。"
+    return f"您好，{answer_body}如需帮助随时联系我们。"
 
 
 def _validate_answer_grounding(context: str, answer: str) -> tuple[bool, float]:
