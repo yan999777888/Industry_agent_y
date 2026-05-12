@@ -152,141 +152,144 @@ def _strip_thinking(text: str) -> str:
 
 
 def _is_raw_manual_text(text: str) -> bool:
-    """Detect if the answer is raw manual text that needs reformatting."""
-    if not text or len(text.strip()) < 20:
-        return False
+    """Detect if the answer is raw manual text (NOT natural customer service).
 
-    # Remove greeting prefix for pattern matching
-    text_stripped = text.strip()
-    text_for_matching = text_stripped
-    for prefix in ["您好，", "你好，", "Hello,", "Hi,", "Hello! ", "Hi! "]:
-        if text_stripped.startswith(prefix):
-            text_for_matching = text_stripped[len(prefix):].strip()
-            break
-
-    # Check for common raw manual text patterns
-    raw_patterns = [
-        r"^#",  # Starts with "#" header
-        r"^##",  # Starts with "##" header
-        r"^安装\s",  # Starts with "安装"
-        r"^注意\s",  # Starts with "注意"
-        r"^使用前\s",  # Starts with "使用前"
-        r"^操作步骤\s",  # Starts with "操作步骤"
-        r"^安全须知\s",  # Starts with "安全须知"
-        r"^维护保养\s",  # Starts with "维护保养"
-        r"^故障排除\s",  # Starts with "故障排除"
-        r"^规格参数\s",  # Starts with "规格参数"
-        r"^产品说明\s",  # Starts with "产品说明"
-        r"^使用说明\s",  # Starts with "使用说明"
-        r"^注意事项\s",  # Starts with "注意事项"
-        r"^安装前请",  # Starts with "安装前请"
-        r"^请确保",  # Starts with "请确保"
-        r"^请勿",  # Starts with "请勿"
-        r"^必须",  # Starts with "必须"
-        r"^应由",  # Starts with "应由"
-        r"^不得",  # Starts with "不得"
-        r"^不得拆卸",  # Starts with "不得拆卸"
-        r"^不得维修",  # Starts with "不得维修"
-        r"^不得改装",  # Starts with "不得改装"
-        r"^部分.*型号",  # "部分XX型号"
-        r"^安全装置",  # Starts with "安全装置"
-        r"^操作前",  # Starts with "操作前"
-        r"^亮碟剂",  # Starts with "亮碟剂"
-        r"^运动曲线",  # Starts with "运动曲线"
-        r"^在线注册",  # Starts with "在线注册"
-        r"^制造商",  # Starts with "制造商"
-        r"^发电机",  # Starts with "发电机"
-        r"^蓝牙设备",  # Starts with "蓝牙设备"
-        r"^装入",  # Starts with "装入"
-        r"^Docking",  # Starts with "Docking"
-        r"^When charging",  # Starts with "When charging"
-        r"^基础.*设置",  # "基础设置"
-        r"^高速油针",  # "高速油针"
-        r"^心率控制",  # "心率控制"
-        r"^1年免费服务",  # "1年免费服务"
-        r"^3年免费服务",  # "3年免费服务"
-        r"^通过运动应用",  # "通过运动应用"
-        r"^维修\s",  # Starts with "维修"
-        r"^餐具出现",  # "餐具出现"
-        r"^含铝",  # "含铝"
-    ]
-
-    for pattern in raw_patterns:
-        if re.match(pattern, text_for_matching):
-            return True
-
-    # Check if text contains multiple manual-style sentences
-    sentences = re.split(r"[。！？]", text_for_matching)
-    manual_count = 0
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        if any(re.match(p, sentence) for p in raw_patterns):
-            manual_count += 1
-    if manual_count >= 2:
+    Uses a whitelist approach: if the text doesn't start with natural
+    conversational Chinese, it's treated as raw manual text.
+    """
+    if not text or len(text.strip()) < 10:
         return True
 
-    return False
-
-
-def _reformat_raw_manual_text(text: str, query: str) -> str:
-    """Reformat raw manual text into a customer service style response."""
-    if not text:
-        return text
-
-    # Clean up the text
-    cleaned = text.strip()
+    text_stripped = text.strip()
 
     # Remove greeting prefix
-    for prefix in ["您好，", "你好，", "Hello,", "Hi,", "Hello! ", "Hi! "]:
-        if cleaned.startswith(prefix):
-            cleaned = cleaned[len(prefix):].strip()
+    text_after_greeting = text_stripped
+    for prefix in ["您好，", "您好！", "你好，", "你好！", "Hello,", "Hi,"]:
+        if text_stripped.startswith(prefix):
+            text_after_greeting = text_stripped[len(prefix):].strip()
             break
 
-    # Remove "#" headers and "第X页" references
+    # Blacklist: manual markers that should NEVER appear in natural CS text
+    manual_markers = [
+        "#", ">>>", "・", "注：", "注:", "第", "页",
+        "章节", "产品概述", "维护保养",
+    ]
+    for marker in manual_markers:
+        if marker in text_after_greeting[:50]:
+            return True
+
+    # Whitelist: natural conversational openers after greeting
+    natural_prefixes = [
+        "关于", "对于", "针对", "您问的", "您说的",
+        "根据", "按照", "建议", "可以", "需要",
+        "是的", "好的", "没问题",
+        "这款", "这个", "该", "这",
+        "如果", "要是", "当",
+        "一般来说", "通常", "正常情况下",
+        "非常抱歉", "理解", "感谢",
+        "不支持", "支持", "可以的", "不可以",
+        "主要", "核心", "关键",
+        "使用", "操作", "打开", "关闭", "启动", "停止",
+        "清洗", "清洁", "保养", "维护",
+        "安装", "拆卸", "更换", "连接",
+        "充电", "电池", "电源",
+        "退货", "退款", "换货", "维修",
+    ]
+
+    # Check if answer starts with natural conversational text
+    for prefix in natural_prefixes:
+        if text_after_greeting.startswith(prefix):
+            # Additional check: does it look like a section title?
+            # Section titles are short and don't have natural sentence structure
+            first_sentence_end = -1
+            for end_char in ["。", "！", "？", "，"]:
+                pos = text_after_greeting.find(end_char)
+                if pos > 0:
+                    if first_sentence_end == -1 or pos < first_sentence_end:
+                        first_sentence_end = pos
+
+            if first_sentence_end > 0:
+                first_sentence = text_after_greeting[:first_sentence_end]
+                # If first sentence is very short (< 15 chars), likely a title
+                if len(first_sentence) < 15:
+                    return True
+            return False
+
+    # If none of the natural prefixes match, check for common manual patterns
+    # Manual text often starts with product-specific terms followed by content
+    manual_start_patterns = [
+        r"^[A-Z]",  # English start (manual section names)
+        r"^\d+[\.、）\)]",  # Numbered lists
+        r"^[一-龥]{1,4}[C\s]",  # Short Chinese + C marker
+    ]
+    for pattern in manual_start_patterns:
+        if re.match(pattern, text_after_greeting):
+            return True
+
+    # Default: if the text doesn't match any natural prefix, treat as raw
+    return True
+
+
+def _clean_manual_markers(text: str) -> str:
+    """Strip manual text markers to produce clean, readable text."""
+    cleaned = text.strip()
+    # Remove "#" headers
     cleaned = re.sub(r"^#\s*", "", cleaned)
-    cleaned = re.sub(r"^##\s*", "", cleaned)
+    cleaned = re.sub(r"\n#\s*", "\n", cleaned)
+    # Remove "C " markers (manual section connectors)
+    cleaned = re.sub(r"\s+C\s+", " ", cleaned)
+    # Remove ">>>" markers
+    cleaned = re.sub(r"\s*>>>\s*", " ", cleaned)
+    # Remove "・" bullet markers
+    cleaned = cleaned.replace("・", "")
+    # Remove "注：" and "注:" markers
+    cleaned = re.sub(r"注[：:]\s*", "", cleaned)
+    # Remove page references
     cleaned = re.sub(r"第\s*\d+\s*页", "", cleaned)
     cleaned = re.sub(r"见第\s*\d+\s*页.*?部分", "", cleaned)
     cleaned = re.sub(r"详见.*?章节", "", cleaned)
+    # Remove image references
+    cleaned = re.sub(r"\(相关配图：[^)]*\)", "", cleaned)
+    # Remove manual-style line breaks
+    cleaned = re.sub(r"\n{2,}", "。", cleaned)
+    cleaned = re.sub(r"\n", "", cleaned)
+    # Clean up extra spaces
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip(" -|。")
 
-    # Split into sentences
-    sentences = re.split(r"[。！？]", cleaned)
-    sentences = [s.strip() for s in sentences if s.strip()]
 
-    if not sentences:
-        return "您好，暂时无法提供更详细的信息。如需帮助随时联系我们。"
+def _build_conversational_answer(query: str, evidence_chunks: list, image_ids: list) -> str:
+    """Build a clean, conversational customer service answer from evidence chunks."""
+    if not evidence_chunks:
+        return "您好，根据现有资料，暂时无法提供更详细的信息。如需帮助随时联系我们。"
 
-    # Build a customer service response
-    result_parts = ["您好，"]
+    # Extract the most relevant sentences from evidence
+    all_sentences: list[str] = []
+    for chunk in evidence_chunks[:3]:
+        text = str(chunk.get("text", ""))
+        text = _clean_manual_markers(text)
+        sentences = re.split(r"[。！？]", text)
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence or len(sentence) < 8:
+                continue
+            # Skip pure headers/labels
+            if len(sentence) < 15 and not any(c in sentence for c in "，。、"):
+                continue
+            all_sentences.append(sentence)
 
-    # Process sentences - take first 2-3 most relevant ones
-    for i, sentence in enumerate(sentences[:4]):
-        if not sentence:
-            continue
-        # Skip very short sentences
-        if len(sentence) < 5:
-            continue
-        # Skip sentences that are just headers or labels
-        if re.match(r"^(安装|注意|使用前|操作步骤|安全须知|维护保养|故障排除|规格参数|产品说明|使用说明|注意事项|基础.*设置|高速油针|心率控制|1年免费服务|3年免费服务|通过运动应用|维修|餐具出现|含铝|追踪睡眠)\s*$", sentence):
-            continue
-        # Skip sentences with "#" or "##"
-        if "#" in sentence:
-            continue
-        result_parts.append(sentence)
-        if len(result_parts) >= 3:  # Take first 2-3 substantial sentences
-            break
+    if not all_sentences:
+        # Fallback to first chunk title
+        first_title = _clean_manual_markers(str(evidence_chunks[0].get("title", "")))
+        return f"您好，关于您咨询的问题，{first_title}。如需帮助随时联系我们。"
 
-    # Join and add ending
-    if result_parts:
-        result = "。".join(result_parts) if len(result_parts) > 1 else result_parts[0]
-        if not result.endswith(("。", "！", "？")):
-            result += "。"
-    else:
-        result = text
+    # Take the first 2-3 most relevant sentences
+    selected = all_sentences[:3]
+    answer_body = "。".join(selected)
+    if not answer_body.endswith(("。", "！", "？")):
+        answer_body += "。"
 
-    return result
+    return f"您好，{answer_body}如需帮助随时联系我们。"
 
 
 def _validate_answer_grounding(context: str, answer: str) -> tuple[bool, float]:
@@ -1701,36 +1704,39 @@ class AgentService:
 
         messages.append({"role": "user", "content": query})
 
-        # 4. Call LLM — always try LLM first, extractive only as last resort
-        extractive_answer = _build_extractive_manual_answer(
+        # 4. Build conversational answer from evidence (primary path)
+        conversational_answer = _build_conversational_answer(
             query=query,
             evidence_chunks=evidence_chunks,
             image_ids=image_ids,
         )
+
+        # Try LLM, but only keep if it passes whitelist check
         answer = self._call_llm(messages)
         if answer and not answer.startswith("LLM 调用失败:"):
             answer = _strip_thinking(answer)
-        if not answer or answer.startswith("LLM 调用失败:") or len(answer.strip()) < 8:
-            answer = extractive_answer
-        elif _should_use_extractive_manual_answer(answer):
-            answer = extractive_answer
-        elif _is_raw_manual_text(answer):
-            # LLM returned raw manual text - use extractive answer instead
-            answer = extractive_answer
-        else:
+
+        use_llm = False
+        if answer and not answer.startswith("LLM 调用失败:") and len(answer.strip()) >= 10:
+            if not _is_raw_manual_text(answer) and not _should_use_extractive_manual_answer(answer):
+                use_llm = True
+
+        if use_llm:
             answer = format_manual_answer(answer, image_ids=[], compact=True)
+        else:
+            answer = conversational_answer
 
         # Topic validation - check if answer is actually relevant to the question
         is_relevant, relevance_score = _validate_topic_relevance(query, answer)
         if not is_relevant or relevance_score < 0.3:
-            # Answer is drifted - use the pre-computed extractive answer
-            answer = extractive_answer
+            # Answer is drifted - use the conversational answer
+            answer = conversational_answer
 
         # Answer grounding validation - check if answer is grounded in context
         is_grounded, grounding_score = _validate_answer_grounding(context, answer)
         if not is_grounded or grounding_score < 0.2:
-            # Answer is hallucinated - use the pre-computed extractive answer
-            answer = extractive_answer
+            # Answer is hallucinated - use the conversational answer
+            answer = conversational_answer
 
         # Answer length truncation - prevent overly long answers
         if len(answer) > MAX_ANSWER_LENGTH:
