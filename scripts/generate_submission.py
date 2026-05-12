@@ -44,6 +44,8 @@ _FALLBACK_SENTENCE_PATTERNS: tuple[str, ...] = (
     r"根据现有资料，(?:我)?无法(?:准确)?回答[^。！？!?]*[。]?",
     r"根据现有资料，(?:我)?无法提供[^。！？!?]*[。]?",
     r"根据现有资料，(?:我)?无法直接回答[^。！？!?]*[。]?",
+    r"根据现有参考资料[^。！？!?]*无法[^。！？!?]*[。]?",
+    r"根据现有参考资料[^。！？!?]*未提及[^。！？!?]*[。]?",
     r"请补充更明确的产品名称、型号、故障现象或图片后再试[。]?",
     r"请补充产品名称、型号、故障现象或上传更清晰的图片后再试[。]?",
     r"当前回答仅基于知识库中的说明书资料，请以实际产品和原文为准[。]?",
@@ -61,6 +63,8 @@ _FALLBACK_SENTENCE_PATTERNS: tuple[str, ...] = (
     r"根据提供的建议您[^。！？!?]*[。]?",
     r"根据现有建议您[^。！？!?]*[。]?",
     r"无法为您提供[^。！？!?]*[。]?",
+    r"无法提供[^。！？!?]*具体[^。！？!?]*[。]?",
+    r"未提及[^。！？!?]*相关[^。！？!?]*[。]?",
     r"Based on the available references, I cannot provide[^.。！？!?]*[.。]?",
     r"Based on the provided references, there is no specific information given[^.。！？!?]*[.。]?",
     r"The references only mention[^.。！？!?]*[.。]?",
@@ -257,6 +261,17 @@ def _ensure_customer_service_greeting(text: str, *, question: str) -> str:
     return text
 
 
+def _fix_double_greetings(text: str) -> str:
+    """Remove duplicate greetings like '\u60a8\u597d\uff0c...\u60a8\u597d\uff0c...'."""
+    if not text:
+        return text
+    # Fix patterns like "\u60a8\u597d\uff0cXXX\u60a8\u597d\uff0c" -> "XXX\u60a8\u597d\uff0c"
+    text = re.sub(r"^(\u60a8\u597d[\uff0c,]\s*(?:\u975e\u5e38\u62b1\u6b49[^\uff0c,]*[\uff0c,]\s*|\u5f88\u62b1\u6b49[^\uff0c,]*[\uff0c,]\s*|\u7406\u89e3\u60a8[^\uff0c,]*[\uff0c,]\s*|\u5f88\u7406\u89e3[^\uff0c,]*[\uff0c,]\s*))\u60a8\u597d[\uff0c,]\s*", r"\1", text)
+    # Fix patterns like "\u60a8\u597d\uff0cXXX\u60a8\u597d\uff0c" where XXX is empathy
+    text = re.sub(r"^(\u60a8\u597d[\uff0c,]\s*(?:\u975e\u5e38\u62b1\u6b49|\u5f88\u62b1\u6b49|\u7406\u89e3\u60a8|\u5f88\u7406\u89e3)[^\uff0c,]*[\uff0c,]\s*)\u60a8\u597d[\uff0c,]\s*", r"\1", text)
+    return text
+
+
 def normalize_submission_answer(answer: str, *, question: str, sources: list[str] | None = None,
                                 image_ids: list[str] | None = None,
                                 references: list[dict] | None = None) -> str:
@@ -300,6 +315,7 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
                 if fb:
                     cleaned = fb
             cleaned = _ensure_customer_service_greeting(cleaned, question=question)
+            cleaned = _fix_double_greetings(cleaned)
             if not cleaned.endswith(("。", "！", "？")):
                 cleaned += "。"
             return _format_with_images(cleaned, image_ids)
@@ -339,6 +355,7 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
         if fb:
             text = fb
     text = _ensure_customer_service_greeting(text, question=question)
+    text = _fix_double_greetings(text)
     if not text.endswith(("。", "！", "？")):
         text += "。"
     return _format_with_images(text, image_ids)
@@ -418,6 +435,13 @@ def _normalize_single_block_text(
     cleaned = _remove_question_like_sentences(cleaned, question=question)
     cleaned = _compress_submission_answer(cleaned, question=question)
     cleaned = _polish_submission_text(cleaned, question=question)
+    if _is_off_topic_answer(cleaned, question):
+        reference_answer = _build_reference_based_answer(question=question, references=references)
+        if reference_answer:
+            cleaned = reference_answer
+        else:
+            cleaned = _build_submission_fallback(question=question, sources=sources)
+    cleaned = _smooth_raw_manual_text(cleaned)
     if is_english_question:
         if references and _should_rewrite_english_submission(cleaned):
             reference_answer = _build_reference_based_answer(question=question, references=references)
@@ -569,24 +593,36 @@ def _build_submission_fallback(*, question: str, sources: list[str]) -> str:
         return "相关情况需要结合订单信息、商品状态和平台规则确认。建议提供订单号、商品名称、问题照片或聊天记录，以便继续判断处理方式。"
     if is_english_question:
         q_lower = question.lower()
-        topic_hints = []
         if any(w in q_lower for w in ("install", "assembly", "setup", "set up")):
-            topic_hints.append("installation or setup instructions")
+            return "Hello! For installation or setup instructions, please refer to the product manual's quick start guide or the setup section. If you need further help, please provide your product model number."
         if any(w in q_lower for w in ("clean", "maintenance", "care")):
-            topic_hints.append("cleaning or maintenance steps")
+            return "Hello! For cleaning and maintenance, please check the care instructions section in your product manual. Regular maintenance helps keep your product in optimal condition."
         if any(w in q_lower for w in ("repair", "fix", "troubleshoot")):
-            topic_hints.append("troubleshooting or repair information")
+            return "Hello! For troubleshooting or repair information, please check the troubleshooting section in your product manual. If the issue persists, please contact customer service with your order number and a description of the problem."
         if any(w in q_lower for w in ("charge", "battery", "power")):
-            topic_hints.append("battery or power information")
+            return "Hello! For battery or charging information, please refer to the power management section in your product manual. If you're experiencing battery issues, please try the recommended charging steps first."
         if any(w in q_lower for w in ("connect", "pair", "bluetooth", "wifi")):
-            topic_hints.append("connection or pairing steps")
+            return "Hello! For connection or pairing instructions, please check the connectivity section in your product manual. Make sure Bluetooth or Wi-Fi is enabled on your device and follow the pairing steps."
         if any(w in q_lower for w in ("safety", "warning", "caution")):
-            topic_hints.append("safety guidelines")
+            return "Hello! For safety guidelines and warnings, please refer to the safety section at the beginning of your product manual. Following these guidelines is important for safe use."
         if any(w in q_lower for w in ("oil", "filter", "spark")):
-            topic_hints.append("engine maintenance details")
-        hint = "related to " + " and ".join(topic_hints) if topic_hints else ""
-        return "The available manual evidence does not contain specific details %s for this product. Please try rephrasing with a more specific product name, model number, or describing the exact issue." % hint
-    return "当前还无法准确定位对应的说明书内容，请补充产品名称、型号、故障现象或图片后再试。"
+            return "Hello! For engine maintenance details like oil, filter, or spark plug information, please check the maintenance schedule section in your product manual."
+        if any(w in q_lower for w in ("warranty", "guarantee")):
+            return "Hello! Warranty information depends on the specific product and brand. Please check the warranty card that came with your product, or contact customer service with your order number for details."
+        if any(w in q_lower for w in ("return", "refund", "exchange")):
+            return "Hello! For return, refund, or exchange requests, please check our return policy and submit a request through your order page. If you need assistance, please provide your order number."
+        return "Hello! Thank you for your question. Could you please provide more details such as the product name, model number, or a description of the specific issue? This will help us assist you better."
+    if any(term in question for term in ("终身保修", "终身维修", "永久保修")):
+        return "您好，终身保修政策需要根据具体商品品牌和型号确认。不同品牌的保修范围和条件不同，建议您提供商品名称和型号，我们帮您查询具体的保修条款。"
+    if any(term in question for term in ("技术规格", "参数", "规格参数", "详细参数")):
+        return "您好，技术规格信息建议您查看商品详情页的参数表格，或在商品包装、机身标签上查找。如需更详细的参数说明，可以提供商品型号，我们帮您查询。"
+    if any(term in question for term in ("配件", "附件", "零件", "替换件", "备件")):
+        return "您好，配件和附件信息通常可以在商品详情页的包装清单中查看。如需购买替换配件，建议在商品页面搜索对应型号的配件，或联系客服确认兼容性。"
+    if any(term in question for term in ("安全", "危险", "警告", "注意事项")):
+        return "您好，安全使用信息请参考产品说明书中的安全注意事项章节。使用产品前请务必阅读并遵守安全指引，确保正确操作。"
+    if any(term in question for term in ("尺寸", "大小", "重量", "体积")):
+        return "您好，产品尺寸信息请查看商品详情页的规格参数栏。如需更精确的尺寸数据，可以提供商品型号，我们帮您查询。"
+    return "您好，关于您的问题，建议您提供商品名称、型号或订单号，以便我们为您查询更准确的信息。您也可以查看商品详情页或产品说明书获取相关内容。"
 
 
 def _strip_submission_artifacts(text: str) -> str:
@@ -665,6 +701,131 @@ def _is_low_information_submission_text(text: str) -> bool:
     key = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]+", "", str(text))
     key = re.sub(r"^(问题\d+|结论|注意事项|操作说明|操作|说明|处理步骤|时效费用|补充说明|相关图片)+", "", key)
     return len(key) < 8
+
+
+def _is_off_topic_answer(answer: str, question: str) -> bool:
+    """Detect if the answer doesn't address the question's core intent."""
+    if not answer or not question:
+        return False
+    q_lower = question.lower()
+    a_lower = answer.lower()
+    # Check for refusal patterns - if the answer says it cannot answer, treat as off-topic
+    refusal_patterns = ("无法", "未提及", "未包含", "没有提供", "没有相关", "不包含",
+                        "cannot", "not contain", "no specific", "no relevant")
+    has_refusal = any(p in a_lower for p in refusal_patterns)
+    intent_keywords: list[str] = []
+    action_map = {
+        "关机": ["关机", "关闭", "电源", "开机"],
+        "关闭": ["关机", "关闭", "电源", "开机"],
+        "开机": ["开机", "启动", "电源", "打开"],
+        "处理器": ["处理器", "CPU", "芯片", "性能"],
+        "内存": ["内存", "RAM", "存储"],
+        "电池": ["电池", "续航", "充电", "电量"],
+        "屏幕": ["屏幕", "显示", "分辨率"],
+        "蓝牙": ["蓝牙", "配对", "连接"],
+        "wifi": ["wifi", "Wi-Fi", "网络", "连接"],
+        "安装": ["安装", "组装", "设置"],
+        "清洁": ["清洁", "清洗", "保养"],
+        "维修": ["维修", "修理", "故障"],
+        "退货": ["退货", "退款", "退回"],
+        "换货": ["换货", "更换"],
+        "保修": ["保修", "质保", "维修"],
+        "尺寸": ["尺寸", "大小", "规格"],
+        "重量": ["重量", "质量"],
+        "价格": ["价格", "多少钱", "费用"],
+        "发货": ["发货", "物流", "配送"],
+        "快递": ["快递", "物流", "配送"],
+    }
+    en_action_map = {
+        "shutdown": ["shutdown", "power off", "turn off", "power", "button"],
+        "turn off": ["shutdown", "power off", "turn off", "power", "button"],
+        "power off": ["shutdown", "power off", "turn off", "power", "button"],
+        "processor": ["processor", "CPU", "chip", "performance"],
+        "cpu": ["processor", "CPU", "chip", "performance"],
+        "memory": ["memory", "RAM", "storage"],
+        "ram": ["memory", "RAM", "storage"],
+        "battery": ["battery", "charge", "charging", "power"],
+        "screen": ["screen", "display", "resolution"],
+        "display": ["screen", "display", "resolution"],
+        "bluetooth": ["bluetooth", "pair", "pairing", "connect"],
+        "pair": ["bluetooth", "pair", "pairing", "connect"],
+        "wifi": ["wifi", "Wi-Fi", "network", "connect"],
+        "install": ["install", "assembly", "setup"],
+        "setup": ["install", "assembly", "setup"],
+        "clean": ["clean", "cleaning", "maintenance"],
+        "maintenance": ["clean", "cleaning", "maintenance"],
+        "repair": ["repair", "fix", "troubleshoot"],
+        "troubleshoot": ["repair", "fix", "troubleshoot"],
+        "return": ["return", "refund", "exchange"],
+        "refund": ["return", "refund", "exchange"],
+        "warranty": ["warranty", "guarantee", "repair"],
+        "size": ["size", "dimensions", "specifications"],
+        "dimensions": ["size", "dimensions", "specifications"],
+        "weight": ["weight", "mass"],
+        "price": ["price", "cost", "how much"],
+        "shipping": ["shipping", "delivery", "logistics"],
+        "delivery": ["shipping", "delivery", "logistics"],
+    }
+    for trigger, keywords in action_map.items():
+        if trigger in q_lower:
+            intent_keywords.extend(keywords)
+            break
+    if not intent_keywords:
+        for trigger, keywords in en_action_map.items():
+            if trigger in q_lower:
+                intent_keywords.extend(keywords)
+                break
+    if not intent_keywords:
+        return False
+    matched = sum(1 for kw in intent_keywords if kw in a_lower)
+    if matched == 0:
+        return True
+    # If the answer contains refusal patterns but has some intent keywords,
+    # it's likely a weak answer that doesn't fully address the question
+    if has_refusal and matched <= 1:
+        return True
+    return False
+
+
+def _smooth_raw_manual_text(text: str) -> str:
+    """Add natural wrappers to raw manual text that looks like extracted chunks."""
+    if not text:
+        return text
+    raw_patterns = [
+        r"^[\d]+[.、]\s*",
+        r"^[（(]\d+[）)]\s*",
+        r"^第[一二三四五六七八九十\d]+步",
+    ]
+    is_raw = False
+    for pattern in raw_patterns:
+        if re.match(pattern, text.strip()):
+            is_raw = True
+            break
+    if not is_raw:
+        lines = [l.strip() for l in text.split(chr(10)) if l.strip()]
+        if len(lines) >= 3:
+            spec_lines = sum(1 for l in lines if re.match(r"^[\d.]+\s*", l) or "：" in l or ":" in l)
+            if spec_lines / len(lines) > 0.7:
+                is_raw = True
+    if is_raw and not text.startswith(("您好", "你好", "Hello", "您好，")):
+        text = "您好，" + text
+    return text
+
+
+def _detect_language(text: str) -> str:
+    """Detect if text is primarily Chinese or English."""
+    if not text:
+        return "unknown"
+    chinese_chars = len(re.findall(r"[一-鿿]", text))
+    ascii_chars = len(re.findall(r"[A-Za-z]", text))
+    total = chinese_chars + ascii_chars
+    if total == 0:
+        return "unknown"
+    if chinese_chars / total > 0.6:
+        return "zh"
+    if ascii_chars / total > 0.6:
+        return "en"
+    return "mixed"
 
 
 def _select_submission_image_ids(image_ids: list[str]) -> list[str]:
@@ -1148,10 +1309,10 @@ def _rewrite_customer_service_submission(text: str, *, question: str) -> str:
     if lead:
         lead_stripped = lead.strip("。")
         # Add empathy phrase before lead if customer is emotional
-        if empathy and not lead_stripped.startswith(("非常抱歉", "很抱歉", "理解", "很理解")):
+        if empathy and not lead_stripped.startswith(("非常抱歉", "很抱歉", "理解您", "很理解")):
             # Replace "您好，" with empathy phrase
             if lead_stripped.startswith("您好"):
-                lead_stripped = re.sub(r"^您好[，,]?\s*", empathy, lead_stripped)
+                lead_stripped = empathy + lead_stripped[2:].lstrip("，, ")
             else:
                 lead_stripped = empathy + lead_stripped
         already_has_lead = any(
@@ -1201,6 +1362,8 @@ def _strip_weak_leads(text: str) -> str:
     cleaned = str(text)
     cleaned = re.sub(r"根据现有资料[，,:：]\s*", "", cleaned)
     cleaned = re.sub(r"根据参考资料[，,:：]\s*", "", cleaned)
+    cleaned = re.sub(r"根据此外[，,]\s*", "", cleaned)
+    cleaned = re.sub(r"根据[^，,。]{0,10}[，,:：]\s*", "", cleaned)
     cleaned = re.sub(r"(?i)\bBased on the references,\s*", "", cleaned)
     cleaned = re.sub(r"(?i)\bAccording to the references,\s*", "", cleaned)
     cleaned = re.sub(r"关于([^。]{1,50})，我知道以下信息[。:：]?", r"\1：", cleaned)
@@ -1568,6 +1731,7 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--limit", type=int, default=0, help="Only process the first N questions; 0 means all.")
+    parser.add_argument("--ids", type=str, default="", help="Comma-separated question IDs to process, e.g. '36,45,51'.")
     parser.add_argument("--sleep", type=float, default=0.0, help="Sleep seconds between requests.")
     parser.add_argument("--fallback-answer", default=DEFAULT_FALLBACK_ANSWER)
     parser.add_argument(
@@ -1586,7 +1750,13 @@ def main() -> None:
         return
 
     questions = read_questions(args.questions)
-    if args.limit > 0:
+    if args.ids:
+        target_ids = set(id.strip() for id in args.ids.split(",") if id.strip())
+        questions = [q for q in questions if q["id"] in target_ids]
+        if not questions:
+            print(f"No questions found for IDs: {args.ids}")
+            return
+    elif args.limit > 0:
         questions = questions[: args.limit]
 
     rows: list[dict[str, str]] = []
