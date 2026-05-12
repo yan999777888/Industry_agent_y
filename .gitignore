@@ -9,7 +9,7 @@ venv/
 
 # Local IDE / tool files
 .vscode/
-
+bge-small-zh-v1.5/
 
 # Local processed artifacts
 data/processed/index.sqlite
