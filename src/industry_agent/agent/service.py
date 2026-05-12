@@ -39,9 +39,9 @@ except ImportError:  # pragma: no cover - optional for test environments
 # Configuration
 # ---------------------------------------------------------------------------
 
-RETRIEVAL_LIMIT = 15        # chunks to retrieve before evidence filtering
-FINAL_CONTEXT_CHUNKS = 7    # chunks passed into the LLM
-MAX_CONTEXT_CHARS = 8000    # truncate context to fit model window
+RETRIEVAL_LIMIT = 25        # chunks to retrieve before evidence filtering
+FINAL_CONTEXT_CHUNKS = 20   # chunks passed into the LLM
+MAX_CONTEXT_CHARS = 16000   # truncate context to fit model window
 MAX_HISTORY_TURNS = 5       # keep last N turns per session
 MIN_TOP_SCORE = 1.5         # below this, do not ask LLM to hallucinate
 MIN_KEEP_SCORE = 1.0        # chunks below this score are discarded
@@ -843,6 +843,46 @@ def _filter_evidence_for_query(
             cross_product_kept += 1
         if len(filtered) >= FINAL_CONTEXT_CHUNKS:
             break
+
+    # Rescue: ensure chunks whose titles match query keywords are always included
+    # Replace the lowest-scored ORIGINAL chunks if necessary (not rescue-added ones)
+    if ranked and len(filtered) >= FINAL_CONTEXT_CHUNKS:
+        query_analysis = analyze_query(query)
+        # Build rescue terms: full keywords + 2-char sliding window substrings
+        rescue_terms: set[str] = set()
+        for kw in query_analysis.keywords:
+            norm_kw = _normalize(kw)
+            rescue_terms.add(norm_kw)
+            for i in range(len(norm_kw) - 1):
+                sub = norm_kw[i:i + 2]
+                if sub and sub not in {"的", "了", "在", "是"}:
+                    rescue_terms.add(sub)
+        for phrase in query_analysis.phrases:
+            rescue_terms.add(_normalize(phrase))
+            for word in _normalize(phrase).split():
+                if len(word) >= 2:
+                    rescue_terms.add(word)
+        rescue_terms.discard("")
+        if rescue_terms:
+            original_count = len(filtered)
+            existing_titles = {str(c.get("title", "")) for c in filtered}
+            for chunk in ranked:
+                title = str(chunk.get("title", ""))
+                if title in existing_titles:
+                    continue
+                title_lower = _normalize(title)
+                if any(term in title_lower for term in rescue_terms):
+                    # Only replace original (non-rescued) chunks
+                    if len(filtered) >= FINAL_CONTEXT_CHUNKS and original_count > 0:
+                        # Find and remove the last original chunk
+                        for idx in range(original_count - 1, -1, -1):
+                            if idx < len(filtered):
+                                removed = filtered.pop(idx)
+                                original_count -= 1
+                                break
+                    filtered.append(chunk)
+                    existing_titles.add(title)
+
     return filtered
 
 
