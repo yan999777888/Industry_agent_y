@@ -40,12 +40,13 @@ except ImportError:  # pragma: no cover - optional for test environments
 # ---------------------------------------------------------------------------
 
 RETRIEVAL_LIMIT = 20        # chunks to retrieve before evidence filtering
-FINAL_CONTEXT_CHUNKS = 8    # chunks passed into the LLM
-MAX_CONTEXT_CHARS = 8000    # truncate context to fit model window
-MAX_HISTORY_TURNS = 5       # keep last N turns per session
+FINAL_CONTEXT_CHUNKS = 6    # chunks passed into the LLM
+MAX_CONTEXT_CHARS = 6000    # truncate context to fit model window
+MAX_HISTORY_TURNS = 3       # keep last N turns per session
 MIN_TOP_SCORE = 1.5         # below this, do not ask LLM to hallucinate
 MIN_KEEP_SCORE = 1.0        # chunks below this score are discarded
 MULTIMODAL_RETRIEVAL_LIMIT = 6
+MAX_ANSWER_LENGTH = 300     # maximum answer length in characters
 
 OLLAMA_BASE_URL = settings.ollama_base_url
 OLLAMA_MODEL = settings.ollama_model
@@ -150,8 +151,348 @@ def _strip_thinking(text: str) -> str:
     return text
 
 
+def _is_raw_manual_text(text: str) -> bool:
+    """Detect if the answer is raw manual text that needs reformatting."""
+    if not text or len(text.strip()) < 20:
+        return False
+
+    # Remove greeting prefix for pattern matching
+    text_stripped = text.strip()
+    text_for_matching = text_stripped
+    for prefix in ["您好，", "你好，", "Hello,", "Hi,", "Hello! ", "Hi! "]:
+        if text_stripped.startswith(prefix):
+            text_for_matching = text_stripped[len(prefix):].strip()
+            break
+
+    # Check for common raw manual text patterns
+    raw_patterns = [
+        r"^#",  # Starts with "#" header
+        r"^##",  # Starts with "##" header
+        r"^安装\s",  # Starts with "安装"
+        r"^注意\s",  # Starts with "注意"
+        r"^使用前\s",  # Starts with "使用前"
+        r"^操作步骤\s",  # Starts with "操作步骤"
+        r"^安全须知\s",  # Starts with "安全须知"
+        r"^维护保养\s",  # Starts with "维护保养"
+        r"^故障排除\s",  # Starts with "故障排除"
+        r"^规格参数\s",  # Starts with "规格参数"
+        r"^产品说明\s",  # Starts with "产品说明"
+        r"^使用说明\s",  # Starts with "使用说明"
+        r"^注意事项\s",  # Starts with "注意事项"
+        r"^安装前请",  # Starts with "安装前请"
+        r"^请确保",  # Starts with "请确保"
+        r"^请勿",  # Starts with "请勿"
+        r"^必须",  # Starts with "必须"
+        r"^应由",  # Starts with "应由"
+        r"^不得",  # Starts with "不得"
+        r"^不得拆卸",  # Starts with "不得拆卸"
+        r"^不得维修",  # Starts with "不得维修"
+        r"^不得改装",  # Starts with "不得改装"
+        r"^部分.*型号",  # "部分XX型号"
+        r"^安全装置",  # Starts with "安全装置"
+        r"^操作前",  # Starts with "操作前"
+        r"^亮碟剂",  # Starts with "亮碟剂"
+        r"^运动曲线",  # Starts with "运动曲线"
+        r"^在线注册",  # Starts with "在线注册"
+        r"^制造商",  # Starts with "制造商"
+        r"^发电机",  # Starts with "发电机"
+        r"^蓝牙设备",  # Starts with "蓝牙设备"
+        r"^装入",  # Starts with "装入"
+        r"^Docking",  # Starts with "Docking"
+        r"^When charging",  # Starts with "When charging"
+        r"^基础.*设置",  # "基础设置"
+        r"^高速油针",  # "高速油针"
+        r"^心率控制",  # "心率控制"
+        r"^1年免费服务",  # "1年免费服务"
+        r"^3年免费服务",  # "3年免费服务"
+        r"^通过运动应用",  # "通过运动应用"
+        r"^维修\s",  # Starts with "维修"
+        r"^餐具出现",  # "餐具出现"
+        r"^含铝",  # "含铝"
+    ]
+
+    for pattern in raw_patterns:
+        if re.match(pattern, text_for_matching):
+            return True
+
+    # Check if text contains multiple manual-style sentences
+    sentences = re.split(r"[。！？]", text_for_matching)
+    manual_count = 0
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if any(re.match(p, sentence) for p in raw_patterns):
+            manual_count += 1
+    if manual_count >= 2:
+        return True
+
+    return False
+
+
+def _reformat_raw_manual_text(text: str, query: str) -> str:
+    """Reformat raw manual text into a customer service style response."""
+    if not text:
+        return text
+
+    # Clean up the text
+    cleaned = text.strip()
+
+    # Remove greeting prefix
+    for prefix in ["您好，", "你好，", "Hello,", "Hi,", "Hello! ", "Hi! "]:
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip()
+            break
+
+    # Remove "#" headers and "第X页" references
+    cleaned = re.sub(r"^#\s*", "", cleaned)
+    cleaned = re.sub(r"^##\s*", "", cleaned)
+    cleaned = re.sub(r"第\s*\d+\s*页", "", cleaned)
+    cleaned = re.sub(r"见第\s*\d+\s*页.*?部分", "", cleaned)
+    cleaned = re.sub(r"详见.*?章节", "", cleaned)
+
+    # Split into sentences
+    sentences = re.split(r"[。！？]", cleaned)
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if not sentences:
+        return "您好，暂时无法提供更详细的信息。如需帮助随时联系我们。"
+
+    # Build a customer service response
+    result_parts = ["您好，"]
+
+    # Process sentences - take first 2-3 most relevant ones
+    for i, sentence in enumerate(sentences[:4]):
+        if not sentence:
+            continue
+        # Skip very short sentences
+        if len(sentence) < 5:
+            continue
+        # Skip sentences that are just headers or labels
+        if re.match(r"^(安装|注意|使用前|操作步骤|安全须知|维护保养|故障排除|规格参数|产品说明|使用说明|注意事项|基础.*设置|高速油针|心率控制|1年免费服务|3年免费服务|通过运动应用|维修|餐具出现|含铝|追踪睡眠)\s*$", sentence):
+            continue
+        # Skip sentences with "#" or "##"
+        if "#" in sentence:
+            continue
+        result_parts.append(sentence)
+        if len(result_parts) >= 3:  # Take first 2-3 substantial sentences
+            break
+
+    # Join and add ending
+    if result_parts:
+        result = "。".join(result_parts) if len(result_parts) > 1 else result_parts[0]
+        if not result.endswith(("。", "！", "？")):
+            result += "。"
+    else:
+        result = text
+
+    return result
+
+
+def _validate_answer_grounding(context: str, answer: str) -> tuple[bool, float]:
+    """Validate if the answer is grounded in the context (not hallucinated).
+
+    Returns:
+        Tuple of (is_grounded, grounding_score)
+    """
+    if not context or not answer:
+        return True, 0.0
+
+    # Simple check: if answer is very short, it's likely grounded
+    if len(answer) < 50:
+        return True, 0.8
+
+    # Extract key terms from context (2+ character Chinese words or 3+ character English words)
+    context_lower = context.lower()
+    answer_lower = answer.lower()
+
+    # Get Chinese terms from context
+    context_terms = set()
+    for term in re.findall(r'[一-鿿]{2,}', context_lower):
+        context_terms.add(term)
+
+    # Get Chinese terms from answer
+    answer_terms = set()
+    for term in re.findall(r'[一-鿿]{2,}', answer_lower):
+        answer_terms.add(term)
+
+    if not answer_terms:
+        return True, 0.5
+
+    # Calculate overlap
+    overlap = context_terms & answer_terms
+    overlap_ratio = len(overlap) / len(answer_terms) if answer_terms else 0
+
+    # Grounding score based on overlap
+    if overlap_ratio >= 0.25:
+        grounding_score = 1.0
+    elif overlap_ratio >= 0.15:
+        grounding_score = 0.7
+    elif overlap_ratio >= 0.08:
+        grounding_score = 0.4
+    else:
+        grounding_score = 0.0
+
+    return grounding_score >= 0.15, grounding_score
+
+
+def _validate_topic_relevance(query: str, answer: str) -> tuple[bool, float]:
+    """Validate if the answer is actually relevant to the question.
+
+    Returns:
+        Tuple of (is_relevant, relevance_score)
+    """
+    if not query or not answer:
+        return True, 0.0
+
+    # Simple check: if answer is very short, it's likely relevant
+    if len(answer) < 50:
+        return True, 0.8
+
+    query_lower = query.lower()
+    answer_lower = answer.lower()
+
+    # Extract question keywords
+    query_terms = set()
+    for term in re.findall(r'[一-鿿]{2,}', query_lower):
+        query_terms.add(term)
+
+    # Extract answer keywords
+    answer_terms = set()
+    for term in re.findall(r'[一-鿿]{2,}', answer_lower):
+        answer_terms.add(term)
+
+    if not query_terms:
+        return True, 0.5
+
+    # Calculate overlap
+    overlap = query_terms & answer_terms
+    overlap_ratio = len(overlap) / len(query_terms) if query_terms else 0
+
+    # Intent-specific validation: check if the answer addresses the core intent
+    intent_score = 1.0
+
+    # Question intent patterns - each maps to required answer keywords
+    intent_map = {
+        ("哪些", "什么物品", "不适合", "不宜", "不能"): ["不", "禁止", "不得", "避免", "不宜", "不适合"],
+        ("附件", "配件", "配备", "包含"): ["附件", "配件", "配备", "包含", "标配"],
+        ("规格", "参数", "技术"): ["规格", "参数", "尺寸", "重量", "功率", "电压", "容量"],
+        ("位置", "佩戴", "戴在"): ["位置", "佩戴", "戴在", "穿戴", "放置"],
+        ("保修", "保修期", "质保"): ["保修", "质保", "维护", "维修", "服务"],
+        ("启动", "开机", "怎么开"): ["启动", "开机", "开启", "打开"],
+        ("关闭", "关机", "怎么关"): ["关闭", "关机", "停机", "断电"],
+        ("清洁", "清洗", "保养"): ["清洁", "清洗", "保养", "维护"],
+        ("安装", "装配", "怎么装"): ["安装", "装配", "设置", "装入"],
+        ("安全", "注意", "危险"): ["安全", "注意", "防护", "禁止", "警告"],
+        ("故障", "问题", "异常", "报错"): ["故障", "问题", "异常", "报错", "维修"],
+        ("充电", "电池"): ["充电", "电池", "电源", "电量"],
+        ("显示", "屏幕", "界面"): ["显示", "屏幕", "界面", "指示灯"],
+        ("运动", "锻炼", "训练"): ["运动", "锻炼", "训练", "健身", "心率"],
+        ("追踪", "监测", "记录"): ["追踪", "监测", "记录", "数据", "睡眠"],
+    }
+
+    for intent_keywords, required_keywords in intent_map.items():
+        if any(kw in query_lower for kw in intent_keywords):
+            if not any(rk in answer_lower for rk in required_keywords):
+                intent_score *= 0.3  # Heavy penalty if intent not addressed
+            break
+
+    # Relevance score based on overlap and intent
+    if overlap_ratio >= 0.3:
+        relevance_score = 1.0
+    elif overlap_ratio >= 0.2:
+        relevance_score = 0.7
+    elif overlap_ratio >= 0.1:
+        relevance_score = 0.4
+    else:
+        relevance_score = 0.0
+
+    final_score = relevance_score * intent_score
+    return final_score >= 0.2, final_score
+
+
+def _extractive_fallback_with_topic(query: str, evidence_chunks: list, image_ids: list) -> str:
+    """Build an extractive answer that stays on topic."""
+    if not evidence_chunks:
+        return "您好，根据现有资料，暂时无法提供更详细的信息。如需帮助随时联系我们。"
+
+    # Extract question intent
+    query_lower = query.lower()
+    intent_keywords = []
+
+    if any(kw in query_lower for kw in ["关闭", "停止", "关掉", "停机"]):
+        intent_keywords = ["关闭", "停止", "关机", "断电", "停机"]
+    elif any(kw in query_lower for kw in ["开启", "打开", "启动"]):
+        intent_keywords = ["开启", "打开", "启动", "开机"]
+    elif any(kw in query_lower for kw in ["安装", "装配"]):
+        intent_keywords = ["安装", "装配", "设置"]
+    elif any(kw in query_lower for kw in ["清洁", "清洗", "保养"]):
+        intent_keywords = ["清洁", "清洗", "保养", "维护"]
+    elif any(kw in query_lower for kw in ["安全", "注意"]):
+        intent_keywords = ["安全", "注意", "防护", "禁止"]
+    elif any(kw in query_lower for kw in ["维修", "修理"]):
+        intent_keywords = ["维修", "修理", "故障"]
+    elif any(kw in query_lower for kw in ["规格", "参数"]):
+        intent_keywords = ["规格", "参数", "尺寸", "重量"]
+    elif any(kw in query_lower for kw in ["配件", "附件"]):
+        intent_keywords = ["配件", "附件", "部件"]
+
+    # Find relevant sentences from evidence
+    relevant_sentences = []
+    for chunk in evidence_chunks[:3]:
+        text = str(chunk.get("text", ""))
+        sentences = re.split(r"[。！？]", text)
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence or len(sentence) < 10:
+                continue
+            if any(kw in sentence for kw in intent_keywords):
+                relevant_sentences.append(sentence)
+                if len(relevant_sentences) >= 2:
+                    break
+        if len(relevant_sentences) >= 2:
+            break
+
+    if relevant_sentences:
+        answer = "您好，" + "。".join(relevant_sentences[:2]) + "。如需帮助随时联系我们。"
+    else:
+        # Fallback to first chunk's title
+        first_title = str(evidence_chunks[0].get("title", ""))
+        answer = f"您好，{first_title}。如需帮助随时联系我们。"
+
+    return answer
+
+
 def _normalize_for_smalltalk(text: str) -> str:
     return _NON_WORD_RE.sub("", text.strip().lower())
+
+
+def _final_answer_cleanup(answer: str) -> str:
+    """Final cleanup pass to remove manual text artifacts from the answer."""
+    if not answer:
+        return answer
+    cleaned = answer.strip()
+    # Remove "#" headers (e.g., "# 维修" → "维修")
+    cleaned = re.sub(r"^#\s*", "", cleaned)
+    cleaned = re.sub(r"\n#\s*", "\n", cleaned)
+    # Remove "第X页" references
+    cleaned = re.sub(r"第\s*\d+\s*页", "", cleaned)
+    cleaned = re.sub(r"见第\s*\d+\s*页.*?部分", "", cleaned)
+    cleaned = re.sub(r"详见.*?章节", "", cleaned)
+    # Remove "相关配图：..." at the end
+    cleaned = re.sub(r"[（(]相关配图：[^）)]*[）)]\s*$", "", cleaned)
+    cleaned = re.sub(r"\(相关配图：[^)]*\)\s*$", "", cleaned)
+    # Clean up extra spaces
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    # Remove trailing punctuation artifacts
+    cleaned = re.sub(r"[，,。.、]+\s*$", "", cleaned)
+    # Ensure it ends with proper punctuation
+    if cleaned and not cleaned.endswith(("。", "！", "？", "）", ")")):
+        cleaned += "。"
+    # Remove double periods
+    cleaned = cleaned.replace("。。", "。")
+    cleaned = cleaned.replace("，，", "，")
+    return cleaned.strip()
 
 
 def _normalize(text: str) -> str:
@@ -725,12 +1066,48 @@ def _rank_evidence_chunks(
         text_status_overlap = _text_overlap_count(text, status_terms)
         issue_overlap = _text_overlap_count(f"{title}\n{text}", issue_terms)
 
+        # Title-question semantic relevance boost
+        title_relevance_boost = 0.0
+        if analysis is not None:
+            # Check if title contains question intent keywords
+            title_lower = title.lower()
+            query_lower = query.lower()
+
+            # Boost for action/intent matching
+            action_keywords = {
+                "安全": ["安全", "防护", "保护", "注意", "警告", "禁止"],
+                "操作": ["操作", "使用", "运行", "启动", "关闭"],
+                "维护": ["维护", "保养", "清洁", "清洗", "更换"],
+                "安装": ["安装", "装配", "设置"],
+                "故障": ["故障", "问题", "异常", "维修"],
+                "规格": ["规格", "参数", "尺寸", "重量"],
+                "配件": ["配件", "附件", "部件", "组件"],
+            }
+
+            for intent, keywords in action_keywords.items():
+                if any(kw in query_lower for kw in keywords):
+                    if any(kw in title_lower for kw in keywords):
+                        title_relevance_boost += 1.5
+
+            # Boost for question word matching
+            question_words = ["什么", "如何", "怎么", "哪些", "为什么", "是否", "能不能"]
+            for word in question_words:
+                if word in query_lower:
+                    # Check if title answers this type of question
+                    if word == "什么" and any(kw in title_lower for kw in ["是", "指", "为"]):
+                        title_relevance_boost += 1.0
+                    elif word == "如何" and any(kw in title_lower for kw in ["步骤", "方法", "如何"]):
+                        title_relevance_boost += 1.0
+                    elif word == "哪些" and any(kw in title_lower for kw in ["包括", "含有", "有"]):
+                        title_relevance_boost += 1.0
+
         evidence_score = base_score
         evidence_score += min(query_overlap * 1.1, 5.0)
         evidence_score += min(image_overlap * 1.8, 5.4)
         evidence_score += min(title_component_overlap * 1.8 + text_component_overlap * 0.9, 4.8)
         evidence_score += min(title_status_overlap * 1.2 + text_status_overlap * 1.5, 4.6)
         evidence_score += min(issue_overlap * 1.6, 3.2)
+        evidence_score += min(title_relevance_boost, 3.0)  # Cap at 3.0
         if image_ids and image_overlap > 0:
             evidence_score += 1.0
         if (title_component_overlap + text_component_overlap) > 0 and (title_status_overlap + text_status_overlap) > 0:
@@ -748,6 +1125,7 @@ def _rank_evidence_chunks(
         row["_image_component_overlap"] = title_component_overlap + text_component_overlap
         row["_image_status_overlap"] = title_status_overlap + text_status_overlap
         row["_image_issue_overlap"] = issue_overlap
+        row["_title_relevance_boost"] = round(title_relevance_boost, 3)
         ranked.append(row)
 
     ranked.sort(
@@ -1274,6 +1652,41 @@ class AgentService:
         context, image_ids, sources, references = _assemble_context(evidence_chunks)
         confidence = _confidence_from_chunks(evidence_chunks)
 
+        # 2.5 Context relevance check - ensure context is actually relevant to the question
+        query_analysis = analyze_query(query)
+        query_keywords = set(query_analysis.keywords[:10])
+        query_phrases = set(query_analysis.phrases[:6])
+        all_query_terms = query_keywords | query_phrases
+
+        # Check if context contains any query terms
+        context_lower = context.lower()
+        relevant_terms = [term for term in all_query_terms if term.lower() in context_lower]
+
+        # If less than 20% of query terms are in context, try alternative retrieval
+        if len(all_query_terms) > 0 and len(relevant_terms) / len(all_query_terms) < 0.2:
+            # Try to retrieve with more specific query
+            alt_query = f"{query} {' '.join(list(all_query_terms)[:5])}"
+            alt_chunks = self.retriever.search(alt_query, limit=RETRIEVAL_LIMIT)
+            if alt_chunks:
+                alt_evidence = _filter_evidence_for_query(
+                    alt_chunks,
+                    query=query,
+                    image_terms=image_terms,
+                    image_features=image_features,
+                )
+                if alt_evidence:
+                    # Check if new evidence is more relevant
+                    alt_context, alt_image_ids, alt_sources, alt_references = _assemble_context(alt_evidence[:3])
+                    alt_relevant = [term for term in all_query_terms if term.lower() in alt_context.lower()]
+                    if len(alt_relevant) > len(relevant_terms):
+                        # Use alternative context
+                        evidence_chunks = alt_evidence
+                        context = alt_context
+                        image_ids = alt_image_ids
+                        sources = alt_sources
+                        references = alt_references
+                        confidence = _confidence_from_chunks(evidence_chunks)
+
         # 3. Build messages
         prompt_result = build_manual_qa_system_prompt(context)
         messages: list[dict[str, str]] = [{"role": "system", "content": prompt_result.content}]
@@ -1301,8 +1714,36 @@ class AgentService:
             answer = extractive_answer
         elif _should_use_extractive_manual_answer(answer):
             answer = extractive_answer
+        elif _is_raw_manual_text(answer):
+            # LLM returned raw manual text - use extractive answer instead
+            answer = extractive_answer
         else:
             answer = format_manual_answer(answer, image_ids=[], compact=True)
+
+        # Topic validation - check if answer is actually relevant to the question
+        is_relevant, relevance_score = _validate_topic_relevance(query, answer)
+        if not is_relevant or relevance_score < 0.3:
+            # Answer is drifted - use the pre-computed extractive answer
+            answer = extractive_answer
+
+        # Answer grounding validation - check if answer is grounded in context
+        is_grounded, grounding_score = _validate_answer_grounding(context, answer)
+        if not is_grounded or grounding_score < 0.2:
+            # Answer is hallucinated - use the pre-computed extractive answer
+            answer = extractive_answer
+
+        # Answer length truncation - prevent overly long answers
+        if len(answer) > MAX_ANSWER_LENGTH:
+            # Try to truncate at a sentence boundary
+            truncated = answer[:MAX_ANSWER_LENGTH]
+            last_period = max(truncated.rfind("。"), truncated.rfind("！"), truncated.rfind("？"))
+            if last_period > MAX_ANSWER_LENGTH * 0.6:  # At least 60% of max length
+                answer = truncated[:last_period + 1]
+            else:
+                answer = truncated + "。"
+
+        # Final cleanup - remove any remaining manual text artifacts
+        answer = _final_answer_cleanup(answer)
 
         grounded_image_ids = _select_grounded_manual_image_ids(
             query=query,
