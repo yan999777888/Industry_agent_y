@@ -39,9 +39,9 @@ except ImportError:  # pragma: no cover - optional for test environments
 # Configuration
 # ---------------------------------------------------------------------------
 
-RETRIEVAL_LIMIT = 25        # chunks to retrieve before evidence filtering
-FINAL_CONTEXT_CHUNKS = 20   # chunks passed into the LLM
-MAX_CONTEXT_CHARS = 16000   # truncate context to fit model window
+RETRIEVAL_LIMIT = 20        # chunks to retrieve before evidence filtering
+FINAL_CONTEXT_CHUNKS = 8    # chunks passed into the LLM
+MAX_CONTEXT_CHARS = 8000    # truncate context to fit model window
 MAX_HISTORY_TURNS = 5       # keep last N turns per session
 MIN_TOP_SCORE = 1.5         # below this, do not ask LLM to hallucinate
 MIN_KEEP_SCORE = 1.0        # chunks below this score are discarded
