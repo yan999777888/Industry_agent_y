@@ -892,6 +892,14 @@ def _assemble_context(
         score = chunk.get("_score", "")
         header = f"[参考{idx}] 产品：{product} | 章节：{title} | 检索分：{score}"
         body = text.strip()
+        # Strip "参阅/查阅/参考...说明书" references from context to prevent LLM echoing them
+        body = re.sub(r"详情请参阅[^。\n]*[。]?", "", body)
+        body = re.sub(r"请参阅[^。\n]*[。]?", "", body)
+        body = re.sub(r"请查阅[^。\n]*[。]?", "", body)
+        body = re.sub(r"请参考[^。\n]*[。]?", "", body)
+        body = re.sub(r"建议参阅[^。\n]*[。]?", "", body)
+        body = re.sub(r"参考\d+产品[^。\n]*[。]?", "", body)
+        body = re.sub(r"\s{2,}", " ", body).strip()
         if img_ids:
             body += f"\n（相关配图：{', '.join(img_ids)}）"
         part = f"{header}\n{body}"
