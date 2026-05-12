@@ -1293,11 +1293,9 @@ def _normalize_query_text(text: str) -> str:
 
 def _extract_long_token_terms(token: str) -> list[str]:
     terms: list[str] = []
-    matched_phrase = False
     for phrase in _DOMAIN_PHRASES:
         if phrase in token:
             terms.append(phrase)
-            matched_phrase = True
     for key, values in _DOMAIN_SYNONYMS.items():
         if key in token:
             terms.append(key)
@@ -1306,11 +1304,14 @@ def _extract_long_token_terms(token: str) -> list[str]:
     parts = [part.strip() for part in _LONG_TOKEN_SPLIT_RE.split(token) if 2 <= len(part.strip()) <= 8]
     terms.extend(parts[:6])
 
-    if not matched_phrase and not parts:
-        for size in (4, 3):
-            for index in range(min(4, max(0, len(token) - size + 1))):
-                terms.append(token[index : index + size])
-    return _unique(terms)
+    # Always extract 2-3 char n-grams for Chinese text matching
+    for size in (3, 2):
+        step = max(1, size // 2)
+        for index in range(0, max(0, len(token) - size + 1), step):
+            ngram = token[index : index + size]
+            if ngram and len(ngram) >= 2:
+                terms.append(ngram)
+    return _unique(terms)[:20]
 
 
 def _sanitize_fts_term(term: str) -> str:
