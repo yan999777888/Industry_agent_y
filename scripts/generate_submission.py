@@ -246,7 +246,7 @@ def _is_topic_mismatch(text: str, *, question: str) -> bool:
 
 
 def _ensure_customer_service_greeting(text: str, *, question: str) -> str:
-    if not text or text.startswith(("您好", "你好")):
+    if not text or text.startswith(("您好", "你好", "非常抱歉", "很抱歉", "理解您", "很理解")):
         return text
     is_english_question = bool(re.search(r"[A-Za-z]", question)) and not bool(re.search(r"[一-鿿]", question))
     if is_english_question:
@@ -1148,8 +1148,12 @@ def _rewrite_customer_service_submission(text: str, *, question: str) -> str:
     if lead:
         lead_stripped = lead.strip("。")
         # Add empathy phrase before lead if customer is emotional
-        if empathy and not lead_stripped.startswith(("非常抱歉", "很抱歉", "理解")):
-            lead_stripped = empathy.rstrip("，") + "。" + lead_stripped
+        if empathy and not lead_stripped.startswith(("非常抱歉", "很抱歉", "理解", "很理解")):
+            # Replace "您好，" with empathy phrase
+            if lead_stripped.startswith("您好"):
+                lead_stripped = re.sub(r"^您好[，,]?\s*", empathy, lead_stripped)
+            else:
+                lead_stripped = empathy + lead_stripped
         already_has_lead = any(
             _normalize_sentence_key(item).startswith(_normalize_sentence_key(lead_stripped)[:12])
             for item in selected
