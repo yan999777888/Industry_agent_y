@@ -156,6 +156,7 @@ def _is_raw_manual_text(text: str) -> bool:
 
     Uses a whitelist approach: if the text doesn't start with natural
     conversational Chinese, it's treated as raw manual text.
+    Also checks the full text for manual markers that shouldn't appear.
     """
     if not text or len(text.strip()) < 10:
         return True
@@ -170,13 +171,36 @@ def _is_raw_manual_text(text: str) -> bool:
             break
 
     # Blacklist: manual markers that should NEVER appear in natural CS text
+    # Check first 80 chars (expanded from 50)
     manual_markers = [
         "#", ">>>", "・", "注：", "注:", "第", "页",
         "章节", "产品概述", "维护保养",
     ]
     for marker in manual_markers:
-        if marker in text_after_greeting[:50]:
+        if marker in text_after_greeting[:80]:
             return True
+
+    # Roman numeral section markers (IX., VIII., IV., etc.)
+    if re.search(r"[IVX]+\.\s", text_after_greeting[:80]):
+        return True
+
+    # Check FULL text for more manual markers (not just first 80 chars)
+    full_manual_markers = [
+        "第", "页", "章节", "产品概述", "维护保养",
+        "使用说明书", "注意事项", "操作说明",
+    ]
+    for marker in full_manual_markers:
+        if marker in text_stripped:
+            # "第" and "页" might appear in natural text like "第3天"
+            # Only flag if they appear together or in manual-style context
+            if marker == "第" and "页" in text_stripped:
+                return True
+            if marker in ("页", "章节", "产品概述", "维护保养", "使用说明书", "注意事项", "操作说明"):
+                return True
+
+    # Page references like "第 23、24 页" or "见第5页"
+    if re.search(r"第\s*\d+[\s、，,，]*\d*\s*页", text_stripped):
+        return True
 
     # Whitelist: natural conversational openers after greeting
     natural_prefixes = [
@@ -194,25 +218,43 @@ def _is_raw_manual_text(text: str) -> bool:
         "安装", "拆卸", "更换", "连接",
         "充电", "电池", "电源",
         "退货", "退款", "换货", "维修",
+        "不适合", "不适合在",  # for dishwasher question
+        "警告", "注意",  # for safety warnings
+        "心率", "运动", "健身",  # for fitness tracker questions
+        "保修期", "保修期内", "质保期",  # for warranty questions
+        "吹风机", "钻孔", "切割",  # for power tool questions
     ]
 
     # Check if answer starts with natural conversational text
     for prefix in natural_prefixes:
         if text_after_greeting.startswith(prefix):
-            # Additional check: does it look like a section title?
-            # Section titles are short and don't have natural sentence structure
-            first_sentence_end = -1
-            for end_char in ["。", "！", "？", "，"]:
+            # Additional check: does it look like a section title or parts list?
+            first_comma_pos = text_after_greeting.find("，")
+            first_period_pos = -1
+            for end_char in ["。", "！", "？"]:
                 pos = text_after_greeting.find(end_char)
                 if pos > 0:
-                    if first_sentence_end == -1 or pos < first_sentence_end:
-                        first_sentence_end = pos
+                    if first_period_pos == -1 or pos < first_period_pos:
+                        first_period_pos = pos
 
-            if first_sentence_end > 0:
-                first_sentence = text_after_greeting[:first_sentence_end]
-                # If first sentence is very short (< 15 chars), likely a title
-                if len(first_sentence) < 15:
+            # If first sentence (before any punctuation) is very short AND has no comma,
+            # it's likely a section title, not a natural answer
+            if first_period_pos > 0 and first_comma_pos == -1:
+                first_sentence = text_after_greeting[:first_period_pos]
+                if len(first_sentence) < 12:
                     return True
+
+            # Check if text looks like a parts list (space-separated short items, no commas)
+            first_80 = text_after_greeting[:80]
+            if " " in first_80 and "，" not in first_80:
+                # Split by spaces and check if items are short nouns
+                items = [item.strip() for item in first_80.split(" ") if item.strip()]
+                if len(items) >= 4:
+                    # 4+ space-separated items without commas = likely a parts list
+                    avg_len = sum(len(item) for item in items) / len(items)
+                    if avg_len < 6:
+                        return True
+
             return False
 
     # If none of the natural prefixes match, check for common manual patterns
@@ -244,9 +286,11 @@ def _clean_manual_markers(text: str) -> str:
     cleaned = cleaned.replace("・", "")
     # Remove "注：" and "注:" markers
     cleaned = re.sub(r"注[：:]\s*", "", cleaned)
-    # Remove page references
-    cleaned = re.sub(r"第\s*\d+\s*页", "", cleaned)
-    cleaned = re.sub(r"见第\s*\d+\s*页.*?部分", "", cleaned)
+    # Remove Roman numeral section markers (IX., VIII., IV., etc.)
+    cleaned = re.sub(r"\b[IVX]+\.\s*", "", cleaned)
+    # Remove page references (handles "第 23、24 页", "第5页", "见第5页")
+    cleaned = re.sub(r"第\s*\d+[\s、，,，]*\d*\s*页", "", cleaned)
+    cleaned = re.sub(r"见第\s*\d+.*?页.*?部分", "", cleaned)
     cleaned = re.sub(r"详见.*?章节", "", cleaned)
     # Remove image references
     cleaned = re.sub(r"\(相关配图：[^)]*\)", "", cleaned)
@@ -261,42 +305,93 @@ def _clean_manual_markers(text: str) -> str:
 def _build_conversational_answer(query: str, evidence_chunks: list, image_ids: list) -> str:
     """Build a clean, conversational customer service answer from evidence chunks.
 
-    Strategy: only use the TOP chunk (most relevant), extract 1-2 clean sentences.
+    Strategy: try top chunks, extract the most relevant sentences.
+    Score sentences by keyword overlap with the query.
     """
     if not evidence_chunks:
         return "您好，根据现有资料，暂时无法提供更详细的信息。如需帮助随时联系我们。"
 
-    top_chunk = evidence_chunks[0]
-    text = str(top_chunk.get("text", ""))
-    text = _clean_manual_markers(text)
+    # Extract query keywords for relevance scoring
+    query_chars = set(query)
+    query_terms = set()
+    for term in re.findall(r"[一-鿿]{2,}", query):
+        query_terms.add(term)
+    # Also add individual chars for short queries
+    for char in query:
+        if "一" <= char <= "鿿":
+            query_chars.add(char)
 
-    # Split into sentences
-    sentences = re.split(r"[。！？]", text)
-    clean_sentences: list[str] = []
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence or len(sentence) < 8:
+    best_answer = None
+    best_score = -1
+
+    # Try top 3 chunks, pick the one with best sentences
+    for chunk in evidence_chunks[:3]:
+        text = str(chunk.get("text", ""))
+        text = _clean_manual_markers(text)
+
+        # Split into sentences
+        sentences = re.split(r"[。！？]", text)
+        scored_sentences: list[tuple[float, str]] = []
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence or len(sentence) < 8:
+                continue
+            # Skip pure headers/labels (short text without punctuation)
+            if len(sentence) < 15 and not any(c in sentence for c in "，。、："):
+                continue
+            # Skip manual-style fragments
+            if re.match(r"^(图\d+|第\d+页|注[：:])", sentence):
+                continue
+            # Skip list-like text (space-separated items without verbs)
+            if re.match(r"^[一-鿿\s]+$", sentence) and len(sentence.split()) > 3:
+                continue
+
+            # Score sentence by relevance to query
+            score = 0.0
+            for term in query_terms:
+                if term in sentence:
+                    score += 2.0
+            for char in query_chars:
+                if char in sentence:
+                    score += 0.5
+            # Prefer medium-length sentences (not too short, not too long)
+            if 20 <= len(sentence) <= 100:
+                score += 1.0
+            # Penalize very short sentences
+            if len(sentence) < 15:
+                score -= 1.0
+
+            scored_sentences.append((score, sentence))
+
+        if not scored_sentences:
             continue
-        # Skip pure headers/labels (short text without punctuation)
-        if len(sentence) < 15 and not any(c in sentence for c in "，。、："):
-            continue
-        # Skip manual-style fragments
-        if re.match(r"^(图\d+|第\d+页|注[：:])", sentence):
-            continue
-        clean_sentences.append(sentence)
 
-    if not clean_sentences:
-        # Fallback to chunk title
-        title = _clean_manual_markers(str(top_chunk.get("title", "")))
-        return f"您好，{title}。如需帮助随时联系我们。"
+        # Sort by score descending
+        scored_sentences.sort(key=lambda x: x[0], reverse=True)
 
-    # Take only the first 1-2 most relevant sentences
-    selected = clean_sentences[:2]
-    answer_body = "。".join(selected)
-    if not answer_body.endswith(("。", "！", "？")):
-        answer_body += "。"
+        # Take top 2 sentences
+        selected = [s for _, s in scored_sentences[:2]]
+        answer_body = "。".join(selected)
+        if not answer_body.endswith(("。", "！", "？")):
+            answer_body += "。"
+        candidate = f"您好，{answer_body}如需帮助随时联系我们。"
 
-    return f"您好，{answer_body}如需帮助随时联系我们。"
+        # Score this candidate
+        total_score = sum(score for score, _ in scored_sentences[:2])
+        if total_score > best_score:
+            best_score = total_score
+            best_answer = candidate
+
+    if best_answer and best_score > 0:
+        return best_answer
+
+    # Fallback: use chunk title
+    for chunk in evidence_chunks[:3]:
+        title = _clean_manual_markers(str(chunk.get("title", "")))
+        if title and len(title) > 5:
+            return f"您好，{title}。如需帮助随时联系我们。"
+
+    return "您好，根据现有资料，暂时无法提供更详细的信息。如需帮助随时联系我们。"
 
 
 def _validate_answer_grounding(context: str, answer: str) -> tuple[bool, float]:
@@ -485,9 +580,11 @@ def _final_answer_cleanup(answer: str) -> str:
     # Remove "#" headers (e.g., "# 维修" → "维修")
     cleaned = re.sub(r"^#\s*", "", cleaned)
     cleaned = re.sub(r"\n#\s*", "\n", cleaned)
-    # Remove "第X页" references
-    cleaned = re.sub(r"第\s*\d+\s*页", "", cleaned)
-    cleaned = re.sub(r"见第\s*\d+\s*页.*?部分", "", cleaned)
+    # Remove Roman numeral section markers (IX., VIII., IV., etc.)
+    cleaned = re.sub(r"\b[IVX]+\.\s*", "", cleaned)
+    # Remove "第X页" references (handles "第 23、24 页", "第5页", "见第5页")
+    cleaned = re.sub(r"第\s*\d+[\s、，,，]*\d*\s*页", "", cleaned)
+    cleaned = re.sub(r"见第\s*\d+.*?页.*?部分", "", cleaned)
     cleaned = re.sub(r"详见.*?章节", "", cleaned)
     # Remove "相关配图：..." at the end
     cleaned = re.sub(r"[（(]相关配图：[^）)]*[）)]\s*$", "", cleaned)
