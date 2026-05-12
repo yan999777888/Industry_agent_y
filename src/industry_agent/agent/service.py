@@ -259,32 +259,39 @@ def _clean_manual_markers(text: str) -> str:
 
 
 def _build_conversational_answer(query: str, evidence_chunks: list, image_ids: list) -> str:
-    """Build a clean, conversational customer service answer from evidence chunks."""
+    """Build a clean, conversational customer service answer from evidence chunks.
+
+    Strategy: only use the TOP chunk (most relevant), extract 1-2 clean sentences.
+    """
     if not evidence_chunks:
         return "您好，根据现有资料，暂时无法提供更详细的信息。如需帮助随时联系我们。"
 
-    # Extract the most relevant sentences from evidence
-    all_sentences: list[str] = []
-    for chunk in evidence_chunks[:3]:
-        text = str(chunk.get("text", ""))
-        text = _clean_manual_markers(text)
-        sentences = re.split(r"[。！？]", text)
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence or len(sentence) < 8:
-                continue
-            # Skip pure headers/labels
-            if len(sentence) < 15 and not any(c in sentence for c in "，。、"):
-                continue
-            all_sentences.append(sentence)
+    top_chunk = evidence_chunks[0]
+    text = str(top_chunk.get("text", ""))
+    text = _clean_manual_markers(text)
 
-    if not all_sentences:
-        # Fallback to first chunk title
-        first_title = _clean_manual_markers(str(evidence_chunks[0].get("title", "")))
-        return f"您好，关于您咨询的问题，{first_title}。如需帮助随时联系我们。"
+    # Split into sentences
+    sentences = re.split(r"[。！？]", text)
+    clean_sentences: list[str] = []
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence or len(sentence) < 8:
+            continue
+        # Skip pure headers/labels (short text without punctuation)
+        if len(sentence) < 15 and not any(c in sentence for c in "，。、："):
+            continue
+        # Skip manual-style fragments
+        if re.match(r"^(图\d+|第\d+页|注[：:])", sentence):
+            continue
+        clean_sentences.append(sentence)
 
-    # Take the first 2-3 most relevant sentences
-    selected = all_sentences[:3]
+    if not clean_sentences:
+        # Fallback to chunk title
+        title = _clean_manual_markers(str(top_chunk.get("title", "")))
+        return f"您好，{title}。如需帮助随时联系我们。"
+
+    # Take only the first 1-2 most relevant sentences
+    selected = clean_sentences[:2]
     answer_body = "。".join(selected)
     if not answer_body.endswith(("。", "！", "？")):
         answer_body += "。"
