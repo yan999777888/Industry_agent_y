@@ -62,6 +62,10 @@ _FALLBACK_SENTENCE_PATTERNS: tuple[str, ...] = (
     r"建议您查看产品包装[^。！？!?]*[。]?",
     r"根据提供的建议您[^。！？!?]*[。]?",
     r"根据现有建议您[^。！？!?]*[。]?",
+    r"请参考[^。！？!?]*产品(?:说明书|手册|包装)[^。！？!?]*[。]?",
+    r"请(?:查阅|查看|参阅)[^。！？!?]*(?:说明书|手册|官方)[^。！？!?]*[。]?",
+    r"(?:please|Please)\s+(?:refer|check|see|consult)\s+(?:to\s+)?(?:the\s+)?(?:product\s+)?(?:manual|documentation|guide|website)[^.]*[.]?",
+    r"(?:please|Please)\s+(?:contact|reach\s+out\s+to)\s+(?:customer\s+)?(?:service|support)[^.]*[.]?",
     r"无法为您提供[^。！？!?]*[。]?",
     r"无法提供[^。！？!?]*具体[^。！？!?]*[。]?",
     r"未提及[^。！？!?]*相关[^。！？!?]*[。]?",
@@ -160,6 +164,9 @@ _HEAVY_SUBMISSION_NOISE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"我无法回答|抱歉，我无法|我无法查到|无法为您提供"),
     re.compile(r"当前还无法准确定位"),
     re.compile(r"建议您查阅产品说明书|建议您查看产品包装"),
+    re.compile(r"请(?:查阅|查看|参阅|参考).{0,20}(?:说明书|手册|官方网站)", flags=re.IGNORECASE),
+    re.compile(r"(?:please|Please)\s+(?:refer|check|see|consult)\s+(?:to\s+)?(?:the\s+)?(?:product\s+)?(?:manual|documentation|guide)", flags=re.IGNORECASE),
+    re.compile(r"(?:please|Please)\s+(?:contact|reach\s+out\s+to)\s+(?:customer\s+)?(?:service|support)", flags=re.IGNORECASE),
 )
 
 
@@ -714,6 +721,16 @@ def _is_off_topic_answer(answer: str, question: str) -> bool:
     refusal_patterns = ("无法", "未提及", "未包含", "没有提供", "没有相关", "不包含",
                         "cannot", "not contain", "no specific", "no relevant")
     has_refusal = any(p in a_lower for p in refusal_patterns)
+    # Check for "telling user to check manual" patterns - treat as off-topic
+    manual_redirect_patterns = (
+        "建议您查阅", "请查阅", "请参考用户手册", "请参考产品说明书",
+        "建议您查看产品包装", "请查阅产品说明书",
+        "refer to the manual", "check the manual", "see the manual",
+        "refer to the product manual", "check the product documentation",
+    )
+    has_manual_redirect = any(p in a_lower for p in manual_redirect_patterns)
+    if has_manual_redirect:
+        return True
     intent_keywords: list[str] = []
     action_map = {
         "关机": ["关机", "关闭", "电源", "开机"],
