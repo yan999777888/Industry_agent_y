@@ -154,6 +154,11 @@ def _normalize_for_smalltalk(text: str) -> str:
     return _NON_WORD_RE.sub("", text.strip().lower())
 
 
+def _normalize(text: str) -> str:
+    """Lowercase and strip whitespace for text comparison."""
+    return text.strip().lower()
+
+
 def _match_smalltalk_reply(question: str) -> tuple[str, str] | None:
     normalized = _normalize_for_smalltalk(question)
     if not normalized:
