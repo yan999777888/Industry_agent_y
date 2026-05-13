@@ -302,18 +302,49 @@ def _clean_manual_markers(text: str) -> str:
     return cleaned.strip(" -|。")
 
 
+def _chunk_is_low_quality(chunk: dict) -> bool:
+    """Check if a chunk is low quality (parts list, TOC, overview) and should be skipped."""
+    meta = chunk.get("metadata", {})
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+    chunk_type = meta.get("chunk_type", "")
+    if chunk_type in ("parts_list", "toc"):
+        return True
+    is_toc = meta.get("is_toc", False)
+    if is_toc:
+        return True
+    # Check if text is a parts list pattern (space-separated short items)
+    text = str(chunk.get("text", ""))[:120]
+    if " " in text and "，" not in text:
+        items = [item.strip() for item in text.split(" ") if item.strip()]
+        if len(items) >= 4 and all(len(item) < 8 for item in items):
+            return True
+    return False
+
+
 def _build_conversational_answer(query: str, evidence_chunks: list, image_ids: list) -> str:
     """Build a clean, conversational customer service answer from evidence chunks.
 
-    Strategy: use the TOP-1 chunk from retrieval (already ranked by relevance).
-    Extract the most informative sentence(s) from it.
+    Strategy: skip low-quality chunks (parts lists, TOC) and use the best
+    substantive chunk. Extract the most informative sentence(s).
     """
     if not evidence_chunks:
         return "您好，根据现有资料，暂时无法提供更详细的信息。如需帮助随时联系我们。"
 
-    # Always use top-1 chunk (retriever already ranked by relevance)
-    top_chunk = evidence_chunks[0]
-    text = str(top_chunk.get("text", ""))
+    # Find the best non-low-quality chunk
+    best_chunk = None
+    for chunk in evidence_chunks[:5]:
+        if not _chunk_is_low_quality(chunk):
+            best_chunk = chunk
+            break
+    # Fallback to top-1 if all chunks are low quality
+    if best_chunk is None:
+        best_chunk = evidence_chunks[0]
+
+    text = str(best_chunk.get("text", ""))
     text = _clean_manual_markers(text)
 
     # Split into sentences
@@ -348,7 +379,7 @@ def _build_conversational_answer(query: str, evidence_chunks: list, image_ids: l
 
     if not clean_sentences:
         # Fallback to chunk title
-        title = _clean_manual_markers(str(top_chunk.get("title", "")))
+        title = _clean_manual_markers(str(best_chunk.get("title", "")))
         return f"您好，{title}。如需帮助随时联系我们。"
 
     # Take first 1-2 substantive sentences
@@ -811,7 +842,17 @@ def _build_extractive_manual_answer(
     lines = [conclusion]
     if details:
         lines.extend(details[:2])
-    return "\n".join(lines).strip()
+    answer = "\n".join(lines).strip()
+
+    # For English queries, wrap answer in Chinese customer service format
+    if _is_ascii_heavy(query) and answer and not answer.startswith("您好"):
+        # Clean up the English text
+        answer = re.sub(r"\s+", " ", answer).strip()
+        answer = answer.rstrip(".")
+        if answer:
+            answer = f"您好，{answer}。如需帮助随时联系我们。"
+
+    return answer
 
 
 def _build_manual_answer_terms(query: str, answer: str) -> list[str]:
@@ -1754,7 +1795,16 @@ class AgentService:
         if use_llm:
             answer = format_manual_answer(answer, image_ids=[], compact=True)
         else:
-            answer = conversational_answer
+            # Try extractive answer first (better than conversational for manual queries)
+            extractive_answer = _build_extractive_manual_answer(
+                query=query,
+                evidence_chunks=evidence_chunks,
+                image_ids=image_ids,
+            )
+            if extractive_answer and len(extractive_answer) > 20:
+                answer = extractive_answer
+            else:
+                answer = conversational_answer
 
         # Topic validation - check if answer is actually relevant to the question
         is_relevant, relevance_score = _validate_topic_relevance(query, answer)

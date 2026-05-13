@@ -958,7 +958,17 @@ class SQLiteRetriever:
             score -= 3.0
         if metadata.get("has_ocr_noise"):
             score -= 1.5
+        # Penalize low-quality chunk types when query is NOT asking for that type
+        chunk_type = metadata.get("chunk_type", "")
         intents = _detect_query_semantic_intents(analysis)
+        if chunk_type == "parts_list" and "parts_list" not in intents:
+            score -= 8.0  # Heavy penalty: parts list returned for a non-parts question
+        if chunk_type == "toc" and "parts_list" not in intents:
+            score -= 5.0  # Already has is_toc penalty, add more for chunk_type
+        if chunk_type == "safety_warning" and intents and intents <= {"procedure", "troubleshooting"}:
+            score -= 3.0  # Safety warning for a procedure question
+        if chunk_type == "specification" and intents and intents <= {"procedure", "troubleshooting"}:
+            score -= 2.0  # Specs for a procedure question
         score += _semantic_alignment_score(metadata=metadata, analysis=analysis, intents=intents)
         score += _exact_phrase_alignment_boost(title_norm=title_norm, text_norm=text_norm, analysis=analysis)
         score += _query_structure_alignment_score(
