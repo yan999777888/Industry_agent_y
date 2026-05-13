@@ -1686,18 +1686,13 @@ class AgentService:
                 )
 
         chunks = _merge_retrieval_candidates(candidate_groups)
-        evidence_chunks = _filter_evidence_for_query(
-            chunks,
-            query=query,
-            image_terms=image_terms,
-            image_features=image_features,
-        )
+
+        # Use retriever's original ranking (already optimized by _score).
+        # Only apply light evidence filtering to remove clearly irrelevant chunks.
+        evidence_chunks = _filter_evidence(chunks)
 
         if not evidence_chunks and chunks:
             evidence_chunks = chunks[:5]
-
-        # Re-rank by relevance to ensure most useful chunks are passed to LLM
-        evidence_chunks = self._rerank_chunks_by_relevance(query, evidence_chunks)
 
         if not evidence_chunks:
             return {
@@ -1724,41 +1719,6 @@ class AgentService:
         # 2. Assemble context / collect metadata
         context, image_ids, sources, references = _assemble_context(evidence_chunks)
         confidence = _confidence_from_chunks(evidence_chunks)
-
-        # 2.5 Context relevance check - ensure context is actually relevant to the question
-        query_analysis = analyze_query(query)
-        query_keywords = set(query_analysis.keywords[:10])
-        query_phrases = set(query_analysis.phrases[:6])
-        all_query_terms = query_keywords | query_phrases
-
-        # Check if context contains any query terms
-        context_lower = context.lower()
-        relevant_terms = [term for term in all_query_terms if term.lower() in context_lower]
-
-        # If less than 20% of query terms are in context, try alternative retrieval
-        if len(all_query_terms) > 0 and len(relevant_terms) / len(all_query_terms) < 0.2:
-            # Try to retrieve with more specific query
-            alt_query = f"{query} {' '.join(list(all_query_terms)[:5])}"
-            alt_chunks = self.retriever.search(alt_query, limit=RETRIEVAL_LIMIT)
-            if alt_chunks:
-                alt_evidence = _filter_evidence_for_query(
-                    alt_chunks,
-                    query=query,
-                    image_terms=image_terms,
-                    image_features=image_features,
-                )
-                if alt_evidence:
-                    # Check if new evidence is more relevant
-                    alt_context, alt_image_ids, alt_sources, alt_references = _assemble_context(alt_evidence[:3])
-                    alt_relevant = [term for term in all_query_terms if term.lower() in alt_context.lower()]
-                    if len(alt_relevant) > len(relevant_terms):
-                        # Use alternative context
-                        evidence_chunks = alt_evidence
-                        context = alt_context
-                        image_ids = alt_image_ids
-                        sources = alt_sources
-                        references = alt_references
-                        confidence = _confidence_from_chunks(evidence_chunks)
 
         # 3. Build messages
         prompt_result = build_manual_qa_system_prompt(context)
