@@ -175,6 +175,8 @@ def _is_raw_manual_text(text: str) -> bool:
     manual_markers = [
         "#", ">>>", "・", "注：", "注:", "第", "页",
         "章节", "产品概述", "维护保养",
+        "目标：", "结论：",  # LLM structured format headings
+        "■",  # bullet markers
     ]
     for marker in manual_markers:
         if marker in text_after_greeting[:80]:
@@ -586,6 +588,15 @@ def _final_answer_cleanup(answer: str) -> str:
     # Remove "相关配图：..." at the end
     cleaned = re.sub(r"[（(]相关配图：[^）)]*[）)]\s*$", "", cleaned)
     cleaned = re.sub(r"\(相关配图：[^)]*\)\s*$", "", cleaned)
+    # Remove "■" bullets
+    cleaned = cleaned.replace("■", "").strip()
+    # Remove leading step numbers after punctuation (e.g., "。2 " → "。")
+    cleaned = re.sub(r"[。]\s*\d+\s+", "。", cleaned)
+    # Remove leading numbers at start of answer (e.g., "2 打开" → "打开")
+    cleaned = re.sub(r"^\d+\s+", "", cleaned)
+    # Remove "结论：" and "目标：" headings
+    cleaned = re.sub(r"结论[：:]\s*", "", cleaned)
+    cleaned = re.sub(r"目标[：:]\s*", "", cleaned)
     # Clean up extra spaces
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     # Remove trailing punctuation artifacts
