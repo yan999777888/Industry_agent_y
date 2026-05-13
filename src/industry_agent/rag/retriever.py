@@ -770,7 +770,7 @@ class SQLiteRetriever:
             return []
 
         match_terms = usable_terms[:10]
-        match_query = " OR ".join(f'"{term}"' for term in match_terms)
+        match_query = _build_cjk_aware_fts_query(match_terms)
         try:
             rows = conn.execute(
                 """
@@ -1339,7 +1339,36 @@ def _extract_long_token_terms(token: str) -> list[str]:
 def _sanitize_fts_term(term: str) -> str:
     cleaned = _FTS_UNSAFE_RE.sub(" ", str(term)).strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
+    if not cleaned:
+        return ""
+    # Single CJK characters are valid FTS5 tokens with unicode61 tokenizer
+    if re.fullmatch(r"[一-鿿]", cleaned):
+        return cleaned
     return cleaned if len(cleaned) >= 2 else ""
+
+
+def _build_cjk_aware_fts_query(terms: list[str]) -> str:
+    """Build FTS5 query that handles CJK terms correctly.
+
+    With unicode61 tokenizer and 'categories L* N* Co', each CJK character
+    becomes a separate FTS5 token. Phrase queries like "空调" won't match
+    because the tokenizer never produces "空调" as a single token —
+    it produces "空" and "调". Split CJK strings into space-separated
+    characters for implicit AND matching.
+    """
+    CJK_RE = re.compile(r"^[一-鿿]+$")
+    clauses: list[str] = []
+    for term in terms:
+        if CJK_RE.match(term) and len(term) >= 2:
+            # CJK multi-char: split into individual chars for implicit AND
+            clauses.append(" ".join(term))
+        elif CJK_RE.match(term) and len(term) == 1:
+            # Single CJK char
+            clauses.append(term)
+        else:
+            # English or mixed: quoted phrase
+            clauses.append(f'"{term}"')
+    return " OR ".join(clauses)
 
 
 def _fts_rank_bonus(value: Any) -> float:

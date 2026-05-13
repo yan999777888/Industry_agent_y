@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,6 +29,7 @@ from industry_agent.agent.skills.image_skill import ImageSkill
 from industry_agent.config import settings
 from industry_agent.llm.client import LLMClient
 from industry_agent.rag.factory import create_retriever
+from industry_agent.rag.query_expansion import QueryExpander
 from industry_agent.rag.retriever import analyze_query
 
 try:
@@ -40,13 +42,14 @@ except ImportError:  # pragma: no cover - optional for test environments
 # ---------------------------------------------------------------------------
 
 RETRIEVAL_LIMIT = 20        # chunks to retrieve before evidence filtering
-FINAL_CONTEXT_CHUNKS = 6    # chunks passed into the LLM
-MAX_CONTEXT_CHARS = 6000    # truncate context to fit model window
+FINAL_CONTEXT_CHUNKS = 8    # chunks passed into the LLM
+MAX_CONTEXT_CHARS = 7000    # truncate context to fit model window
 MAX_HISTORY_TURNS = 3       # keep last N turns per session
-MIN_TOP_SCORE = 1.5         # below this, do not ask LLM to hallucinate
-MIN_KEEP_SCORE = 1.0        # chunks below this score are discarded
+MIN_TOP_SCORE = 0.5         # below this, do not ask LLM to hallucinate
+MIN_KEEP_SCORE = 0.4        # chunks below this score are discarded
 MULTIMODAL_RETRIEVAL_LIMIT = 6
-MAX_ANSWER_LENGTH = 300     # maximum answer length in characters
+MAX_ANSWER_LENGTH = 500     # maximum answer length in characters
+MAX_ENGLISH_ANSWER_LENGTH = 1000  # English needs more chars
 
 OLLAMA_BASE_URL = settings.ollama_base_url
 OLLAMA_MODEL = settings.ollama_model
@@ -151,127 +154,88 @@ def _strip_thinking(text: str) -> str:
     return text
 
 
-def _is_raw_manual_text(text: str) -> bool:
-    """Detect if the answer is raw manual text (NOT natural customer service).
+def _is_english_text(text: str) -> bool:
+    """Check if text is primarily English (vs Chinese)."""
+    if not text or not text.strip():
+        return False
+    text_clean = text.strip()
+    chinese_chars = len(re.findall(r'[一-鿿]', text_clean))
+    english_words = len(re.findall(r'[a-zA-Z]{3,}', text_clean))
+    return english_words >= 3 and chinese_chars < english_words
 
-    Uses a whitelist approach: if the text doesn't start with natural
-    conversational Chinese, it's treated as raw manual text.
-    Also checks the full text for manual markers that shouldn't appear.
+
+def _strip_llm_structured_format(text: str) -> str:
+    """Strip structured format headers that some LLMs use.
+
+    Transforms:
+      结论：
+      - 支持7天无理由退货。
+      - 运费需自己承担。
+
+      详情/说明：
+      - xxx
+    →
+      支持7天无理由退货。运费需自己承担。
     """
+    lines = text.strip().split("\n")
+    cleaned_lines: list[str] = []
+    in_structure = False
+    for line in lines:
+        stripped = line.strip()
+        # Skip structured headers
+        if stripped in ("结论：", "结论:", "目标：", "目标:"):
+            in_structure = True
+            continue
+        if stripped.startswith(("详情", "说明", "Details", "Description")):
+            in_structure = True
+            # Also skip separator lines like "---" or "："
+            continue
+        # Skip section dividers
+        if stripped in ("---", "－－－", "---", "") or re.match(r"^[—\-]{3,}$", stripped):
+            continue
+        # Strip leading bullet markers
+        if in_structure:
+            stripped = re.sub(r"^[-•·*]\s*", "", stripped)
+        # Strip "# " manual heading markers anywhere they appear as headings
+        # (e.g., "您好，# Note:" or "# Note:" or "，# Note:")
+        stripped = re.sub(r"#+\s*", "", stripped).strip()
+        cleaned_lines.append(stripped)
+    result = "。".join(line for line in cleaned_lines if line)
+    result = re.sub(r"。{2,}", "。", result)
+    return result.strip() or text
+
+
+def _is_raw_manual_text(text: str) -> bool:
+    """Light check for raw manual text — trust the LLM more, reject only obvious garbage."""
     if not text or len(text.strip()) < 10:
         return True
 
     text_stripped = text.strip()
 
-    # Remove greeting prefix
-    text_after_greeting = text_stripped
-    for prefix in ["您好，", "您好！", "你好，", "你好！", "Hello,", "Hi,"]:
-        if text_stripped.startswith(prefix):
-            text_after_greeting = text_stripped[len(prefix):].strip()
-            break
-
-    # Blacklist: manual markers that should NEVER appear in natural CS text
-    # Check first 80 chars (expanded from 50)
-    manual_markers = [
-        "#", ">>>", "・", "注：", "注:", "第", "页",
-        "章节", "产品概述", "维护保养",
-        "目标：", "结论：",  # LLM structured format headings
-        "■",  # bullet markers
-    ]
-    for marker in manual_markers:
-        if marker in text_after_greeting[:80]:
-            return True
-
-    # Roman numeral section markers (IX., VIII., IV., etc.)
-    if re.search(r"[IVX]+\.\s", text_after_greeting[:80]):
+    # Reject obvious heading-only content
+    if re.match(r'^#+\s', text_stripped):
+        return True
+    if re.match(r'^[A-Z\s]{12,}$', text_stripped[:60].strip()):
         return True
 
-    # Check FULL text for more manual markers (not just first 80 chars)
-    full_manual_markers = [
-        "第", "页", "章节", "产品概述", "维护保养",
-        "使用说明书", "注意事项", "操作说明",
-    ]
-    for marker in full_manual_markers:
-        if marker in text_stripped:
-            # "第" and "页" might appear in natural text like "第3天"
-            # Only flag if they appear together or in manual-style context
-            if marker == "第" and "页" in text_stripped:
-                return True
-            if marker in ("页", "章节", "产品概述", "维护保养", "使用说明书", "注意事项", "操作说明"):
-                return True
+    # Reject "CAUTION"/"WARNING"/"IMPORTANT" manual labels at start
+    if re.match(r'^(CAUTION|WARNING|IMPORTANT|NOTE|注意|警告)\b', text_stripped, re.IGNORECASE):
+        return True
 
-    # Page references like "第 23、24 页" or "见第5页"
+    # Reject page references
     if re.search(r"第\s*\d+[\s、，,，]*\d*\s*页", text_stripped):
         return True
 
-    # Whitelist: natural conversational openers after greeting
-    natural_prefixes = [
-        "关于", "对于", "针对", "您问的", "您说的",
-        "根据", "按照", "建议", "可以", "需要",
-        "是的", "好的", "没问题",
-        "这款", "这个", "该", "这",
-        "如果", "要是", "当",
-        "一般来说", "通常", "正常情况下",
-        "非常抱歉", "理解", "感谢",
-        "不支持", "支持", "可以的", "不可以",
-        "主要", "核心", "关键",
-        "使用", "操作", "打开", "关闭", "启动", "停止",
-        "清洗", "清洁", "保养", "维护",
-        "安装", "拆卸", "更换", "连接",
-        "充电", "电池", "电源",
-        "退货", "退款", "换货", "维修",
-        "不适合", "不适合在",  # for dishwasher question
-        "警告", "注意",  # for safety warnings
-        "心率", "运动", "健身",  # for fitness tracker questions
-        "保修期", "保修期内", "质保期",  # for warranty questions
-        "吹风机", "钻孔", "切割",  # for power tool questions
-    ]
+    # Reject parts-list patterns
+    if re.match(r'^\d+[\.\)]\s+\w{2,8}\s+\d+', text_stripped):
+        return True
 
-    # Check if answer starts with natural conversational text
-    for prefix in natural_prefixes:
-        if text_after_greeting.startswith(prefix):
-            # Additional check: does it look like a section title or parts list?
-            first_comma_pos = text_after_greeting.find("，")
-            first_period_pos = -1
-            for end_char in ["。", "！", "？"]:
-                pos = text_after_greeting.find(end_char)
-                if pos > 0:
-                    if first_period_pos == -1 or pos < first_period_pos:
-                        first_period_pos = pos
+    # Reject obvious manual markers
+    if ">>>" in text_stripped[:80]:
+        return True
 
-            # If first sentence (before any punctuation) is very short AND has no comma,
-            # it's likely a section title, not a natural answer
-            if first_period_pos > 0 and first_comma_pos == -1:
-                first_sentence = text_after_greeting[:first_period_pos]
-                if len(first_sentence) < 12:
-                    return True
-
-            # Check if text looks like a parts list (space-separated short items, no commas)
-            first_80 = text_after_greeting[:80]
-            if " " in first_80 and "，" not in first_80:
-                # Split by spaces and check if items are short nouns
-                items = [item.strip() for item in first_80.split(" ") if item.strip()]
-                if len(items) >= 4:
-                    # 4+ space-separated items without commas = likely a parts list
-                    avg_len = sum(len(item) for item in items) / len(items)
-                    if avg_len < 6:
-                        return True
-
-            return False
-
-    # If none of the natural prefixes match, check for common manual patterns
-    # Manual text often starts with product-specific terms followed by content
-    manual_start_patterns = [
-        r"^[A-Z]",  # English start (manual section names)
-        r"^\d+[\.、）\)]",  # Numbered lists
-        r"^[一-龥]{1,4}[C\s]",  # Short Chinese + C marker
-    ]
-    for pattern in manual_start_patterns:
-        if re.match(pattern, text_after_greeting):
-            return True
-
-    # Default: if the text doesn't match any natural prefix, treat as raw
-    return True
+    # Accept everything else — the LLM generated it, trust it
+    return False
 
 
 def _clean_manual_markers(text: str) -> str:
@@ -327,70 +291,117 @@ def _chunk_is_low_quality(chunk: dict) -> bool:
     return False
 
 
-def _build_conversational_answer(query: str, evidence_chunks: list, image_ids: list) -> str:
-    """Build a clean, conversational customer service answer from evidence chunks.
+def _extract_answer_relevance_terms(query: str) -> list[str]:
+    """Extract meaningful question terms for relevance scoring (skip stopwords)."""
+    query_lower = query.lower()
+    terms = []
+    _QW_STOP = frozenset(("您好", "什么", "如何", "怎么", "哪些", "为什么", "是否",
+                          "可以", "需要", "请问", "一下", "关于", "这个", "那个", "一个",
+                          "哪个", "多少", "怎样", "能", "没有", "还是", "不是", "就是"))
+    for term in re.findall(r'[一-鿿]{2,}', query_lower):
+        if term not in _QW_STOP:
+            terms.append(term)
+    for term in re.findall(r'[A-Za-z][A-Za-z0-9_-]{2,}', query_lower):
+        if term not in ('how', 'what', 'when', 'where', 'why', 'which',
+                        'the', 'and', 'for', 'can', 'you', 'your', 'are'):
+            terms.append(term)
+    return terms
 
-    Strategy: skip low-quality chunks (parts lists, TOC) and use the best
-    substantive chunk. Extract the most informative sentence(s).
+
+def _build_conversational_answer(query: str, evidence_chunks: list, image_ids: list) -> str:
+    """Build a question-aware conversational answer from the best evidence chunk.
+
+    Strategy: extract question keywords → score each chunk by keyword overlap →
+    pick best chunk → find sentences that contain question keywords → return.
     """
     if not evidence_chunks:
-        return "您好，根据现有资料，暂时无法提供更详细的信息。如需帮助随时联系我们。"
+        return "根据现有资料，暂时无法提供更详细的信息。"
 
-    # Find the best non-low-quality chunk
-    best_chunk = None
+    query_terms = _extract_answer_relevance_terms(query)
+
+    # Score each chunk by question-relevance
+    chunk_scores: list[tuple[float, dict, list[str]]] = []
     for chunk in evidence_chunks[:5]:
-        if not _chunk_is_low_quality(chunk):
-            best_chunk = chunk
-            break
-    # Fallback to top-1 if all chunks are low quality
-    if best_chunk is None:
-        best_chunk = evidence_chunks[0]
+        if _chunk_is_low_quality(chunk):
+            continue
+        text = str(chunk.get("text", ""))
+        title = str(chunk.get("title", ""))
+        combined = (title + " " + text).lower()
+
+        overlap = sum(1 for t in query_terms if t in combined)
+        title_overlap = sum(1 for t in query_terms if t in title.lower())
+
+        # Find question-relevant sentences
+        raw_sentences = re.split(r"[。！？]", text)
+        relevant: list[tuple[int, str]] = []
+        for s in raw_sentences:
+            s = s.strip()
+            if not s or len(s) < 10:
+                continue
+            s_lower = s.lower()
+            s_overlap = sum(1 for t in query_terms if t in s_lower)
+            if s_overlap > 0:
+                relevant.append((s_overlap, s))
+
+        relevant.sort(key=lambda x: x[0], reverse=True)
+        best_sentence_overlap = relevant[0][0] if relevant else 0
+        # Score: content overlap + 2x title overlap + best sentence bonus
+        score = float(overlap) + float(title_overlap) * 2.0 + float(best_sentence_overlap) * 0.5
+        # Boost by evidence score (from retriever)
+        score += float(chunk.get("_evidence_score", chunk.get("_score", 0))) * 0.1
+
+        chunk_scores.append((score, chunk, [s for _, s in relevant]))
+
+    if not chunk_scores:
+        # All chunks low-quality — use first chunk raw
+        chunk_scores = [(0.0, evidence_chunks[0], [])]
+
+    chunk_scores.sort(key=lambda x: (x[0], -len(x[2])), reverse=True)
+    _, best_chunk, relevant_sents = chunk_scores[0]
 
     text = str(best_chunk.get("text", ""))
     text = _clean_manual_markers(text)
 
-    # Split into sentences
-    sentences = re.split(r"[。！？]", text)
-    clean_sentences: list[str] = []
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence or len(sentence) < 8:
-            continue
-        # Skip pure headers/labels (short text without punctuation)
-        if len(sentence) < 15 and not any(c in sentence for c in "，。、："):
-            continue
-        # Skip manual-style fragments
-        if re.match(r"^(图\d+|第\d+页|注[：:])", sentence):
-            continue
-        # Skip list-like text (space-separated items without verbs)
-        if re.match(r"^[一-鿿\s]+$", sentence) and len(sentence.split()) > 3:
-            continue
-        # Skip section headers (e.g., "化油器调节（19）", "停机")
-        # Headers are short, contain only Chinese chars and punctuation, no verbs
-        if len(sentence) < 20 and not any(c in sentence for c in "通过使用进行可以需要应该"):
-            if re.match(r"^[一-鿿\s（）\(\)\d\.、]+$", sentence):
+    # Use question-relevant sentences if available
+    if relevant_sents:
+        selected = relevant_sents[:4]
+    else:
+        # Fallback: filter substantive sentences
+        raw_sentences = re.split(r"[。！？]", text)
+        selected = []
+        for s in raw_sentences:
+            s = s.strip()
+            if not s or len(s) < 8:
                 continue
-        # Remove leading section title from sentences (e.g., "停机 通过停机开关..." -> "通过停机开关...")
-        # Title is typically 2-6 Chinese chars at the start
-        sentence = re.sub(r"^[一-鿿]{2,6}[（）\(\)\d]*\s+", "", sentence)
-        # Remove leading numbered list markers (e.g., "1. 仅在..." -> "仅在...")
-        sentence = re.sub(r"^\d+[\.\、]\s*", "", sentence)
-        if not sentence or len(sentence) < 8:
-            continue
-        clean_sentences.append(sentence)
+            if len(s) < 15 and not any(c in s for c in "，。、："):
+                continue
+            if re.match(r"^(图\d+|第\d+页|注[：:])", s):
+                continue
+            if re.match(r"^[一-鿿\s]+$", s) and len(s.split()) > 3:
+                continue
+            selected.append(s)
+            if len(selected) >= 4:
+                break
 
-    if not clean_sentences:
-        # Fallback to chunk title
+    if not selected:
         title = _clean_manual_markers(str(best_chunk.get("title", "")))
-        return f"您好，{title}。如需帮助随时联系我们。"
+        return f"{title}。"
 
-    # Take first 1-2 substantive sentences
-    selected = clean_sentences[:2]
-    answer_body = "。".join(selected)
+    # Clean selected sentences
+    cleaned = []
+    for s in selected:
+        s = re.sub(r"^[一-鿿]{2,6}[（）\(\)\d]*\s+", "", s)
+        s = re.sub(r"^\d+[\.\、]\s*", "", s)
+        # Strip leading "2 " type numbering
+        s = re.sub(r"^\d+\s+", "", s)
+        if s and len(s) >= 8:
+            cleaned.append(s)
+
+    answer_body = "。".join(cleaned[:4])
     if not answer_body.endswith(("。", "！", "？")):
         answer_body += "。"
 
-    return f"您好，{answer_body}如需帮助随时联系我们。"
+    return answer_body
 
 
 def _validate_answer_grounding(context: str, answer: str) -> tuple[bool, float]:
@@ -571,11 +582,42 @@ def _normalize_for_smalltalk(text: str) -> str:
     return _NON_WORD_RE.sub("", text.strip().lower())
 
 
+def _localize_answer(answer: str, query: str) -> str:
+    """Convert Chinese greeting to English if the query is in English."""
+    if not answer or len(answer) < 5:
+        return answer
+    english_words = len(re.findall(r'[a-zA-Z]{3,}', query))
+    chinese_chars = len(re.findall(r'[一-鿿]', query))
+    if english_words < 3 or chinese_chars >= english_words:
+        return answer  # Keep as Chinese
+
+    # Query is English — fix the answer greeting
+    for cn_greeting, en_greeting in [
+        ("您好，", "Hello, "),
+        ("您好！", "Hello! "),
+        ("你好，", "Hello, "),
+        ("你好！", "Hello! "),
+    ]:
+        if answer.startswith(cn_greeting):
+            answer = en_greeting + answer[len(cn_greeting):]
+            break
+
+    # Replace Chinese periods with English periods for English answers
+    answer = answer.replace("。", ".")
+
+    # Ensure single trailing period
+    answer = answer.rstrip(".") + "."
+
+    return answer
+
+
 def _final_answer_cleanup(answer: str) -> str:
     """Final cleanup pass to remove manual text artifacts from the answer."""
     if not answer:
         return answer
     cleaned = answer.strip()
+    # Remove bullet markers (•, ・, -)
+    cleaned = cleaned.replace("•", "").replace("・", "").strip()
     # Remove "#" headers (e.g., "# 维修" → "维修")
     cleaned = re.sub(r"^#\s*", "", cleaned)
     cleaned = re.sub(r"\n#\s*", "\n", cleaned)
@@ -585,6 +627,12 @@ def _final_answer_cleanup(answer: str) -> str:
     cleaned = re.sub(r"第\s*\d+[\s、，,，]*\d*\s*页", "", cleaned)
     cleaned = re.sub(r"见第\s*\d+.*?页.*?部分", "", cleaned)
     cleaned = re.sub(r"详见.*?章节", "", cleaned)
+    # Remove "请参阅/请查阅/请参考" references to manual sections
+    cleaned = re.sub(r"请参阅[^。\n]*[。]?", "", cleaned)
+    cleaned = re.sub(r"请查阅[^。\n]*[。]?", "", cleaned)
+    cleaned = re.sub(r"请参考[^。\n]*[。]?", "", cleaned)
+    cleaned = re.sub(r"详情请参阅[^。\n]*[。]?", "", cleaned)
+    cleaned = re.sub(r"参考\d+产品[^。\n]*[。]?", "", cleaned)
     # Remove "相关配图：..." at the end
     cleaned = re.sub(r"[（(]相关配图：[^）)]*[）)]\s*$", "", cleaned)
     cleaned = re.sub(r"\(相关配图：[^)]*\)\s*$", "", cleaned)
@@ -592,19 +640,33 @@ def _final_answer_cleanup(answer: str) -> str:
     cleaned = cleaned.replace("■", "").strip()
     # Remove leading step numbers after punctuation (e.g., "。2 " → "。")
     cleaned = re.sub(r"[。]\s*\d+\s+", "。", cleaned)
+    # Remove step numbers between Chinese periods (e.g., "。3。" → "。")
+    cleaned = re.sub(r"。\s*\d+。", "。", cleaned)
+    # Remove step numbers with English period before Chinese period (e.g., "。 3.。" → "。")
+    cleaned = re.sub(r"。\s*\d+\.。", "。", cleaned)
     # Remove leading numbers at start of answer (e.g., "2 打开" → "打开")
     cleaned = re.sub(r"^\d+\s+", "", cleaned)
     # Remove "结论：" and "目标：" headings
     cleaned = re.sub(r"结论[：:]\s*", "", cleaned)
     cleaned = re.sub(r"目标[：:]\s*", "", cleaned)
+    # Remove "Note:" label mid-answer
+    cleaned = re.sub(r"\s+Note:\s*", " ", cleaned)
+    # Remove step/section headings like "操作说明 4." or "步骤说明 2."
+    cleaned = re.sub(r"(?:操作|步骤)说明\s*\d+[\.\s]*", "", cleaned)
     # Clean up extra spaces
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     # Remove trailing punctuation artifacts
     cleaned = re.sub(r"[，,。.、]+\s*$", "", cleaned)
     # Ensure it ends with proper punctuation
-    if cleaned and not cleaned.endswith(("。", "！", "？", "）", ")")):
+    if cleaned and not cleaned.endswith(("。", "！", "？", "）", ")", ".")):
         cleaned += "。"
-    # Remove double periods
+    # Remove double periods (both Chinese and English)
+    cleaned = cleaned.replace("。。", "。")
+    cleaned = cleaned.replace("。。", "。")
+    cleaned = cleaned.replace(",.", ".")
+    cleaned = cleaned.replace("。,", "。")
+    cleaned = cleaned.replace("。.", "。")
+    cleaned = cleaned.replace(".。", ".")
     cleaned = cleaned.replace("。。", "。")
     cleaned = cleaned.replace("，，", "，")
     return cleaned.strip()
@@ -626,7 +688,7 @@ def _match_smalltalk_reply(question: str) -> tuple[str, str] | None:
 
 
 def _filter_evidence(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep high-confidence, same-product evidence for cleaner prompts."""
+    """Keep high-confidence evidence with product-diversity awareness."""
     if not chunks:
         return []
 
@@ -635,14 +697,19 @@ def _filter_evidence(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if top_score < MIN_TOP_SCORE:
         return []
 
+    # Keep top chunks regardless of product, prefer same-product but allow cross-product
     top_product = top.get("product_name", "")
     filtered: list[dict[str, Any]] = []
+    cross_product_count = 0
     for chunk in chunks:
         score = float(chunk.get("_score", 0.0))
         if score < MIN_KEEP_SCORE:
             continue
-        if top_product and chunk.get("product_name") != top_product:
-            continue
+        same_product = not top_product or chunk.get("product_name") == top_product
+        if not same_product:
+            if cross_product_count >= 5:
+                continue
+            cross_product_count += 1
         filtered.append(chunk)
         if len(filtered) >= FINAL_CONTEXT_CHUNKS:
             break
@@ -777,7 +844,7 @@ def _build_extractive_manual_answer(
     troubleshooting_query = _looks_like_troubleshooting_query(query)
     title_candidates: list[tuple[float, str]] = []
     sentence_candidates: list[tuple[float, str]] = []
-    for chunk in evidence_chunks[:3]:
+    for chunk in evidence_chunks[:5]:
         title = _clean_evidence_text(str(chunk.get("title", "")))
         text = _clean_evidence_text(str(chunk.get("text", "")))
         if title and not _looks_like_toc_noise(title):
@@ -789,6 +856,12 @@ def _build_extractive_manual_answer(
             title_candidates.append((title_score, title))
         for sentence in _split_evidence_sentences(text):
             if _looks_like_toc_noise(sentence):
+                continue
+            # Skip raw manual labels (CAUTION, WARNING, etc.)
+            if re.match(r'^(CAUTION|WARNING|IMPORTANT|NOTE|注意|警告)\b', sentence.strip(), re.IGNORECASE):
+                continue
+            # Skip incomplete sentences
+            if sentence.strip().endswith((",", "and", "the", "with", "for", "of", "in")):
                 continue
             score = _text_overlap_count(sentence, query_terms)
             if score <= 0 and len(sentence) < 80:
@@ -829,12 +902,14 @@ def _build_extractive_manual_answer(
         if _is_duplicate_evidence_sentence(sentence, selected):
             continue
         selected.append(_clean_submission_style_sentence(sentence))
-        if len(selected) >= 3:
+        if len(selected) >= 5:
             break
 
     if not selected:
         first = evidence_chunks[0]
         fallback_text = _clean_evidence_text(f"{first.get('title', '')} {first.get('text', '')}")[:320]
+        # Strip raw manual labels from fallback
+        fallback_text = re.sub(r'^(CAUTION|WARNING|IMPORTANT|NOTE|注意|警告)\s*', '', fallback_text, flags=re.IGNORECASE).strip()
         selected = [_clean_submission_style_sentence(fallback_text)]
 
     conclusion = _compose_extractive_conclusion(
@@ -869,12 +944,12 @@ def _build_extractive_manual_answer(
 
     lines = [conclusion]
     if details:
-        lines.extend(details[:2])
+        lines.extend(details[:4])
     answer = "\n".join(lines).strip()
 
-    # For Chinese extractive answers: make it conversational, handle double "您好"
+    # For Chinese extractive answers: simple natural wrapping, no forced template
     if not _is_ascii_heavy(query):
-        # Remove "您好" from middle of answer (should only be at the very start)
+        # Remove "您好" from middle of answer
         all_lines = answer.split("\n")
         clean_lines = []
         for i, line in enumerate(all_lines):
@@ -886,31 +961,31 @@ def _build_extractive_manual_answer(
                         stripped = stripped[len(prefix):].strip()
                         break
             if stripped:
-                # Ensure each line ends with 。
                 if not stripped.endswith(("。", "！", "？")):
-                    stripped += "。"
+                    # Strip trailing English period before adding Chinese period
+                    stripped = stripped.rstrip(".")
+                    if stripped:
+                        stripped += "。"
                 # Strip leading "目标：", "结论：" etc.
                 stripped = re.sub(r"^[一-鿿A-Za-z]+[：:（(].{0,20}?", "", stripped)
                 if stripped:
                     clean_lines.append(stripped)
-        # If no 您好 at start, add it
-        if clean_lines and not clean_lines[0].startswith(("您好", "你好")):
-            answer = "您好，" + "".join(clean_lines)
-        else:
+        if clean_lines:
             answer = "".join(clean_lines)
-
-        # Ensure end punctuation
-        answer = answer.rstrip("。")
-        answer += "。"
-        if "如需帮助随时联系我们" not in answer:
-            answer += "如需帮助随时联系我们。"
+        else:
+            answer = clean_lines[0] if clean_lines else answer
     else:
-        # For English queries, wrap answer in Chinese customer service format
-        if answer and not answer.startswith("您好"):
-            answer = re.sub(r"\s+", " ", answer).strip()
-            answer = answer.rstrip(".")
-            if answer:
-                answer = f"您好，{answer}。如需帮助随时联系我们。"
+        # For English queries
+        answer = re.sub(r"\s+", " ", answer).strip()
+        # Add period between sentences where missed (only for known sentence-starter words)
+        answer = re.sub(
+            r"([a-zA-Z])\s+((?:The|It|This|That|These|Those|We|They|He|She|You|I|A|An|When|If|Do|Does|Did|Will|Would|Can|Could|Should|May|Might|Shall|To|In|On|For|With|By|After|Before|During|Remove|Install|Place|Press|Pull|Push|Turn|Open|Close|Set|Check|Make|Use|Keep|Hold|Insert|Slide|Lift|Lower|Raise|Rotate|Twist|Align|Fit|Connect|Disconnect|Ensure|Verify|Confirm|Select|Enter|Follow|Note|Reinstall|Reassemble|Repeat|Drop|Grasp|Grip|Snap|Clip|Attach|Detach|Twist|Squeeze|Flip|Store|Wipe|Brush|Rinse|Soak|Wash|Dry|Wait|Allow|Let|Start|Stop|Begin|Continue|Reset|Adjust|Loosen|Tighten|Remove)\b)",
+            r"\1. \2",
+            answer,
+        )
+        answer = answer.rstrip(".")
+        if answer:
+            answer += "."
 
     return answer
 
@@ -1051,14 +1126,26 @@ def _split_evidence_sentences(text: str) -> list[str]:
     cleaned = _clean_evidence_text(text)
     if not cleaned:
         return []
-    raw_parts = re.split(r"(?<=[。！？.!?;:])\s+|[\n\r]+", cleaned)
+    # Split on common sentence boundaries (。！？.!?) followed by whitespace, or newlines
+    raw_parts = re.split(r"(?<=[。！？])\s+|(?<=[.!?])\s+|[\n\r]+", cleaned)
     sentences: list[str] = []
+    merged = ""
     for part in raw_parts:
         sentence = part.strip(" -|")
-        if 18 <= len(sentence) <= 320:
-            sentences.append(sentence)
+        if not sentence:
+            continue
+        # Merge back fragments that are likely split abbreviations (e.g., "T." followed by "is")
+        if merged and (len(sentence) < 25 or (sentence[0].islower() and not merged.endswith(("。", "！", "？")))):
+            merged += " " + sentence
+            continue
+        if merged:
+            if 18 <= len(merged) <= 450:
+                sentences.append(merged)
+        merged = sentence
+    if merged and 18 <= len(merged) <= 450:
+        sentences.append(merged)
     if not sentences and cleaned:
-        sentences.append(cleaned[:320])
+        sentences.append(cleaned[:450])
     return sentences
 
 
@@ -1378,7 +1465,7 @@ def _filter_evidence_for_query(
             if query_has_explicit_product:
                 if chunk_query_overlap < 2:
                     continue
-            if cross_product_kept >= 3:
+            if cross_product_kept >= 5:
                 continue
             strong_query_alignment = chunk_query_overlap >= overlap_threshold
             strong_image_alignment = chunk_image_overlap > 0 and chunk_image_overlap >= top_image_overlap
@@ -1508,9 +1595,14 @@ def _assemble_context(
         part = f"{header}\n{body}"
 
         if total_chars + len(part) > MAX_CONTEXT_CHARS:
-            # Skip this chunk if it won't fit, try to fit smaller chunks
-            if total_chars + 200 < MAX_CONTEXT_CHARS:
-                continue
+            # Keep priority ordering: if current chunk doesn't fit and we already
+            # have context, stop adding. Only truncate if this is the first chunk.
+            if total_chars == 0:
+                max_body_len = MAX_CONTEXT_CHARS - len(header) - 50
+                body = body[:max_body_len]
+                part = f"{header}\n{body}"
+                parts.append(part)
+                total_chars += len(part)
             break
         parts.append(part)
         total_chars += len(part)
@@ -1777,6 +1869,21 @@ class AgentService:
         candidate_groups: list[tuple[str, list[dict[str, Any]]]] = [
             ("text_only", self.retriever.search(query, limit=RETRIEVAL_LIMIT))
         ]
+
+        # Optional: LLM query expansion for better recall (Phase 4)
+        _enable_qe = os.getenv("INDUSTRY_AGENT_ENABLE_QUERY_EXPANSION", "0").strip().lower()
+        if _enable_qe in {"1", "true", "on"}:
+            try:
+                _expander = QueryExpander()
+                _expanded = _expander.expand(query)
+                for _eq in _expanded.get("queries", []):
+                    if _eq and _eq != query:
+                        candidate_groups.append(
+                            ("expanded", self.retriever.search(_eq, limit=RETRIEVAL_LIMIT))
+                        )
+            except Exception:
+                pass
+
         multimodal_query = query
         if image_terms:
             multimodal_query = f"{query} {' '.join(image_terms[:MULTIMODAL_RETRIEVAL_LIMIT])}".strip()
@@ -1848,20 +1955,23 @@ class AgentService:
             image_ids=image_ids,
         )
 
-        # Try LLM, but only keep if it passes whitelist check
+        # Try LLM
         answer = self._call_llm(messages)
         if answer and not answer.startswith("LLM 调用失败:"):
             answer = _strip_thinking(answer)
+            answer = _strip_llm_structured_format(answer)
 
+        # Check if LLM answer is usable (not raw manual text, not explicit refusal)
         use_llm = False
         if answer and not answer.startswith("LLM 调用失败:") and len(answer.strip()) >= 10:
             if not _is_raw_manual_text(answer) and not _should_use_extractive_manual_answer(answer):
                 use_llm = True
 
         if use_llm:
-            answer = format_manual_answer(answer, image_ids=[], compact=True)
+            # Use LLM answer with minimal cleanup — no forced sections
+            answer = format_manual_answer(answer, image_ids=[])
         else:
-            # Try extractive answer first (better than conversational for manual queries)
+            # Fallback: extractive answer from evidence
             extractive_answer = _build_extractive_manual_answer(
                 query=query,
                 evidence_chunks=evidence_chunks,
@@ -1872,30 +1982,21 @@ class AgentService:
             else:
                 answer = conversational_answer
 
-        # Topic validation - check if answer is actually relevant to the question
-        is_relevant, relevance_score = _validate_topic_relevance(query, answer)
-        if not is_relevant or relevance_score < 0.3:
-            # Answer is drifted - use the conversational answer
-            answer = conversational_answer
+        # Answer length truncation
+        max_len = MAX_ENGLISH_ANSWER_LENGTH if _is_ascii_heavy(answer) else MAX_ANSWER_LENGTH
+        if len(answer) > max_len:
+            truncated = answer[:max_len]
+            # Try to break at last sentence boundary
+            for sep in ["。", "！", "？", ".", "!", "?"]:
+                pos = truncated.rfind(sep)
+                if pos > max_len * 0.5:
+                    truncated = truncated[:pos + 1]
+                    break
+            answer = truncated.strip()
 
-        # Answer grounding validation - check if answer is grounded in context
-        is_grounded, grounding_score = _validate_answer_grounding(context, answer)
-        if not is_grounded or grounding_score < 0.2:
-            # Answer is hallucinated - use the conversational answer
-            answer = conversational_answer
-
-        # Answer length truncation - prevent overly long answers
-        if len(answer) > MAX_ANSWER_LENGTH:
-            # Try to truncate at a sentence boundary
-            truncated = answer[:MAX_ANSWER_LENGTH]
-            last_period = max(truncated.rfind("。"), truncated.rfind("！"), truncated.rfind("？"))
-            if last_period > MAX_ANSWER_LENGTH * 0.6:  # At least 60% of max length
-                answer = truncated[:last_period + 1]
-            else:
-                answer = truncated + "。"
-
-        # Final cleanup - remove any remaining manual text artifacts
+        # Final cleanup
         answer = _final_answer_cleanup(answer)
+        answer = _localize_answer(answer, query)
 
         grounded_image_ids = _select_grounded_manual_image_ids(
             query=query,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from industry_agent.rag.retriever import SQLiteRetriever
@@ -49,10 +50,12 @@ class HybridRetriever:
         sqlite_retriever: SQLiteRetriever | None = None,
         vector_retriever: VectorSearcher | None = None,
         rrf_k: int = RRF_K,
+        cross_encoder: Any = None,
     ) -> None:
         self.sqlite_retriever = sqlite_retriever or SQLiteRetriever(vector_searcher=DisabledVectorSearcher())
         self.vector_retriever = vector_retriever or SQLiteVectorSearcher()
         self.rrf_k = rrf_k
+        self.cross_encoder = cross_encoder
 
     def search(self, query: str, *, limit: int = 5) -> list[dict[str, Any]]:
         fetch_limit = max(limit * 2, 10)
@@ -60,7 +63,10 @@ class HybridRetriever:
         vector_results = self.vector_retriever.search(query, limit=fetch_limit)
         if not vector_results:
             return sparse_results[:limit]
-        return reciprocal_rank_fusion([sparse_results, vector_results], k=self.rrf_k)[:limit]
+        fused = reciprocal_rank_fusion([sparse_results, vector_results], k=self.rrf_k)
+        if self.cross_encoder is not None:
+            fused = self.cross_encoder.rerank(query, fused)
+        return fused[:limit]
 
     def retrieval_status(self) -> dict[str, Any]:
         return {

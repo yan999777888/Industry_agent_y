@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from industry_agent.config import settings
 from industry_agent.rag.hybrid_retriever import HybridRetriever
 from industry_agent.rag.retriever import SQLiteRetriever
 from industry_agent.rag.vector_store import DisabledVectorSearcher, SQLiteVectorSearcher, describe_vector_retrieval
+
+try:
+    from industry_agent.rag.cross_encoder import CrossEncoderReranker
+except ImportError:
+    CrossEncoderReranker = None  # type: ignore[assignment]
 
 
 class VectorOnlyRetriever:
@@ -40,4 +46,10 @@ def create_retriever(mode: str | None = None) -> Any:
         return SQLiteRetriever(vector_searcher=DisabledVectorSearcher())
     if normalized == "vector":
         return VectorOnlyRetriever()
-    return HybridRetriever()
+
+    cross_encoder = None
+    if CrossEncoderReranker is not None:
+        enable_ce = os.getenv("INDUSTRY_AGENT_ENABLE_CROSS_ENCODER", "0").strip().lower()
+        if enable_ce in {"1", "true", "on"}:
+            cross_encoder = CrossEncoderReranker()
+    return HybridRetriever(cross_encoder=cross_encoder)

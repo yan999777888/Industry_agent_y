@@ -29,12 +29,12 @@ class Settings:
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     ollama_model: str = os.getenv("OLLAMA_MODEL", "qwen3.5:2b")
     ollama_vision_model: str = os.getenv("OLLAMA_VISION_MODEL", "llava-phi3")
-    llm_api_key: str = os.getenv("LLM_API_KEY", "")
-    llm_base_url: str = os.getenv("LLM_BASE_URL", "https://api.xiaomimimo.com/v1")
-    llm_model: str = os.getenv("LLM_MODEL", "mimo-v2-flash")
-    llm_vision_model: str = os.getenv("LLM_VISION_MODEL", "mimo-v2.5")
+    llm_api_key: str = os.getenv("LLM_API_KEY", "tp-cx5mi0rw3ehfudkdh44xxhpceik5nt1fctxi1phsn8x07jgy")
+    llm_base_url: str = os.getenv("LLM_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
+    llm_model: str = os.getenv("LLM_MODEL", "mimo-v2.5-pro")
+    llm_vision_model: str = os.getenv("LLM_VISION_MODEL", "mimo-v2.5-pro")
     retrieval_mode: str = _env("RETRIEVAL_MODE", "INDUSTRY_AGENT_RETRIEVAL_MODE", default="hybrid")
-    embedding_model: str = _env("EMBEDDING_MODEL", "INDUSTRY_AGENT_EMBEDDING_MODEL", default="BAAI/bge-small-zh-v1.5")
+    embedding_model: str = _env("EMBEDDING_MODEL", "INDUSTRY_AGENT_EMBEDDING_MODEL", default="BAAI/bge-m3")
     vector_index_path: Path = PROJECT_ROOT / "data" / "processed" / "kb" / "vector.index"
 
     @property

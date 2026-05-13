@@ -14,8 +14,8 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_FALLBACK_ANSWER = "根据现有资料无法回答此问题。请补充更明确的产品名称、型号、故障现象或图片后再试。"
-MAX_SINGLE_ANSWER_CHARS = 520
-MAX_MULTI_ANSWER_CHARS = 760
+MAX_SINGLE_ANSWER_CHARS = 800
+MAX_MULTI_ANSWER_CHARS = 1000
 MAX_PIC_MARKERS = 3
 SUBMISSION_INCLUDE_PIC = True
 _CUSTOMER_SERVICE_KEYWORDS = (
@@ -329,13 +329,19 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
     if _should_prefer_light_submission_cleanup(text, question=question, sources=sources):
         cleaned = _lightweight_submission_finalize(text, question=question)
         if cleaned:
+            if is_english_question:
+                cleaned = re.sub(r"(?i)\b(?:CAUTION|WARNING|IMPORTANT)\b\s*", "", cleaned)
+                cleaned = re.sub(r"(?i)^\s*Hello[,!！]?\s*", "", cleaned)
+                cleaned = re.sub(r"\.([A-Z])", r". \1", cleaned.strip())
+                cleaned = re.sub(r"\.{2,}", ".", cleaned)
+                cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
             if _is_topic_mismatch(cleaned, question=question):
                 fb = _build_submission_fallback(question=question, sources=sources)
                 if fb:
                     cleaned = fb
             cleaned = _ensure_customer_service_greeting(cleaned, question=question)
             cleaned = _fix_double_greetings(cleaned)
-            if not cleaned.endswith(("。", "！", "？")):
+            if not cleaned.endswith(("。", "！", "？", ".", "!", "?")):
                 cleaned += "。"
             return _format_with_images(cleaned, image_ids)
 
@@ -358,8 +364,25 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
         text = reference_answer or _build_submission_fallback(question=question, sources=sources)
     text = _remove_question_like_sentences(text, question=question)
     text = _compress_submission_answer(text, question=question)
-    text = _polish_submission_text(text, question=question)
     if is_english_question:
+        # English path -- avoid _polish_submission_text (Chinese-centric 。 joining)
+        text = _strip_submission_artifacts(text)
+        text = _strip_internal_sentences(text)
+        text = _strip_fallback_sentences(text)
+        text = _strip_placeholder_sentences(text)
+        text = _strip_weak_leads(text)
+        if question:
+            text = _remove_question_echo(text, question=question)
+            text = _remove_question_like_sentences(text, question=question)
+        text = _strip_english_section_labels(text)
+        # Strip English labels and fix punctuation
+        text = re.sub(r"(?i)\b(?:CAUTION|WARNING|IMPORTANT)\b\s*", "", text)
+        text = re.sub(r"(?i)^\s*Hello[,!！]?\s*", "", text)
+        text = re.sub(r"\.([A-Z])", r". \1", text.strip())
+        text = re.sub(r"\.{2,}", ".", text)
+        text = re.sub(r"\s{2,}", " ", text).strip(" ,,;;.\n\r\t")
+        if text and not text.endswith((".", "!", "?")):
+            text += "."
         if references and _should_rewrite_english_submission(text):
             reference_answer = _build_reference_based_answer(question=question, references=references)
             text = reference_answer or _build_submission_fallback(question=question, sources=sources)
@@ -367,6 +390,8 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
             reference_answer = _build_reference_based_answer(question=question, references=references)
             if reference_answer:
                 text = reference_answer
+    else:
+        text = _polish_submission_text(text, question=question)
     if _is_low_information_submission_text(text):
         text = _build_submission_fallback(question=question, sources=sources)
     if _is_topic_mismatch(text, question=question):
@@ -375,7 +400,7 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
             text = fb
     text = _ensure_customer_service_greeting(text, question=question)
     text = _fix_double_greetings(text)
-    if not text.endswith(("。", "！", "？")):
+    if not text.endswith(("。", "！", "？", ".", "!", "?")):
         text += "。"
     return _format_with_images(text, image_ids)
 
@@ -398,7 +423,21 @@ def _normalize_multi_question_answer(
             sources=sources,
             references=references,
         )
-        body = _polish_submission_text(body, question=sub_question)
+        if not body:
+            continue
+        sub_is_english = bool(re.search(r"[A-Za-z]", sub_question)) and not bool(re.search(r"[一-鿿]", sub_question))
+        if sub_is_english:
+            body = _strip_submission_artifacts(body)
+            body = _strip_english_section_labels(body)
+            body = re.sub(r"(?i)\b(?:CAUTION|WARNING|IMPORTANT)\b\s*", "", body)
+            body = re.sub(r"(?i)^\s*Hello[,!！]?\s*", "", body)
+            body = re.sub(r"\.([A-Z])", r". \1", body.strip())
+            body = re.sub(r"\.{2,}", ".", body)
+            body = re.sub(r"\s{2,}", " ", body).strip(" ,,;;.\n\r\t")
+            if body and not body.endswith((".", "!", "?")):
+                body += "."
+        else:
+            body = _polish_submission_text(body, question=sub_question)
         if not body:
             continue
         normalized_blocks.append(body)
@@ -453,7 +492,26 @@ def _normalize_single_block_text(
         cleaned = reference_answer or _build_submission_fallback(question=question, sources=sources)
     cleaned = _remove_question_like_sentences(cleaned, question=question)
     cleaned = _compress_submission_answer(cleaned, question=question)
-    cleaned = _polish_submission_text(cleaned, question=question)
+    if is_english_question:
+        # English path -- avoid _polish_submission_text (Chinese-centric 。 joining)
+        cleaned = _strip_submission_artifacts(cleaned)
+        cleaned = _strip_internal_sentences(cleaned)
+        cleaned = _strip_fallback_sentences(cleaned)
+        cleaned = _strip_placeholder_sentences(cleaned)
+        cleaned = _strip_weak_leads(cleaned)
+        if question:
+            cleaned = _remove_question_echo(cleaned, question=question)
+            cleaned = _remove_question_like_sentences(cleaned, question=question)
+        cleaned = _strip_english_section_labels(cleaned)
+        cleaned = re.sub(r"(?i)\b(?:CAUTION|WARNING|IMPORTANT)\b\s*", "", cleaned)
+        cleaned = re.sub(r"(?i)^\s*Hello[,!！]?\s*", "", cleaned)
+        cleaned = re.sub(r"\.([A-Z])", r". \1", cleaned.strip())
+        cleaned = re.sub(r"\.{2,}", ".", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,,;;.\n\r\t")
+        if cleaned and not cleaned.endswith((".", "!", "?")):
+            cleaned += "."
+    else:
+        cleaned = _polish_submission_text(cleaned, question=question)
     if _is_off_topic_answer(cleaned, question):
         reference_answer = _build_reference_based_answer(question=question, references=references)
         if reference_answer:
@@ -1035,8 +1093,14 @@ def _build_reference_based_answer(*, question: str, references: list[dict]) -> s
         if len(selected_texts) == 1:
             answer = selected_texts[0]
         else:
-            answer = selected_texts[0] + " " + " ".join(selected_texts[1:])
-        return answer.strip(" ，,；;。") + "."
+            # Re-insert periods between sentences stripped by _split_submission_sentences
+            answer = ". ".join(t.strip(" 。！？!?") for t in selected_texts)
+        answer = answer.strip(" ，,；;。")
+        answer = re.sub(r"(?i)\b(?:CAUTION|WARNING|IMPORTANT)\b\s*", "", answer)
+        answer = re.sub(r"\.([A-Z])", r". \1", answer.strip())
+        answer = re.sub(r"\.{2,}", ".", answer)
+        answer = re.sub(r"\s{2,}", " ", answer).strip()
+        return (answer + ".") if answer else ""
 
     lines = [selected_texts[0]]
     if len(selected_texts) > 1:
@@ -1370,6 +1434,18 @@ def _join_sentences_with_punctuation(sentences: list[str]) -> str:
     """Join sentences with appropriate punctuation, using comma for continuations."""
     if not sentences:
         return ""
+    is_english = not bool(re.search(r"[一-鿿]", sentences[0]))
+    if is_english:
+        result = sentences[0]
+        for sentence in sentences[1:]:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            result += " " + sentence
+        result = result.strip()
+        if result and not result.endswith((".", "!", "?")):
+            result += "."
+        return result
     continuation_starts = ("请", "可以", "需要", "同时", "并且", "此外", "另外",
                            "如", "如果", "若", "但", "但是", "也", "还", "再", "然后")
     result = sentences[0]
