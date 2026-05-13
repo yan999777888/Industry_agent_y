@@ -839,18 +839,67 @@ def _build_extractive_manual_answer(
     if not details and selected:
         details = [selected[0]] if not _is_duplicate_evidence_sentence(selected[0], [conclusion]) else []
 
+    # If conclusion is a manual-style heading like "目标：" or "产品部件介绍", skip it
+    _HEADING_LIKE_RE = re.compile(r"^[一-鿿A-Za-z]+[：:（(]")
+    # Also detect short noun-only headings without colon (e.g., "产品部件介绍")
+    def _is_noun_heading(text: str) -> bool:
+        if len(text) > 15 or not text:
+            return False
+        # No verbs/adjectives/handle/operate words
+        VERB_HINTS = ("的", "了", "是", "在", "有", "和", "或", "通过", "使用", "进行", "可以", "需要", "应该")
+        return not any(v in text for v in VERB_HINTS) and not re.search(r"[，。,.]", text) and not text.startswith(("这", "那", "怎么", "如何", "可"))
+    if (_HEADING_LIKE_RE.match(conclusion) or _is_noun_heading(conclusion)) and details:
+        conclusion = details.pop(0)
+    elif (_HEADING_LIKE_RE.match(conclusion) or _is_noun_heading(conclusion)) and not details:
+        # Use the title of the first evidence chunk directly if it's informative
+        first_chunk = evidence_chunks[0]
+        chunk_text = str(first_chunk.get("text", ""))[:200]
+        conclusion = _clean_submission_style_sentence(chunk_text) or conclusion
+
     lines = [conclusion]
     if details:
         lines.extend(details[:2])
     answer = "\n".join(lines).strip()
 
-    # For English queries, wrap answer in Chinese customer service format
-    if _is_ascii_heavy(query) and answer and not answer.startswith("您好"):
-        # Clean up the English text
-        answer = re.sub(r"\s+", " ", answer).strip()
-        answer = answer.rstrip(".")
-        if answer:
-            answer = f"您好，{answer}。如需帮助随时联系我们。"
+    # For Chinese extractive answers: make it conversational, handle double "您好"
+    if not _is_ascii_heavy(query):
+        # Remove "您好" from middle of answer (should only be at the very start)
+        all_lines = answer.split("\n")
+        clean_lines = []
+        for i, line in enumerate(all_lines):
+            stripped = line.strip()
+            # Strip leading 您好，for non-first lines
+            if i > 0:
+                for prefix in ["您好，", "您好！", "您好"]:
+                    if stripped.startswith(prefix):
+                        stripped = stripped[len(prefix):].strip()
+                        break
+            if stripped:
+                # Ensure each line ends with 。
+                if not stripped.endswith(("。", "！", "？")):
+                    stripped += "。"
+                # Strip leading "目标：", "结论：" etc.
+                stripped = re.sub(r"^[一-鿿A-Za-z]+[：:（(].{0,20}?", "", stripped)
+                if stripped:
+                    clean_lines.append(stripped)
+        # If no 您好 at start, add it
+        if clean_lines and not clean_lines[0].startswith(("您好", "你好")):
+            answer = "您好，" + "".join(clean_lines)
+        else:
+            answer = "".join(clean_lines)
+
+        # Ensure end punctuation
+        answer = answer.rstrip("。")
+        answer += "。"
+        if "如需帮助随时联系我们" not in answer:
+            answer += "如需帮助随时联系我们。"
+    else:
+        # For English queries, wrap answer in Chinese customer service format
+        if answer and not answer.startswith("您好"):
+            answer = re.sub(r"\s+", " ", answer).strip()
+            answer = answer.rstrip(".")
+            if answer:
+                answer = f"您好，{answer}。如需帮助随时联系我们。"
 
     return answer
 
@@ -971,6 +1020,12 @@ def _clean_submission_style_sentence(text: str) -> str:
     cleaned = _clean_evidence_text(text)
     cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
     cleaned = re.sub(r"([,.;:!?])(?=[A-Za-z])", r"\1 ", cleaned)
+    # Strip leading step numbers: "2 打开前盖板" → "打开前盖板"
+    cleaned = re.sub(r"^\d+\s+", "", cleaned)
+    # Strip leading numbered list markers: "1." "2、" etc
+    cleaned = re.sub(r"^\d+[\.、．)）]\s*", "", cleaned)
+    # Strip "C." or "C " manual connectors
+    cleaned = re.sub(r"^[A-Za-z][\.\s]\s*", "", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     return cleaned.strip(" -|")
 
