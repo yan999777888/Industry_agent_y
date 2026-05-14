@@ -315,93 +315,16 @@ def normalize_submission_answer(answer: str, *, question: str, sources: list[str
 
     text = _basic_submission_cleanup(text)
 
-    text_without_fallback = _strip_fallback_sentences(text)
-    text_without_fallback = _remove_question_echo(text_without_fallback, question=question)
-    text_without_fallback = _remove_question_like_sentences(text_without_fallback, question=question)
-    if _looks_like_pure_fallback(text, text_without_fallback):
-        reference_answer = _build_reference_based_answer(question=question, references=references)
-        if reference_answer:
-            return _format_with_images(reference_answer, image_ids)
-        fb = _build_submission_fallback(question=question, sources=sources)
-        return _format_with_images(fb, [])
-    text = text_without_fallback or text
-
-    if _should_prefer_light_submission_cleanup(text, question=question, sources=sources):
-        cleaned = _lightweight_submission_finalize(text, question=question)
-        if cleaned:
-            if is_english_question:
-                cleaned = re.sub(r"(?i)\b(?:CAUTION|WARNING|IMPORTANT)\b\s*", "", cleaned)
-                cleaned = re.sub(r"(?i)^\s*Hello[,!！]?\s*", "", cleaned)
-                cleaned = re.sub(r"\.([A-Z])", r". \1", cleaned.strip())
-                cleaned = re.sub(r"\.{2,}", ".", cleaned)
-                cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
-            if _is_topic_mismatch(cleaned, question=question):
-                fb = _build_submission_fallback(question=question, sources=sources)
-                if fb:
-                    cleaned = fb
-            cleaned = _ensure_customer_service_greeting(cleaned, question=question)
-            cleaned = _fix_double_greetings(cleaned)
-            if not cleaned.endswith(("。", "！", "？", ".", "!", "?")):
-                cleaned += "。"
-            return _format_with_images(cleaned, image_ids)
-
-    if "customer_service_policy" in sources:
-        text = re.sub(r"如果你愿意，我建议[^。]*。?", "", text)
-        text = re.sub(r"如果你愿意，我建议下一步优先补充[^。]*。?", "", text)
-        text = re.sub(r"这类问题更适合按通用客服流程处理。?", "", text)
-        text = _rewrite_customer_service_submission(text, question=question)
-        text = _compress_customer_service_answer(text)
-        text = _format_as_numbered_steps(text, question=question)
-        if _is_topic_mismatch(text, question=question):
-            fb = _build_submission_fallback(question=question, sources=sources)
-            if fb:
-                text = fb
-
+    text = re.sub(r"\.{2,}", ".", text)
     text = re.sub(r"\s{2,}", " ", text).strip(" ，,；;")
-    text = _strip_submission_artifacts(text)
-    if _is_low_information_submission_text(text):
-        reference_answer = _build_reference_based_answer(question=question, references=references)
-        text = reference_answer or _build_submission_fallback(question=question, sources=sources)
-    text = _remove_question_like_sentences(text, question=question)
-    text = _compress_submission_answer(text, question=question)
+
     if is_english_question:
-        # English path -- avoid _polish_submission_text (Chinese-centric 。 joining)
-        text = _strip_submission_artifacts(text)
-        text = _strip_internal_sentences(text)
-        text = _strip_fallback_sentences(text)
-        text = _strip_placeholder_sentences(text)
-        text = _strip_weak_leads(text)
-        if question:
-            text = _remove_question_echo(text, question=question)
-            text = _remove_question_like_sentences(text, question=question)
-        text = _strip_english_section_labels(text)
-        # Strip English labels and fix punctuation
         text = re.sub(r"(?i)\b(?:CAUTION|WARNING|IMPORTANT)\b\s*", "", text)
         text = re.sub(r"(?i)^\s*Hello[,!！]?\s*", "", text)
-        text = re.sub(r"\.([A-Z])", r". \1", text.strip())
-        text = re.sub(r"\.{2,}", ".", text)
-        text = re.sub(r"\s{2,}", " ", text).strip(" ,,;;.\n\r\t")
-        if text and not text.endswith((".", "!", "?")):
-            text += "."
-        if references and _should_rewrite_english_submission(text):
-            reference_answer = _build_reference_based_answer(question=question, references=references)
-            text = reference_answer or _build_submission_fallback(question=question, sources=sources)
-        elif references and "manual evidence is not sufficient" in text.lower():
-            reference_answer = _build_reference_based_answer(question=question, references=references)
-            if reference_answer:
-                text = reference_answer
-    else:
-        text = _polish_submission_text(text, question=question)
-    if _is_low_information_submission_text(text):
-        text = _build_submission_fallback(question=question, sources=sources)
-    if _is_topic_mismatch(text, question=question):
-        fb = _build_submission_fallback(question=question, sources=sources)
-        if fb:
-            text = fb
-    text = _ensure_customer_service_greeting(text, question=question)
-    text = _fix_double_greetings(text)
-    if not text.endswith(("。", "！", "？", ".", "!", "?")):
-        text += "。"
+
+    if text and not text.endswith(("。", "！", "？", ".", "!", "?")):
+        text += "。" if not is_english_question else "."
+
     return _format_with_images(text, image_ids)
 
 
@@ -413,39 +336,26 @@ def _normalize_multi_question_answer(
     image_ids: list[str],
     references: list[dict],
 ) -> str:
-    sub_questions = _extract_sub_questions(question)
+    is_english = bool(re.search(r"[A-Za-z]", question)) and not bool(re.search(r"[一-鿿]", question))
     normalized_blocks: list[str] = []
-    for index, (label, block_text) in enumerate(blocks, start=1):
-        sub_question = sub_questions[index - 1] if index - 1 < len(sub_questions) else question
-        body = _normalize_single_block_text(
-            block_text,
-            question=sub_question,
-            sources=sources,
-            references=references,
-        )
+    for label, block_text in blocks:
+        body = block_text.strip()
         if not body:
             continue
-        sub_is_english = bool(re.search(r"[A-Za-z]", sub_question)) and not bool(re.search(r"[一-鿿]", sub_question))
-        if sub_is_english:
-            body = _strip_submission_artifacts(body)
-            body = _strip_english_section_labels(body)
+        body = _basic_submission_cleanup(body)
+        body = _strip_submission_artifacts(body)
+        if is_english:
             body = re.sub(r"(?i)\b(?:CAUTION|WARNING|IMPORTANT)\b\s*", "", body)
             body = re.sub(r"(?i)^\s*Hello[,!！]?\s*", "", body)
-            body = re.sub(r"\.([A-Z])", r". \1", body.strip())
-            body = re.sub(r"\.{2,}", ".", body)
-            body = re.sub(r"\s{2,}", " ", body).strip(" ,,;;.\n\r\t")
-            if body and not body.endswith((".", "!", "?")):
-                body += "."
-        else:
-            body = _polish_submission_text(body, question=sub_question)
-        if not body:
-            continue
+        body = re.sub(r"\.{2,}", ".", body)
+        body = re.sub(r"\s{2,}", " ", body).strip()
+        if body and not body.endswith(("。", "！", "？", ".", "!", "?")):
+            body += "。" if not is_english else "."
         normalized_blocks.append(body)
 
-    merged = _merge_submission_segments(normalized_blocks, question=question)
+    merged = "\n".join(normalized_blocks)
     if not merged:
-        reference_answer = _build_reference_based_answer(question=question, references=references)
-        merged = reference_answer or _build_submission_fallback(question=question, sources=sources)
+        return DEFAULT_FALLBACK_ANSWER
     if len(merged) > MAX_MULTI_ANSWER_CHARS:
         merged = merged[:MAX_MULTI_ANSWER_CHARS].rstrip(" ，,；;\n") + "。"
     return _format_with_images(merged, image_ids)
@@ -458,78 +368,7 @@ def _normalize_single_block_text(
     sources: list[str],
     references: list[dict],
 ) -> str:
-    is_english_question = bool(re.search(r"[A-Za-z]", question)) and not bool(re.search(r"[\u4e00-\u9fff]", question))
-    cleaned = text
-    cleaned = _basic_submission_cleanup(cleaned)
-
-    cleaned_without_fallback = _strip_fallback_sentences(cleaned)
-    cleaned_without_fallback = _remove_question_echo(cleaned_without_fallback, question=question)
-    cleaned_without_fallback = _remove_question_like_sentences(cleaned_without_fallback, question=question)
-    if _looks_like_pure_fallback(cleaned, cleaned_without_fallback):
-        reference_answer = _build_reference_based_answer(question=question, references=references)
-        if reference_answer:
-            return reference_answer
-        return _build_submission_fallback(question=question, sources=sources)
-
-    cleaned = cleaned_without_fallback or cleaned
-    if _should_prefer_light_submission_cleanup(cleaned, question=question, sources=sources):
-        finalized = _lightweight_submission_finalize(cleaned, question=question)
-        if finalized:
-            return finalized
-    if "customer_service_policy" in sources:
-        cleaned = re.sub(r"如果你愿意，我建议[^。]*。?", "", cleaned)
-        cleaned = re.sub(r"如果你愿意，我建议下一步优先补充[^。]*。?", "", cleaned)
-        cleaned = re.sub(r"如果你现在方便，我建议[^。]*。?", "", cleaned)
-        cleaned = re.sub(r"这类问题更适合按通用客服流程处理。?", "", cleaned)
-        cleaned = _rewrite_customer_service_submission(cleaned, question=question)
-        cleaned = _compress_customer_service_answer(cleaned)
-        cleaned = _format_as_numbered_steps(cleaned, question=question)
-
-    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ，,；;")
-    cleaned = _strip_submission_artifacts(cleaned)
-    if _is_low_information_submission_text(cleaned):
-        reference_answer = _build_reference_based_answer(question=question, references=references)
-        cleaned = reference_answer or _build_submission_fallback(question=question, sources=sources)
-    cleaned = _remove_question_like_sentences(cleaned, question=question)
-    cleaned = _compress_submission_answer(cleaned, question=question)
-    if is_english_question:
-        # English path -- avoid _polish_submission_text (Chinese-centric 。 joining)
-        cleaned = _strip_submission_artifacts(cleaned)
-        cleaned = _strip_internal_sentences(cleaned)
-        cleaned = _strip_fallback_sentences(cleaned)
-        cleaned = _strip_placeholder_sentences(cleaned)
-        cleaned = _strip_weak_leads(cleaned)
-        if question:
-            cleaned = _remove_question_echo(cleaned, question=question)
-            cleaned = _remove_question_like_sentences(cleaned, question=question)
-        cleaned = _strip_english_section_labels(cleaned)
-        cleaned = re.sub(r"(?i)\b(?:CAUTION|WARNING|IMPORTANT)\b\s*", "", cleaned)
-        cleaned = re.sub(r"(?i)^\s*Hello[,!！]?\s*", "", cleaned)
-        cleaned = re.sub(r"\.([A-Z])", r". \1", cleaned.strip())
-        cleaned = re.sub(r"\.{2,}", ".", cleaned)
-        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,,;;.\n\r\t")
-        if cleaned and not cleaned.endswith((".", "!", "?")):
-            cleaned += "."
-    else:
-        cleaned = _polish_submission_text(cleaned, question=question)
-    if _is_off_topic_answer(cleaned, question):
-        reference_answer = _build_reference_based_answer(question=question, references=references)
-        if reference_answer:
-            cleaned = reference_answer
-        else:
-            cleaned = _build_submission_fallback(question=question, sources=sources)
-    cleaned = _smooth_raw_manual_text(cleaned)
-    if is_english_question:
-        if references and _should_rewrite_english_submission(cleaned):
-            reference_answer = _build_reference_based_answer(question=question, references=references)
-            cleaned = reference_answer or _build_submission_fallback(question=question, sources=sources)
-        elif references and "manual evidence is not sufficient" in cleaned.lower():
-            reference_answer = _build_reference_based_answer(question=question, references=references)
-            if reference_answer:
-                cleaned = reference_answer
-    if _is_low_information_submission_text(cleaned):
-        cleaned = _build_submission_fallback(question=question, sources=sources)
-    return cleaned.strip()
+    return normalize_submission_answer(text, question=question, sources=sources, references=references)
 
 
 def _format_with_images(text: str, image_ids: list[str]) -> str:
