@@ -164,6 +164,20 @@ def _is_english_text(text: str) -> bool:
     return english_words >= 3 and chinese_chars < english_words
 
 
+def _detect_and_get_lang_instruction(question: str) -> str:
+    """Return a strong language instruction if the question is in English."""
+    if not question or not question.strip():
+        return ""
+    if not _is_english_text(question):
+        return ""
+    return (
+        "【LANGUAGE CONSTRAINT - CRITICAL】\n"
+        "The user's question is in English. You MUST answer in English ONLY.\n"
+        "Do NOT use any Chinese characters in your response.\n"
+        "This is a strict requirement - failure will result in incorrect answers."
+    )
+
+
 def _strip_llm_structured_format(text: str) -> str:
     """Strip structured format headers that some LLMs use.
 
@@ -1935,7 +1949,8 @@ class AgentService:
         confidence = _confidence_from_chunks(evidence_chunks)
 
         # 3. Build messages
-        prompt_result = build_manual_qa_system_prompt(context)
+        lang_instruction = _detect_and_get_lang_instruction(query)
+        prompt_result = build_manual_qa_system_prompt(lang_instruction + "\n\n" + context if lang_instruction else context)
         messages: list[dict[str, str]] = [{"role": "system", "content": prompt_result.content}]
         if dialog_summary:
             messages.append({"role": "system", "content": f"【会话上下文】\n{dialog_summary}"})
@@ -2089,6 +2104,9 @@ class AgentService:
             if kb_context
             else policy_response.answer
         )
+        lang_instruction = _detect_and_get_lang_instruction(query)
+        if lang_instruction:
+            prompt_context = lang_instruction + "\n\n" + prompt_context
         prompt_result = build_customer_service_system_prompt(prompt_context)
         llm_messages = [
             {"role": "system", "content": prompt_result.content},
