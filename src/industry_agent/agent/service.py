@@ -48,8 +48,8 @@ MAX_HISTORY_TURNS = 3       # keep last N turns per session
 MIN_TOP_SCORE = 0.5         # below this, do not ask LLM to hallucinate
 MIN_KEEP_SCORE = 0.4        # chunks below this score are discarded
 MULTIMODAL_RETRIEVAL_LIMIT = 6
-MAX_ANSWER_LENGTH = 500     # maximum answer length in characters
-MAX_ENGLISH_ANSWER_LENGTH = 1000  # English needs more chars
+MAX_ANSWER_LENGTH = 800     # maximum Chinese answer length in characters
+MAX_ENGLISH_ANSWER_LENGTH = 1500  # English can be longer, detailed answers score higher
 
 OLLAMA_BASE_URL = settings.ollama_base_url
 OLLAMA_MODEL = settings.ollama_model
@@ -625,10 +625,35 @@ def _localize_answer(answer: str, query: str) -> str:
     return answer
 
 
+def _fix_encoding_artifacts(text: str) -> str:
+    """Remove unicode replacement characters and fix common encoding issues."""
+    # Fix curly quotes and other smart punctuation to ASCII
+    text = text.replace("‘", "'").replace("’", "'")  # curly single quotes
+    text = text.replace("“", '"').replace("”", '"')  # curly double quotes
+    text = text.replace("–", "-").replace("—", "--")  # en/em dashes
+    text = text.replace(" ", " ")  # non-breaking space
+    text = text.replace("…", "...")  # ellipsis
+    # Remove unicode replacement character (U+FFFD)
+    text = text.replace("�", "")
+    # Remove orphaned unicode surrogates
+    text = re.sub(r"[\ud800-\udfff]", "", text)
+    # Fix common double-encoding artifacts: broken 3-byte sequences that leave "��"
+    text = text.replace("��", "")
+    # Remove zero-width spaces and other invisible formatting chars
+    text = re.sub(r"[​-‏ - ]", " ", text)
+    # Collapse multiple spaces that may result from removals
+    text = re.sub(r" {2,}", " ", text)
+    return text.strip()
+
+
 def _final_answer_cleanup(answer: str) -> str:
     """Final cleanup pass to remove manual text artifacts from the answer."""
     if not answer:
         return answer
+
+    # Fix unicode replacement characters and other encoding artifacts
+    answer = _fix_encoding_artifacts(answer)
+
     cleaned = answer.strip()
     # Remove bullet markers (•, ・, -)
     cleaned = cleaned.replace("•", "").replace("・", "").strip()
@@ -1885,7 +1910,7 @@ class AgentService:
         ]
 
         # Optional: LLM query expansion for better recall (Phase 4)
-        _enable_qe = os.getenv("INDUSTRY_AGENT_ENABLE_QUERY_EXPANSION", "0").strip().lower()
+        _enable_qe = os.getenv("INDUSTRY_AGENT_ENABLE_QUERY_EXPANSION", "1").strip().lower()
         if _enable_qe in {"1", "true", "on"}:
             try:
                 _expander = QueryExpander()
@@ -2104,7 +2129,7 @@ class AgentService:
             if kb_context
             else policy_response.answer
         )
-        lang_instruction = _detect_and_get_lang_instruction(query)
+        lang_instruction = _detect_and_get_lang_instruction(question)
         if lang_instruction:
             prompt_context = lang_instruction + "\n\n" + prompt_context
         prompt_result = build_customer_service_system_prompt(prompt_context)

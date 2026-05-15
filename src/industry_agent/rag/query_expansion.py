@@ -18,28 +18,13 @@ from industry_agent.llm.client import LLMClient
 logger = logging.getLogger(__name__)
 
 QUERY_EXPANSION_PROMPT = """\
-You are a product customer service search specialist. Expand the user's query to improve search recall.
+Add 3-5 relevant search keywords for this query. Return ONLY a JSON object:
 
-Original query: {query}
+{query}
 
-Generate:
-1. **expanded_terms**: Key product names, model numbers, issue keywords, synonyms, and related terms
-2. **rewritten_query**: A search-oriented rewrite of the query with more technical/specific terms
+Format: {{"expanded_terms":["kw1","kw2","kw3"],"rewritten_query":"more specific rewrite"}}
 
-Return ONLY JSON:
-```json
-{{
-  "expanded_terms": ["term1", "term2", ...],
-  "rewritten_query": "rewritten search query"
-}}
-```
-
-Rules:
-- Do NOT fabricate product models or terms not implied by the query
-- Expanded terms must be highly relevant to the original query
-- For English queries, keep expanded terms in English
-- For Chinese queries, keep expanded terms in Chinese
-- If the query is already clear and specific, minimal expansion is fine
+Keep same language as query. Do not fabricate terms.
 """
 
 
@@ -93,15 +78,51 @@ class QueryExpander:
         }
 
     def _parse_response(self, response: str) -> dict[str, Any]:
-        """Parse JSON from LLM response, handling markdown code blocks."""
-        json_match = re.search(r"```(?:json)?\s*\n(.*?)\n```", response, re.DOTALL)
+        """Parse JSON from LLM response, handling various formats."""
+        if not response or not response.strip():
+            return {}  # Empty response, silently ignore
+        for pattern in [
+            r"```(?:json)?\s*\n(.*?)\n```",
+            r"```(?:json)?\s*(.*?)\s*```",
+        ]:
+            match = re.search(pattern, response, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(1).strip())
+                except json.JSONDecodeError:
+                    pass
+
+        # Try to find JSON object in the response
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
         if json_match:
             try:
-                return json.loads(json_match.group(1))
+                return json.loads(json_match.group(0))
             except json.JSONDecodeError:
                 pass
+
+        # Try raw response
         try:
-            return json.loads(response)
+            return json.loads(response.strip())
         except json.JSONDecodeError:
-            logger.warning("Could not parse LLM query expansion response: %s", response[:200])
-            return {}
+            pass
+
+        # Fallback: extract expanded_terms and rewritten_query via regex
+        result: dict[str, Any] = {}
+        terms_match = re.search(r'"expanded_terms"\s*:\s*\[(.*?)\]', response, re.DOTALL)
+        if terms_match:
+            terms_text = terms_match.group(1)
+            terms = re.findall(r'"([^"]+)"', terms_text)
+            result["expanded_terms"] = terms
+        rewritten_match = re.search(r'"rewritten_query"\s*:\s*"([^"]+)"', response)
+        if rewritten_match:
+            result["rewritten_query"] = rewritten_match.group(1)
+        if result:
+            return result
+
+        logger.warning("Could not parse LLM query expansion response: %s", response[:200])
+        return {}
+
+
+def _suppress_qe_warning() -> None:
+    """Silence noisy query expansion parse warnings in production."""
+    logging.getLogger("industry_agent.rag.query_expansion").setLevel(logging.ERROR)

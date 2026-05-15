@@ -49,7 +49,7 @@ def create_retriever(mode: str | None = None) -> Any:
 
     cross_encoder = None
     if CrossEncoderReranker is not None:
-        enable_ce = os.getenv("INDUSTRY_AGENT_ENABLE_CROSS_ENCODER", "0").strip().lower()
+        enable_ce = os.getenv("INDUSTRY_AGENT_ENABLE_CROSS_ENCODER", "1").strip().lower()
         if enable_ce in {"1", "true", "on"}:
             cross_encoder = CrossEncoderReranker()
     return HybridRetriever(cross_encoder=cross_encoder)
