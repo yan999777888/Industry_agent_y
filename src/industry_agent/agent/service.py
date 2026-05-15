@@ -160,8 +160,13 @@ def _is_english_text(text: str) -> bool:
         return False
     text_clean = text.strip()
     chinese_chars = len(re.findall(r'[一-鿿]', text_clean))
-    english_words = len(re.findall(r'[a-zA-Z]{3,}', text_clean))
-    return english_words >= 3 and chinese_chars < english_words
+    # Count English words (2+ letter sequences to catch short words like "is", "at")
+    english_words = len(re.findall(r'[a-zA-Z]{2,}', text_clean))
+    # No Chinese chars but has English letters → clearly English
+    if chinese_chars == 0 and len(re.findall(r'[a-zA-Z]', text_clean)) > 0:
+        return True
+    # English words dominate and at least 2 English words present
+    return english_words >= 2 and chinese_chars < english_words
 
 
 def _detect_and_get_lang_instruction(question: str) -> str:
@@ -801,6 +806,8 @@ def _should_use_extractive_manual_answer(answer: str) -> bool:
     normalized = _strip_thinking(str(answer)).strip()
     if not normalized:
         return True
+    if normalized == "模型未返回有效回答。" or normalized == "模型未返回有效回答.":
+        return True
     if _is_manual_fallback_answer(normalized):
         return True
     if len(re.sub(r"\s+", "", normalized)) < 6:
@@ -1062,6 +1069,39 @@ def _should_ground_manual_images(
     return any(term in normalized_answer for term in _VISUAL_GROUNDING_TERMS)
 
 
+def _extract_answer_sentences(answer: str) -> list[str]:
+    """Split answer into substantive sentences for matching against chunk content."""
+    raw_sentences = re.split(r"[.。!！?？\n]+", str(answer))
+    results = []
+    for s in raw_sentences:
+        s = s.strip()
+        # Skip short fragments and email/refusal hedges
+        if len(s) < 8:
+            continue
+        if re.match(r"^(Based on the available|I.m sorry|I apologize|I don.t have|Please note that)", s):
+            continue
+        results.append(s)
+    return results
+
+
+def _extract_answer_key_phrases(answer: str) -> list[str]:
+    """Extract 3-8 char Chinese phrases and 2-word English phrases from answer."""
+    phrases: list[str] = []
+    # Chinese: 3-8 character sequences (product names, procedures, component names)
+    cjk_phrases = re.findall(r"[一-鿿]{3,8}", str(answer))
+    phrases.extend(cjk_phrases)
+    # English: 2+ word sequences (proper nouns, technical terms)
+    en_phrases = re.findall(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}", str(answer))
+    phrases.extend([p.lower() for p in en_phrases])
+    # Technical identifiers: alphanumeric with dashes/underscores
+    tech_phrases = re.findall(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+){1,3}", str(answer))
+    phrases.extend([p.lower() for p in tech_phrases if len(p) >= 5])
+    # Filter out phrases that are just common English hedges
+    hedge_words = {"based on the available", "i am sorry", "i apologize", "please note",
+                   "please contact", "i don t", "there is no"}
+    return [p for p in dict.fromkeys(phrases) if p not in hedge_words]
+
+
 def _select_grounded_manual_image_ids(
     *,
     query: str,
@@ -1073,7 +1113,14 @@ def _select_grounded_manual_image_ids(
     if not evidence_chunks:
         return []
 
+    # ---- 1. Extract what the answer actually talks about ----
+    answer_sentences = _extract_answer_sentences(answer)
+    answer_phrases = _extract_answer_key_phrases(answer)
     answer_terms = _build_manual_answer_terms(query, answer)
+
+    if not answer_sentences and not answer_phrases:
+        return []
+
     image_terms = [term for term in (image_terms or []) if len(str(term).strip()) >= 2]
     image_features = image_features or {}
     feature_terms = _unique(
@@ -1083,52 +1130,80 @@ def _select_grounded_manual_image_ids(
             *(image_features.get("issue_terms", []) or []),
         ]
     )
-    should_ground = _should_ground_manual_images(
-        query=query,
-        answer=answer,
-        image_terms=image_terms,
-        image_features=image_features,
-    )
-    ranked_chunks: list[tuple[float, list[str]]] = []
-    for chunk in evidence_chunks[:4]:
+
+    # ---- 2. Score each chunk by how much of it appears in the ANSWER ----
+    ranked: list[tuple[float, str, dict[str, Any]]] = []
+    for chunk in evidence_chunks[:8]:
         image_ids = _parse_json_list(chunk.get("image_ids"))
         if not image_ids:
             continue
-        chunk_text = f"{chunk.get('title', '')}\n{chunk.get('text', '')}"
-        answer_overlap = _text_overlap_count(chunk_text, answer_terms)
-        image_overlap = _text_overlap_count(chunk_text, image_terms)
-        feature_overlap = _text_overlap_count(chunk_text, feature_terms)
-        score = float(chunk.get("_evidence_score", chunk.get("_score", 0.0)))
-        score += answer_overlap * 1.6
-        score += image_overlap * 2.0
-        score += feature_overlap * 1.8
-        if answer_overlap > 0 and image_ids:
-            score += 0.8
-        if feature_overlap > 0 and image_ids:
-            score += 0.8
-        ranked_chunks.append((score, image_ids))
 
-    if not ranked_chunks:
-        return []
+        title = str(chunk.get("title", ""))
+        chunk_text = str(chunk.get("text", ""))
+        combined = f"{title}\n{chunk_text}"
 
-    ranked_chunks.sort(key=lambda item: item[0], reverse=True)
-    if not should_ground and ranked_chunks[0][0] < MIN_KEEP_SCORE + 2.0:
-        return []
+        # --- Primary signal: does the ANSWER discuss this chunk's content? ---
+        # Check sentence-level overlap: do any answer sentences match chunk text?
+        sentence_hits = 0
+        for sentence in answer_sentences:
+            if _text_overlap_count(chunk_text, [sentence]) > 0:
+                sentence_hits += 1
+            elif len(sentence) >= 12:
+                # Check if key substrings from the sentence match the chunk
+                subs = [sentence[i:i+4] for i in range(0, len(sentence)-3, 3)]
+                if _text_overlap_count(chunk_text, subs) >= 2:
+                    sentence_hits += 1
 
-    threshold = ranked_chunks[0][0] - (1.5 if should_ground else 0.8)
-    selected: list[str] = []
-    seen: set[str] = set()
-    for score, image_ids in ranked_chunks:
-        if score < threshold and selected:
+        # Check if the chunk title (topic) appears in the answer
+        title_in_answer = len(title) >= 3 and (
+            title in answer
+            or (len(title) >= 6 and _text_overlap_count(answer, [title]) > 0)
+        )
+
+        # Phrase-level match: do answer-extracted phrases appear in this chunk?
+        phrase_overlap = _text_overlap_count(combined, answer_phrases) if answer_phrases else 0
+
+        # Term-level match (legacy from query analysis — secondary signal)
+        answer_term_overlap = _text_overlap_count(combined, answer_terms)
+
+        # Query/image term match (weak signal, kept for disambiguation)
+        image_term_overlap = _text_overlap_count(combined, image_terms)
+        feature_overlap = _text_overlap_count(combined, feature_terms)
+
+        # ---- 3. Compute relevance score (answer-weighted) ----
+        relevance = sentence_hits * 3.0          # strongest: answer sentences match chunk
+        relevance += (3.0 if title_in_answer else 0.0)  # strong: answer mentions the chunk topic
+        relevance += phrase_overlap * 2.0         # medium-strong: shared key phrases
+        relevance += answer_term_overlap * 1.0    # medium: keyword-level overlap
+        relevance += image_term_overlap * 0.8     # weak: query/image terms
+        relevance += feature_overlap * 0.8        # weak: visual feature terms
+        relevance += float(chunk.get("_evidence_score", 0.0)) * 0.3  # base score, deflated
+
+        # Require minimum answer-chunk relevance before considering images
+        min_relevance = 2.0 if (title_in_answer or sentence_hits > 0) else 4.0
+        if relevance < min_relevance:
             continue
+
         for image_id in image_ids:
             normalized = str(image_id).strip()
-            if not normalized or normalized in seen:
+            if not normalized:
                 continue
-            seen.add(normalized)
-            selected.append(normalized)
-            if len(selected) >= 3:
-                return selected
+            ranked.append((relevance, normalized, chunk))
+
+    if not ranked:
+        return []
+
+    # ---- 4. Select top images, deduplicated ----
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    selected: list[str] = []
+    seen: set[str] = set()
+    for score, img_id, chunk in ranked:
+        if img_id in seen:
+            continue
+        seen.add(img_id)
+        selected.append(img_id)
+        if len(selected) >= 3:
+            break
     return selected
 
 

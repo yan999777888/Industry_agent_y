@@ -1302,15 +1302,15 @@
     }
   },
   "sqlite": {
-    "db_path": "/home/lancegan/Datas/Codes/Python/Industry_Agent/data/processed/kb/index.sqlite",
+    "db_path": "/mnt/i/Industry_agent/Industry_Agent/data/processed/kb/index.sqlite",
     "fts5_available": true,
     "chunk_count": 3352,
     "image_count": 2608,
     "manual_count": 21,
     "vector": {
       "enabled": true,
-      "embedding_model": "BAAI/bge-small-zh-v1.5",
-      "dimensions": 512,
+      "embedding_model": "BAAI/bge-m3",
+      "dimensions": 1024,
       "chunk_count": 3352,
       "table": "chunk_vectors"
     }

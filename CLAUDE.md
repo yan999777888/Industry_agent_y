@@ -125,6 +125,6 @@ When the user issues a task, the main agent should:
 
 - Python 3.10+
 - Default LLM: `mimo-v2.0-flash` (OpenAI-compatible via `api.xiaomimimo.com`)
-- Embedding: `BAAI/bge-small-zh-v1.5`
+- Embedding: `BAAI/bge-m3`
 - Retrieval: hybrid (LIKE + FTS5 + optional vector)
 - Knowledge base: 21 manuals, 4132 chunks

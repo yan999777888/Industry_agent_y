@@ -1,4 +1,4 @@
-Metadata-Version: 2.4
+Metadata-Version: 2.1
 Name: industry-agent
 Version: 0.1.0
 Summary: Multimodal customer-service agent for manual-grounded RAG.
@@ -6,3 +6,7 @@ Requires-Python: >=3.10
 Provides-Extra: api
 Requires-Dist: fastapi>=0.110; extra == "api"
 Requires-Dist: uvicorn[standard]>=0.27; extra == "api"
+Provides-Extra: llm
+Requires-Dist: openai>=1.0; extra == "llm"
+Provides-Extra: rag
+Requires-Dist: sentence-transformers>=2.2; extra == "rag"

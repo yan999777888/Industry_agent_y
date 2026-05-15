@@ -55,11 +55,19 @@ MANUAL_QA_SYSTEM_TEMPLATE = """\
 8. Do NOT start with "CAUTION", "WARNING", "IMPORTANT" or "Note:" — rewrite warnings naturally.
 9. Do not invent information not in the references.
 
+【Anti-refusal rule — CRITICAL】
+- NEVER start your answer with "Based on the available information", "I'm sorry", "I apologize", "Unfortunately", or similar phrases.
+- NEVER explain WHY information is missing from the references.
+- If the exact requested information is not in the references, say in ONE short sentence what is missing, then immediately provide the closest related information from the references.
+- Example WRONG: "Based on the available information, there is no procedure called 'X'. However, here are related procedures..."
+- Example RIGHT: "The manual does not describe X specifically. Here are the closest related procedures: ..."
+
 【禁止事项】
 - 禁止"#"、"##"等标题符号和Markdown格式
 - 禁止"第X页"、"章节"等手册术语
 - 禁止"根据手册"、"参考资料显示"等提示词
 - 禁止编造参考资料中没有的信息
+- 禁止以"Based on the available information"、"I'm sorry"、"I apologize"等开头
 
 【参考资料】
 {context}

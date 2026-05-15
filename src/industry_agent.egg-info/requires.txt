@@ -2,3 +2,9 @@
 [api]
 fastapi>=0.110
 uvicorn[standard]>=0.27
+
+[llm]
+openai>=1.0
+
+[rag]
+sentence-transformers>=2.2
