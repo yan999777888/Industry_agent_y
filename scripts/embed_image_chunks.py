@@ -51,7 +51,25 @@ def extract_product_from_description(desc: str) -> str:
     return ""
 
 
+def _delegate_to_rebuild() -> bool:
+    """If DashScope mode is active, delegate to the full rebuild script."""
+    try:
+        from industry_agent.config import settings as _s
+        if _s.dashscope_enabled:
+            print("DashScope mode — delegating to rebuild_vectors_dashscope.py")
+            import subprocess
+            subprocess.check_call(
+                [sys.executable, str(PROJECT_ROOT / "scripts" / "rebuild_vectors_dashscope.py")]
+            )
+            return True
+    except ImportError:
+        pass
+    return False
+
+
 def main():
+    if _delegate_to_rebuild():
+        return
     print("Loading image metadata...")
     image_meta = load_image_metadata()
     print(f"  {len(image_meta)} images in index")

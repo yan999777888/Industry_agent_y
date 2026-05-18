@@ -12,7 +12,7 @@ from industry_agent.config import settings
 from industry_agent.kb.chunker import chunk_manual
 from industry_agent.kb.index_store import build_sqlite_index, write_json, write_jsonl
 from industry_agent.kb.models import ImageRecord, KnowledgeChunk, ManualDocument
-from industry_agent.kb.parser import attach_image_markers, load_manual
+from industry_agent.kb.parser import attach_image_markers, load_manuals
 
 
 def build_knowledge_base(
@@ -37,72 +37,72 @@ def build_knowledge_base(
     actual_missing_images: dict[tuple[str, str], None] = {}
 
     for manual_path in manual_paths:
-        manual = load_manual(manual_path)
-        manuals.append(manual)
+        for manual in load_manuals(manual_path):
+            manuals.append(manual)
 
-        attachment = attach_image_markers(
-            manual.text,
-            manual.image_ids,
-        )
-        marked_text = attachment.marked_text
-        attached_image_ids = attachment.attached_image_ids
-        unmatched_pic_count = attachment.unmatched_pic_count
-        if manual.pic_count != len(manual.image_ids):
-            warnings.append(
+            attachment = attach_image_markers(
+                manual.text,
+                manual.image_ids,
+            )
+            marked_text = attachment.marked_text
+            attached_image_ids = attachment.attached_image_ids
+            unmatched_pic_count = attachment.unmatched_pic_count
+            if manual.pic_count != len(manual.image_ids):
+                warnings.append(
+                    {
+                        "type": "pic_image_count_mismatch",
+                        "manual_id": manual.manual_id,
+                        "pic_count": manual.pic_count,
+                        "image_count": len(manual.image_ids),
+                        "unmatched_pic_count": unmatched_pic_count,
+                        "extra_image_count": max(len(manual.image_ids) - manual.pic_count, 0),
+                        "attachment_strategy": attachment.strategy,
+                        "attached_image_count": attachment.attached_count,
+                        "suppressed_image_count": attachment.suppressed_image_count,
+                    }
+                )
+            if attachment.strategy != "sequential":
+                warnings.append(
+                    {
+                        "type": "image_attachment_strategy_applied",
+                        "manual_id": manual.manual_id,
+                        "attachment_strategy": attachment.strategy,
+                        "pic_count": attachment.pic_count,
+                        "image_count": attachment.image_count,
+                        "attached_image_count": attachment.attached_count,
+                        "suppressed_image_count": attachment.suppressed_image_count,
+                    }
+                )
+
+            for image_id in attached_image_ids:
+                image_to_manuals[image_id].add(manual.manual_id)
+                if image_id not in image_files:
+                    actual_missing_images[(manual.manual_id, image_id)] = None
+
+            manual_chunks = chunk_manual(
+                manual,
+                marked_text,
+                project_root=project_root,
+                max_chars=max_chunk_chars,
+            )
+            chunks.extend(manual_chunks)
+            manual_record = manual.to_record(chunk_count=len(manual_chunks))
+            manual_record.update(
                 {
-                    "type": "pic_image_count_mismatch",
-                    "manual_id": manual.manual_id,
-                    "pic_count": manual.pic_count,
-                    "image_count": len(manual.image_ids),
+                    "attached_image_count": attachment.attached_count,
                     "unmatched_pic_count": unmatched_pic_count,
-                    "extra_image_count": max(len(manual.image_ids) - manual.pic_count, 0),
+                    "pic_coverage_ratio": round(
+                        (len(manual.image_ids) / manual.pic_count), 4
+                    ) if manual.pic_count else 1.0,
                     "attachment_strategy": attachment.strategy,
-                    "attached_image_count": attachment.attached_count,
                     "suppressed_image_count": attachment.suppressed_image_count,
                 }
             )
-        if attachment.strategy != "sequential":
-            warnings.append(
-                {
-                    "type": "image_attachment_strategy_applied",
-                    "manual_id": manual.manual_id,
-                    "attachment_strategy": attachment.strategy,
-                    "pic_count": attachment.pic_count,
-                    "image_count": attachment.image_count,
-                    "attached_image_count": attachment.attached_count,
-                    "suppressed_image_count": attachment.suppressed_image_count,
-                }
-            )
+            manual_records.append(manual_record)
 
-        for image_id in attached_image_ids:
-            image_to_manuals[image_id].add(manual.manual_id)
-            if image_id not in image_files:
-                actual_missing_images[(manual.manual_id, image_id)] = None
-
-        manual_chunks = chunk_manual(
-            manual,
-            marked_text,
-            project_root=project_root,
-            max_chars=max_chunk_chars,
-        )
-        chunks.extend(manual_chunks)
-        manual_record = manual.to_record(chunk_count=len(manual_chunks))
-        manual_record.update(
-            {
-                "attached_image_count": attachment.attached_count,
-                "unmatched_pic_count": unmatched_pic_count,
-                "pic_coverage_ratio": round(
-                    (len(manual.image_ids) / manual.pic_count), 4
-                ) if manual.pic_count else 1.0,
-                "attachment_strategy": attachment.strategy,
-                "suppressed_image_count": attachment.suppressed_image_count,
-            }
-        )
-        manual_records.append(manual_record)
-
-        for chunk in manual_chunks:
-            for image_id in chunk.image_ids:
-                image_to_chunks[image_id].add(chunk.chunk_id)
+            for chunk in manual_chunks:
+                for image_id in chunk.image_ids:
+                    image_to_chunks[image_id].add(chunk.chunk_id)
 
     image_records = _build_image_records(
         image_files=image_files,
@@ -296,7 +296,7 @@ def summarize_manual_quality(manuals: list[ManualDocument], chunks: list[Knowled
 def build_english_summary_segments(chunks: list[KnowledgeChunk]) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for chunk in chunks:
-        if chunk.manual_id != "汇总英文手册":
+        if not chunk.manual_id.startswith("汇总英文手册"):
             continue
         metadata = chunk.metadata or {}
         sub_manual_id = str(metadata.get("sub_manual_id") or chunk.manual_id)

@@ -603,17 +603,23 @@ class SQLiteRetriever:
         db_path: Path = settings.processed_dir / "index.sqlite",
         *,
         vector_searcher: VectorSearcher | None = None,
+        bm25_retriever: Any | None = None,
     ) -> None:
         self.db_path = db_path
         self.vector_searcher = vector_searcher or SQLiteVectorSearcher(db_path)
+        self.bm25_retriever = bm25_retriever
 
     def retrieval_status(self) -> dict[str, Any]:
         """Describe the active retrieval stack for docs/debug output."""
 
+        channels = ["like", "fts5_bm25", "vector"]
+        if self.bm25_retriever is not None:
+            channels.append("bm25")
         return {
             "strategy": "hybrid_lexical_with_optional_vector",
-            "channels": ["like", "fts5_bm25", "vector"],
+            "channels": channels,
             "lexical_channels": ["like", "fts5_bm25"],
+            "bm25": self.bm25_retriever.is_loaded if self.bm25_retriever else False,
             "vector": describe_vector_retrieval(db_path=self.db_path),
         }
 
@@ -648,7 +654,18 @@ class SQLiteRetriever:
             conn.close()
 
         vector_candidates = self._vector_candidate_search(query=query, limit=fetch_limit)
-        candidate_rows = self._merge_candidate_rows(like_candidates, fts_candidates, vector_candidates)
+
+        # BM25 channel
+        bm25_candidates: list[dict[str, Any]] = []
+        if self.bm25_retriever is not None:
+            try:
+                bm25_candidates = self.bm25_retriever.search(query, top_k=fetch_limit)
+            except Exception:
+                pass
+
+        candidate_rows = self._merge_candidate_rows(
+            like_candidates, fts_candidates, vector_candidates, bm25_candidates,
+        )
         scored = [
             self._score_row(dict(row), analysis)
             for row in candidate_rows
@@ -801,6 +818,7 @@ class SQLiteRetriever:
         like_rows: list[sqlite3.Row],
         fts_rows: list[sqlite3.Row],
         vector_rows: list[dict[str, Any]] | None = None,
+        bm25_rows: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         merged: dict[str, dict[str, Any]] = {}
         for row in like_rows:
@@ -836,6 +854,18 @@ class SQLiteRetriever:
             if record.get("_vector_score") is not None:
                 existing["_vector_score"] = record.get("_vector_score")
             _append_channel(existing, "vector")
+        for record in bm25_rows or []:
+            chunk_id = str(record.get("chunk_id", ""))
+            if not chunk_id:
+                continue
+            existing = merged.get(chunk_id)
+            if existing is None:
+                record.setdefault("fts_rank", None)
+                record.setdefault("fts_hit", 0)
+                record["_retrieval_channels"] = ["bm25"]
+                merged[chunk_id] = record
+                continue
+            _append_channel(existing, "bm25")
         return list(merged.values())
 
     def _vector_candidate_search(self, *, query: str, limit: int) -> list[dict[str, Any]]:

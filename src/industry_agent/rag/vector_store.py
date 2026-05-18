@@ -10,6 +10,7 @@ without changing the retriever contract.
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 import re
@@ -21,10 +22,18 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from industry_agent.config import settings
 
+logger = logging.getLogger(__name__)
+
 try:  # pragma: no cover - optional dependency
     from sentence_transformers import SentenceTransformer
 except ImportError:  # pragma: no cover - optional dependency
     SentenceTransformer = None  # type: ignore[assignment]
+
+# DashScope embedding (used when dashscope_enabled=True)
+try:
+    from industry_agent.rag.dashscope import DashScopeEmbeddingModel
+except ImportError:
+    DashScopeEmbeddingModel = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from industry_agent.kb.models import KnowledgeChunk
@@ -136,7 +145,11 @@ class SQLiteVectorSearcher:
             return []
 
         try:
-            query_vector = self.model.embed(query)
+            model = self.model
+            if hasattr(model, "embed_query"):
+                query_vector = model.embed_query(query)
+            else:
+                query_vector = model.embed(query)
         except Exception:
             return []
         if not any(query_vector):
@@ -207,12 +220,28 @@ def build_chunk_vector_index(
         );
         """
     )
-    conn.executemany(
-        """
-        INSERT INTO chunk_vectors (chunk_id, embedding_model, dimensions, vector)
-        VALUES (?, ?, ?, ?)
-        """,
-        [
+
+    # Batch embedding path (DashScope) for efficiency
+    if hasattr(model, "embed_batch"):
+        texts = [_chunk_embedding_text(chunk) for chunk in chunks]
+        try:
+            all_vectors = model.embed_batch(texts, text_type="document")
+        except Exception as exc:
+            logger.exception("DashScope batch embedding failed: %s", exc)
+            all_vectors = []
+        rows = [
+            (
+                chunk.chunk_id,
+                active.embedding_model,
+                dimensions,
+                encode_vector(vec),
+            )
+            for chunk, vec in zip(chunks, all_vectors)
+            if vec
+        ]
+    else:
+        # Original per-chunk path (sentence-transformers / hashing)
+        rows = [
             (
                 chunk.chunk_id,
                 active.embedding_model,
@@ -220,7 +249,13 @@ def build_chunk_vector_index(
                 encode_vector(model.embed(_chunk_embedding_text(chunk))),
             )
             for chunk in chunks
-        ],
+        ]
+    conn.executemany(
+        """
+        INSERT INTO chunk_vectors (chunk_id, embedding_model, dimensions, vector)
+        VALUES (?, ?, ?, ?)
+        """,
+        rows,
     )
     conn.executemany(
         "INSERT INTO vector_metadata (key, value) VALUES (?, ?)",
@@ -231,6 +266,7 @@ def build_chunk_vector_index(
             ("status", "built"),
         ],
     )
+    conn.commit()
     return {
         "enabled": active.enabled,
         "embedding_model": active.embedding_model,
@@ -292,7 +328,23 @@ def dot_product(left: list[float], right: list[float]) -> float:
     return sum(a * b for a, b in zip(left, right))
 
 
-def _create_embedding_model(config: VectorSearchConfig) -> HashingEmbeddingModel | SentenceTransformerEmbeddingModel:
+def _create_embedding_model(
+    config: VectorSearchConfig,
+) -> HashingEmbeddingModel | SentenceTransformerEmbeddingModel | Any:
+    # DashScope mode — use text-embedding-v4 via API
+    if settings.dashscope_enabled:
+        if DashScopeEmbeddingModel is None:
+            raise RuntimeError(
+                "DashScope mode enabled but DashScopeEmbeddingModel unavailable. "
+                "Install httpx (already in requirements.txt)."
+            )
+        return DashScopeEmbeddingModel(
+            api_key=settings.dashscope_api_key,
+            model=settings.dashscope_embedding_model,
+            dimensions=settings.dashscope_embedding_dimensions,
+            base_url=settings.dashscope_base_url,
+        )
+
     model_name = str(config.embedding_model).strip()
     if model_name and model_name != "hashing-ngram-v1":
         return SentenceTransformerEmbeddingModel(model_name)

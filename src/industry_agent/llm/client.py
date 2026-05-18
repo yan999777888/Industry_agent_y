@@ -38,16 +38,27 @@ class LLMClient:
         vision_model: str | None = None,
     ) -> None:
         self.backend = (backend or settings.llm_backend).strip().lower()
-        self.api_key = api_key or settings.llm_api_key
-        self.base_url = base_url or (
-            settings.ollama_base_url if self.backend == "ollama" else settings.llm_base_url
-        )
-        self.model = model or (
-            settings.ollama_model if self.backend == "ollama" else settings.llm_model
-        )
-        self.vision_model = vision_model or (
-            settings.ollama_vision_model if self.backend == "ollama" else settings.llm_vision_model
-        )
+
+        # DashScope mode — use DashScope LLM endpoint (OpenAI-compatible)
+        if settings.dashscope_enabled:
+            ds_base = settings.dashscope_base_url.rstrip("/")
+            self.api_key = api_key or settings.dashscope_api_key
+            # Do NOT append /chat/completions — the OpenAI SDK adds it automatically.
+            # Also ignore passed model/vision_model — use DashScope config directly.
+            self.base_url = ds_base
+            self.model = settings.dashscope_llm_model
+            self.vision_model = settings.dashscope_vision_model
+        else:
+            self.api_key = api_key or settings.llm_api_key
+            self.base_url = base_url or (
+                settings.ollama_base_url if self.backend == "ollama" else settings.llm_base_url
+            )
+            self.model = model or (
+                settings.ollama_model if self.backend == "ollama" else settings.llm_model
+            )
+            self.vision_model = vision_model or (
+                settings.ollama_vision_model if self.backend == "ollama" else settings.llm_vision_model
+            )
         self._client: Any | None = None
 
     @property

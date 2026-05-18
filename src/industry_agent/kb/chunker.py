@@ -211,6 +211,7 @@ def chunk_manual(
 
 def _prepare_section_plans(manual: ManualDocument, marked_text: str) -> list[SectionPlan]:
     plans: list[SectionPlan] = []
+    is_english = manual.manual_id.startswith("汇总英文手册")
     for section_index, section_text in enumerate(_split_sections(marked_text)):
         if _is_toc_like(section_text):
             continue
@@ -221,7 +222,7 @@ def _prepare_section_plans(manual: ManualDocument, marked_text: str) -> list[Sec
             text=clean_text,
             is_toc=False,
         )
-        explicit_domain_label = _detect_english_domain(f"{title}\n{clean_text}") if manual.product_name == "汇总英文" else ""
+        explicit_domain_label = _detect_english_domain(f"{title}\n{clean_text}") if is_english else ""
         plans.append(
             SectionPlan(
                 section_index=section_index,
@@ -232,7 +233,7 @@ def _prepare_section_plans(manual: ManualDocument, marked_text: str) -> list[Sec
                 domain_label=explicit_domain_label,
             )
         )
-    if manual.product_name == "汇总英文":
+    if is_english:
         _infer_english_section_domains(plans)
         _smooth_english_section_domains(plans)
         _annotate_english_section_segments(plans)
@@ -556,7 +557,7 @@ def _build_chunk_metadata(
     section_domain_inferred: bool = False,
     domain_segment_index: int = -1,
 ) -> dict[str, object]:
-    chunk_domain_label = _detect_english_domain(f"{title}\n{text}") if manual.product_name == "汇总英文" else ""
+    chunk_domain_label = _detect_english_domain(f"{title}\n{text}") if manual.manual_id.startswith("汇总英文手册") else ""
     domain_label = chunk_domain_label or section_domain_label
     has_toc_noise = _is_toc_like(text)
     has_ocr_noise = bool(re.search(r"\\u[0-9a-fA-F]{4}|\\(?:mathsf|mathrm|pmb)|[a-z]{18,}", text))
@@ -569,7 +570,7 @@ def _build_chunk_metadata(
         clean_score -= 0.4
     if has_ocr_noise:
         clean_score -= 0.2
-    if not domain_label and manual.product_name == "汇总英文":
+    if not domain_label and manual.manual_id.startswith("汇总英文手册"):
         clean_score -= 0.1
     if line_count <= 1 and step_count == 0 and not image_ids and len(text) < 40:
         clean_score -= 0.15

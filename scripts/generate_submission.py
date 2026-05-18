@@ -16,8 +16,181 @@ from urllib.request import Request, urlopen
 DEFAULT_FALLBACK_ANSWER = "根据现有资料无法回答此问题。请补充更明确的产品名称、型号、故障现象或图片后再试。"
 MAX_SINGLE_ANSWER_CHARS = 800
 MAX_MULTI_ANSWER_CHARS = 1000
-MAX_PIC_MARKERS = 3
+MAX_PIC_MARKERS = 5
 SUBMISSION_INCLUDE_PIC = True
+
+_IMAGE_CHUNKS_CACHE: dict[str, str] | None = None
+
+
+def _load_image_descriptions() -> dict[str, str]:
+    global _IMAGE_CHUNKS_CACHE
+    if _IMAGE_CHUNKS_CACHE is None:
+        _IMAGE_CHUNKS_CACHE = {}
+        # Use images.jsonl (vision model descriptions) instead of old image_chunks.jsonl
+        img_path = (
+            Path(__file__).resolve().parent.parent
+            / "data" / "processed" / "kb" / "images.jsonl"
+        )
+        if img_path.exists():
+            with open(img_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    rec = json.loads(line)
+                    desc = rec.get("description", "").strip()
+                    if desc:
+                        _IMAGE_CHUNKS_CACHE[rec["image_id"]] = desc
+    return _IMAGE_CHUNKS_CACHE
+
+
+def _sentence_tokenize(text: str) -> list[str]:
+    """Split text into sentences, avoiding splitting on numbered-list periods (1. 2.)."""
+    protected = re.sub(r"(\d+)\.(\s*\S)", r"\1__DOT__\2", text)
+    parts = re.split(r"(?<=[。！？.!?\n])", protected)
+    return [re.sub(r"__DOT__", ".", p) for p in parts if p.strip()]
+
+
+def _tokenize_segments(text: str) -> list[str]:
+    """Split into clause-level segments for fine-grained image placement.
+
+    Splits at sentence boundaries (。), then at clause boundaries (， ；)
+    within sentences. Step transitions (1. 2.) within a sentence are also split.
+    Short segments (<6 content chars) are forward-merged into the next segment.
+    """
+    sentences = _sentence_tokenize(text)
+    segments: list[str] = []
+    for sent in sentences:
+        # Split at step transitions mid-sentence: "xxx1. step a2. step b"
+        step_parts = re.split(r"(?<=\S)(?=\d+\.[^\d])", sent)
+        for part in step_parts:
+            if not part.strip():
+                continue
+            # Split at clause boundaries but keep substantial fragments
+            sub_parts = re.split(r"(?<=[，；;,])", part)
+            for sp in sub_parts:
+                sp = sp.strip()
+                if not sp:
+                    continue
+                segments.append(sp)
+
+    # Forward-merge: very short segments (<6 content chars) merge into NEXT segment
+    merged: list[str] = []
+    i = 0
+    while i < len(segments):
+        cur = segments[i]
+        content_chars = re.sub(r"\s+", "", cur)
+        content_chars = re.sub(r"^[首先其次然后最后接着此外另外同时而且因此所以但是不过然而,，;；]+", "", content_chars)
+        if len(content_chars) < 6 and i + 1 < len(segments):
+            # Merge with next segment
+            merged.append(cur + segments[i + 1])
+            i += 2
+        else:
+            merged.append(cur)
+            i += 1
+    return merged
+
+
+def _extract_content_phrases(description: str) -> list[str]:
+    """Extract all meaningful content-bearing phrases from an image description."""
+    d = re.sub(r"\s+", "", description.lower())
+    # Remove bracketed annotations
+    d = re.sub(r"[（(][^）)]*[）)]", "", d)
+    d = re.sub(r"\[.*?\]", "", d)
+
+    phrases: list[str] = []
+
+    # Title — before first |, 。, or sentence-ending .
+    title_raw = d.split("|")[0].split("。")[0]
+    title_raw = re.split(r"(?<!\d)[.。]", title_raw, maxsplit=1)[0]
+    title = title_raw.strip(" .")
+    if len(title) >= 2:
+        phrases.append(title)
+
+    # Each numbered step
+    for m in re.finditer(r"(\d+)[\.、)]\s*([^。；;!\n]+)", d):
+        step = m.group(2).strip()
+        if len(step) >= 4:
+            phrases.append(step)
+
+    # Key noun phrases (4+ chars) from body text not already covered
+    body = d
+    for m in re.finditer(r"([^\d。；;!,.，、：:/\s]{4,12})", body):
+        term = m.group(1)
+        # Filter out stop words / low-value terms
+        if term not in {"安全装置", "操作步骤", "注意事项", "产品概述", "使用说明"}:
+            if term not in phrases:
+                phrases.append(term)
+
+    return phrases
+
+
+def _overlap_score(segment: str, description: str) -> int:
+    """Score how well an image description matches a text segment.
+
+    Matches the FULL description content (title + all steps + key terms)
+    against the segment. Cumulative scoring rewards descriptions where
+    multiple content phrases appear in the same segment.
+    """
+    s = re.sub(r"\s+", "", segment.lower())
+    if not s:
+        return 0
+
+    phrases = _extract_content_phrases(description)
+    if not phrases:
+        return 0
+
+    title = phrases[0]
+    steps = phrases[1:]
+
+    # 1. Title exact match
+    if len(title) >= 4 and title in s:
+        return 100 + len(title)
+
+    # 2. Count matching content phrases (steps + key terms)
+    matched = 0
+    match_length = 0
+    for phrase in phrases:
+        if len(phrase) < 3:
+            continue
+        # Phrase exact match
+        if phrase in s:
+            matched += 1
+            match_length += len(phrase)
+            continue
+        # Partial phrase match (for longer phrases)
+        if len(phrase) >= 6:
+            for n in [6, 4]:
+                for i in range(len(phrase) - n + 1):
+                    if phrase[i:i + n] in s:
+                        matched += 1
+                        match_length += n
+                        break
+                else:
+                    continue
+                break
+
+    if matched >= 3:
+        return 75 + min(matched * 8, 40)
+    if matched >= 2:
+        return 65 + matched * 5
+    if matched == 1:
+        return 55 + match_length
+
+    # 3. Title substring match
+    if len(title) >= 2:
+        for size in [8, 6, 4]:
+            for i in range(len(title) - size + 1):
+                if title[i:i + size] in s:
+                    return 50 + size
+
+    # 4. N-gram fallback
+    d_clean = re.sub(r"\s+", "", description.lower())
+    d_clean = re.sub(r"[（(][^）)]*[）)]", "", d_clean)
+    d_clean = re.sub(r"\[.*?\]", "", d_clean)
+    ngram = 0
+    for n in [8, 6, 4]:
+        for i in range(len(s) - n + 1):
+            if s[i:i + n] in d_clean:
+                ngram += n
+    return min(ngram, 48)  # below all phrase-match levels
 _CUSTOMER_SERVICE_KEYWORDS = (
     "退货", "换货", "退款", "运费", "物流", "快递", "发票", "补发", "签收",
     "售后", "维修", "保修", "投诉", "赔偿", "订单", "发货", "包装", "瑕疵",
@@ -372,9 +545,10 @@ def _normalize_single_block_text(
 
 
 def _format_with_images(text: str, image_ids: list[str]) -> str:
-    """Normalize final submission text and optionally keep inline picture markers."""
+    """Normalize final submission text with sentence-level image interleaving."""
     text = _strip_submission_artifacts(text)
-    selected_image_ids = _select_submission_image_ids(image_ids)
+    desc_map = _load_image_descriptions()
+    selected_image_ids = _select_submission_image_ids(image_ids, answer_text=text, desc_map=desc_map)
     if not SUBMISSION_INCLUDE_PIC or not selected_image_ids:
         text = re.sub(r"\s*<PIC>\s*", " ", text, flags=re.IGNORECASE)
         text = re.sub(r"[ \t]{2,}", " ", text).strip(" \n\r\t，,；;")
@@ -382,17 +556,69 @@ def _format_with_images(text: str, image_ids: list[str]) -> str:
             text += "。"
         return text
 
-    existing_pic_count = len(re.findall(r"<PIC>", text, flags=re.IGNORECASE))
-    pic_count = min(existing_pic_count if existing_pic_count else len(selected_image_ids), len(selected_image_ids), MAX_PIC_MARKERS)
     cleaned_text = re.sub(r"\s*<PIC>\s*", " ", text, flags=re.IGNORECASE)
     cleaned_text = re.sub(r"[ \t]{2,}", " ", cleaned_text).strip(" \n\r\t，,；;")
-    if pic_count:
-        cleaned_text = cleaned_text.rstrip("。！？.!?") + "<PIC>" * pic_count
-    elif cleaned_text and not cleaned_text.endswith(("。", "！", "？", ".", "!", "?")):
-        cleaned_text += "。"
+
+    # --- Global greedy image-to-segment assignment ---
+    # Compute all image×segment scores, then assign highest-scoring pairs
+    # so each segment gets at most 1 image and images land at their best match.
+    segments = _tokenize_segments(cleaned_text)
+    pic_count = min(len(selected_image_ids), MAX_PIC_MARKERS)
+    segment_pics: dict[int, list[str]] = {}
+    end_pics: list[str] = []
+
+    # Compute score matrix: (score, seg_idx, img_id) for all pairs
+    all_scores: list[tuple[int, int, str]] = []
+    for img_id in selected_image_ids[:pic_count]:
+        desc = desc_map.get(img_id, "")
+        if not desc:
+            end_pics.append(img_id)
+            continue
+        for seg_idx, seg in enumerate(segments):
+            score = _overlap_score(seg, desc)
+            if score > 0:
+                all_scores.append((score, seg_idx, img_id))
+
+    # Sort by score descending, then by segment index ascending
+    all_scores.sort(key=lambda x: (-x[0], x[1]))
+
+    # Greedy assignment: each (image, segment) pair can be claimed at most once
+    claimed_images: set[str] = set()
+    claimed_segments: set[int] = set()
+
+    for score, seg_idx, img_id in all_scores:
+        if score < 35:
+            break
+        if img_id in claimed_images or seg_idx in claimed_segments:
+            continue
+        segment_pics[seg_idx] = [img_id]
+        claimed_images.add(img_id)
+        claimed_segments.add(seg_idx)
+
+    # Unclaimed images go to end
+    for img_id in selected_image_ids[:pic_count]:
+        if img_id not in claimed_images and img_id not in end_pics:
+            end_pics.append(img_id)
+
+    # Build text with interleaved <PIC> markers
+    result_parts: list[str] = []
+    for i, seg in enumerate(segments):
+        result_parts.append(seg)
+        for img_id in segment_pics.get(i, []):
+            result_parts.append("<PIC>")
+
+    result = "".join(result_parts)
+    result = re.sub(r"[ \t]{2,}", " ", result).strip(" \n\r\t，,；;")
+
+    # Append any unmatched images at the end
+    for _img_id in end_pics:
+        result = result.rstrip("。！？.!?") + "<PIC>"
+
+    if result and not result.endswith(("。", "！", "？", ".", "!", "?", ">")):
+        result += "。"
 
     ids_json = json.dumps(selected_image_ids[:pic_count], ensure_ascii=False)
-    return f"{cleaned_text},{ids_json}"
+    return f"{result},{ids_json}"
 
 
 def _basic_submission_cleanup(text: str) -> str:
@@ -577,7 +803,7 @@ def _strip_submission_artifacts(text: str) -> str:
     cleaned = cleaned.replace("1.。", "")
     cleaned = re.sub(r"\d+\.。", "", cleaned)
     cleaned = re.sub(r"【参考\d+】", "", cleaned)
-    cleaned = cleaned.replace("：。", "：")
+    cleaned = re.sub(r"[：:]\s*[。.]", "：", cleaned)
     cleaned = cleaned.replace('\\"', '"')
     cleaned = re.sub(r"参考\s*(?:Manual\d+_\d+|[A-Za-z]+(?:_[A-Za-z0-9]+)*_\d+)\b", "", cleaned)
     cleaned = re.sub(r"(?:\b(?:Manual\s*\d+|[A-Za-z]+(?:_[A-Za-z0-9]+)*_\d+)\b[、,，\s]*){2,}", " ", cleaned)
@@ -755,17 +981,34 @@ def _detect_language(text: str) -> str:
     return "mixed"
 
 
-def _select_submission_image_ids(image_ids: list[str]) -> list[str]:
+def _select_submission_image_ids(image_ids: list[str], *, answer_text: str = "", desc_map: dict[str, str] | None = None) -> list[str]:
+    """Deduplicate and limit image_ids, prioritizing ones that match figure references in answer text."""
     selected: list[str] = []
     seen: set[str] = set()
-    for image_id in image_ids:
+
+    # Extract figure numbers referenced in answer text: 图2, 图6, 图1, etc.
+    answer_figures: set[str] = set()
+    if answer_text:
+        for m in re.finditer(r"图\s*(\d+)", answer_text):
+            answer_figures.add(m.group(1))
+
+    # Score each image: higher = better match with answer's figure references
+    scored_images: list[tuple[int, int, str]] = []  # (-score, orig_index, image_id)
+    for idx, image_id in enumerate(image_ids):
         normalized = str(image_id).strip()
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
-        selected.append(normalized)
-        if len(selected) >= MAX_PIC_MARKERS:
-            break
+        score = 0
+        if answer_figures and desc_map:
+            desc = desc_map.get(normalized, "")
+            for fig_num in answer_figures:
+                if re.search(rf"图\s*{fig_num}", desc):
+                    score += 10
+        scored_images.append((-score, idx, normalized))
+
+    scored_images.sort()
+    selected = [img for _, _, img in scored_images[:MAX_PIC_MARKERS]]
     return selected
 
 
@@ -1412,17 +1655,32 @@ def _format_as_numbered_steps(text: str, *, question: str) -> str:
 
 def _compress_submission_answer(text: str, *, question: str) -> str:
     limit = MAX_MULTI_ANSWER_CHARS if _is_multi_question(question) else MAX_SINGLE_ANSWER_CHARS
-    cleaned = _normalize_pic_markers(text)
-    if len(cleaned) <= limit:
-        return cleaned
+    if len(text) <= limit:
+        return text
 
-    sentences = _split_submission_sentences(re.sub(r"<PIC>", " ", cleaned))
-    if not sentences:
-        return cleaned[:limit].rstrip(" ，,；;") + "。"
+    # Split into sentence-level units, preserving inline <PIC> markers
+    raw_units = re.split(r"(<PIC>)", text)
+    # Tag sentences with their associated <PIC> markers
+    tagged: list[tuple[str, int]] = []  # (sentence_text, pic_count_after)
+    for unit in raw_units:
+        stripped = unit.strip()
+        if not stripped:
+            continue
+        if stripped == "<PIC>":
+            if tagged:
+                prev_text, prev_pics = tagged[-1]
+                tagged[-1] = (prev_text, prev_pics + 1)
+        else:
+            tagged.append((stripped, 0))
+
+    # Flatten back for scoring
+    plain_sentences = _split_submission_sentences(re.sub(r"<PIC>", " ", text))
+    if not plain_sentences:
+        return text[:limit].rstrip(" ，,；;") + "。"
 
     question_terms = _extract_question_terms(question)
     scored: list[tuple[int, int, str]] = []
-    for index, sentence in enumerate(sentences):
+    for index, sentence in enumerate(plain_sentences):
         sentence = sentence.strip(" ，,；;。")
         if len(sentence) < 4:
             continue
@@ -1434,31 +1692,62 @@ def _compress_submission_answer(text: str, *, question: str) -> str:
         scored.append((score, -index, sentence))
 
     scored.sort(reverse=True)
-    selected_with_index: list[tuple[int, str]] = []
+    selected_indices: set[int] = set()
     selected_texts: list[str] = []
     total = 0
     for _, neg_index, sentence in scored:
+        orig_index = -neg_index
         if _is_near_duplicate_sentence(sentence, selected_texts):
             continue
         next_len = len(sentence) + 1
         if selected_texts and total + next_len > limit:
             continue
-        selected_with_index.append((-neg_index, sentence))
+        selected_indices.add(orig_index)
         selected_texts.append(sentence)
         total += next_len
         if len(selected_texts) >= (7 if _is_multi_question(question) else 5):
             break
 
     if not selected_texts:
-        selected_texts = [sentences[0][:limit].strip(" ，,；;。")]
-    else:
-        selected_texts = [sentence for _, sentence in sorted(selected_with_index)]
-    answer = _join_sentences_with_punctuation(selected_texts)
+        selected_texts = [plain_sentences[0][:limit].rstrip(" ，,；;。")]
+        selected_indices = {0}
+
+    # Rebuild with original <PIC> positions for surviving sentences
+    result_parts: list[str] = []
+    end_pics = 0
+    sentence_idx = 0
+    for unit_text, pic_count in tagged:
+        # Find which plain sentence index this unit maps to
+        matching_idx = -1
+        best_overlap = 0
+        unit_clean = re.sub(r"\s+", "", unit_text.lower())
+        for i, ps in enumerate(plain_sentences):
+            ps_clean = re.sub(r"\s+", "", ps.lower())
+            if unit_clean == ps_clean or unit_clean in ps_clean or ps_clean in unit_clean:
+                matching_idx = i
+                break
+        if matching_idx < 0:
+            for i, ps in enumerate(plain_sentences):
+                ps_clean = re.sub(r"\s+", "", ps.lower())
+                overlap = len(set(unit_clean) & set(ps_clean))
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    matching_idx = i
+
+        if matching_idx >= 0 and matching_idx in selected_indices:
+            if result_parts and not result_parts[-1].endswith(("。", "！", "？", ".", "!", "?")):
+                result_parts.append("。")
+            result_parts.append(unit_text.strip(" 。！？.!?"))
+            result_parts.extend(["<PIC>"] * pic_count)
+        elif pic_count > 0:
+            end_pics += pic_count
+        sentence_idx += 1
+
+    answer = "".join(result_parts)
     if len(answer) > limit:
         answer = answer[:limit].rstrip(" ，,；;。") + "。"
-    pic_count = min(len(re.findall(r"<PIC>", cleaned, flags=re.IGNORECASE)), MAX_PIC_MARKERS)
-    if pic_count:
-        answer = answer.rstrip("。！？.!?") + "<PIC>" * pic_count
+    if end_pics:
+        answer = answer.rstrip("。！？.!?") + "<PIC>" * end_pics
     return answer
 
 

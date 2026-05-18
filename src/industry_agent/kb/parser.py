@@ -180,15 +180,62 @@ class ImageAttachmentResult:
         return asdict(self)
 
 
-def load_manual(path: Path) -> ManualDocument:
-    """Load one manual file.
+def load_manuals(path: Path) -> list[ManualDocument]:
+    """Load one or more ManualDocuments from a file.
 
-    Most files are valid JSON/Python literals shaped as [text, image_ids].
-    A few contain raw quotes or newlines inside the text field, so we keep a
-    fallback parser that recovers the final image-id list from the file tail.
+    Supports:
+      - JSONL: one JSON array [text, image_ids] per line → multiple documents
+      - Single JSON: one JSON array per file → one document
+      - Python literal: via ast.literal_eval
+      - Tail-recovery: regex fallback for malformed payloads
     """
 
     raw = path.read_text(encoding="utf-8")
+    lines = raw.strip().splitlines()
+
+    # JSONL detection: try to parse every non-empty line as a JSON array
+    if len(lines) > 1:
+        documents: list[ManualDocument] = []
+        all_valid = True
+        for line_num, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                data = json.loads(stripped)
+                text, image_ids = _validate_manual_payload(data)
+            except Exception:
+                all_valid = False
+                break
+            cleaned_text = normalize_manual_text(text)
+            product_name = _product_name_from_path(path)
+            docs_id = f"{path.stem}_{line_num + 1:03d}"
+            documents.append(
+                ManualDocument(
+                    manual_id=docs_id,
+                    product_name=product_name,
+                    source_path=path,
+                    text=cleaned_text,
+                    image_ids=image_ids,
+                    pic_count=len(PIC_RE.findall(cleaned_text)),
+                    parse_mode="jsonl",
+                )
+            )
+
+        if all_valid and documents:
+            return documents
+
+    # Fall back to single-document parsing
+    return [_load_manual_single(path, raw)]
+
+
+def load_manual(path: Path) -> ManualDocument:
+    """Load one manual file (legacy — prefer load_manuals for new code)."""
+    return load_manuals(path)[0]
+
+
+def _load_manual_single(path: Path, raw: str) -> ManualDocument:
+    """Parse a single manual document from raw text using structured parsers."""
     text, image_ids, parse_mode = _parse_structured_manual(raw)
     cleaned_text = normalize_manual_text(text)
     return ManualDocument(
@@ -200,6 +247,29 @@ def load_manual(path: Path) -> ManualDocument:
         pic_count=len(PIC_RE.findall(cleaned_text)),
         parse_mode=parse_mode,
     )
+
+
+def _product_name_from_heading(text: str) -> str | None:
+    """Extract a short product name from the first heading in the text."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            name = stripped.lstrip("# ").strip()
+            words = name.split()[:4]
+            result = " ".join(words)
+            # Skip if the heading is too generic (product-neutral)
+            lower = result.lower()
+            if any(
+                kw in lower
+                for kw in (
+                    "introduction", "item check", "table of contents",
+                    "content", "user manual", "owner", "safety", "product",
+                    "getting started", "welcome",
+                )
+            ):
+                continue
+            return result if result else None
+    return None
 
 
 def _parse_structured_manual(raw: str) -> tuple[str, list[str], str]:
@@ -348,12 +418,7 @@ def attach_image_markers(text: str, image_ids: list[str]) -> ImageAttachmentResu
 
 
 def _choose_image_attachment_strategy(*, pic_count: int, image_count: int) -> str:
-    if pic_count <= 0 or image_count <= 0:
-        return "sequential"
-    coverage_ratio = image_count / pic_count
-    gap = pic_count - image_count
-    if pic_count >= 120 and gap >= 80 and coverage_ratio <= 0.4:
-        return "suppress_misaligned"
+    """Always use sequential attachment: available images map to first N PICs, rest become PIC_MISSING."""
     return "sequential"
 
 

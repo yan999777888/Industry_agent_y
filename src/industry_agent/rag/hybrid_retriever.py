@@ -62,6 +62,8 @@ class HybridRetriever:
         sparse_results = self.sqlite_retriever.search(query, limit=fetch_limit)
         vector_results = self.vector_retriever.search(query, limit=fetch_limit)
         if not vector_results:
+            if self.cross_encoder is not None:
+                return self.cross_encoder.rerank(query, sparse_results)[:limit]
             return sparse_results[:limit]
         fused = reciprocal_rank_fusion([sparse_results, vector_results], k=self.rrf_k)
         if self.cross_encoder is not None:

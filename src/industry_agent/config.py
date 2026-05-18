@@ -37,6 +37,18 @@ class Settings:
     embedding_model: str = _env("EMBEDDING_MODEL", "INDUSTRY_AGENT_EMBEDDING_MODEL", default="BAAI/bge-m3")
     vector_index_path: Path = PROJECT_ROOT / "data" / "processed" / "kb" / "vector.index"
 
+    # --- DashScope (阿里百炼) settings ---
+    dashscope_enabled: bool = os.getenv("INDUSTRY_AGENT_DASHSCOPE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+    dashscope_api_key: str = os.getenv("DASHSCOPE_API_KEY", "")
+    dashscope_base_url: str = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    dashscope_rerank_url: str = os.getenv("DASHSCOPE_RERANK_URL", "https://dashscope.aliyuncs.com/compatible-api/v1")
+    dashscope_embedding_model: str = os.getenv("DASHSCOPE_EMBEDDING_MODEL", "text-embedding-v4")
+    dashscope_embedding_dimensions: int = int(os.getenv("DASHSCOPE_EMBEDDING_DIMENSIONS", "1024"))
+    dashscope_rerank_model: str = os.getenv("DASHSCOPE_RERANK_MODEL", "qwen3-rerank")
+    dashscope_rerank_top_k: int = int(os.getenv("DASHSCOPE_RERANK_TOP_K", "20"))
+    dashscope_llm_model: str = os.getenv("DASHSCOPE_LLM_MODEL", "qwen3-235b-a22b")
+    dashscope_vision_model: str = os.getenv("DASHSCOPE_VISION_MODEL", "qwen3-vl-plus")
+
     @property
     def image_dir(self) -> Path:
         return self.knowledge_dir / "插图"

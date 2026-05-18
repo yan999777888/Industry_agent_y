@@ -36,6 +36,14 @@ def format_manual_answer(answer: str, *, image_ids: list[str], compact: bool = F
 
     # Detect whether the LLM naturally used section headers
     has_sections = bool(re.search(r"(结论|操作/说明|注意事项|操作说明|操作|说明|注意)\s*[:：]\s*", text))
+    # Also detect English section headers
+    if not has_sections:
+        has_sections = bool(re.search(
+            r"(Conclusion|Steps?|Instructions?|Operation|Safety|Caution|Warning"
+            r"|Note|Procedure|Setup|Installation|Maintenance|Cleaning|Tips"
+            r"|Overview|Features|Specifications|Troubleshooting)\s*[:：]",
+            text, re.IGNORECASE,
+        ))
 
     if has_sections:
         # Preserve the structure the LLM chose

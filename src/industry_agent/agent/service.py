@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import os
 from dataclasses import dataclass, field
@@ -36,6 +37,13 @@ try:
     import httpx
 except ImportError:  # pragma: no cover - optional for test environments
     httpx = None  # type: ignore[assignment]
+
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -334,6 +342,8 @@ def _build_conversational_answer(query: str, evidence_chunks: list, image_ids: l
     pick best chunk → find sentences that contain question keywords → return.
     """
     if not evidence_chunks:
+        if _is_english_text(query):
+            return "Sorry, no detailed information is available at this time."
         return "根据现有资料，暂时无法提供更详细的信息。"
 
     query_terms = _extract_answer_relevance_terms(query)
@@ -351,7 +361,8 @@ def _build_conversational_answer(query: str, evidence_chunks: list, image_ids: l
         title_overlap = sum(1 for t in query_terms if t in title.lower())
 
         # Find question-relevant sentences
-        raw_sentences = re.split(r"[。！？]", text)
+        sent_split = r"[。！？.!?]+" if _is_english_text(query) else r"[。！？]"
+        raw_sentences = re.split(sent_split, text)
         relevant: list[tuple[int, str]] = []
         for s in raw_sentences:
             s = s.strip()
@@ -386,7 +397,7 @@ def _build_conversational_answer(query: str, evidence_chunks: list, image_ids: l
         selected = relevant_sents[:4]
     else:
         # Fallback: filter substantive sentences
-        raw_sentences = re.split(r"[。！？]", text)
+        raw_sentences = re.split(r"[。！？.!?]+", text) if _is_english_text(query) else re.split(r"[。！？]", text)
         selected = []
         for s in raw_sentences:
             s = s.strip()
@@ -404,22 +415,26 @@ def _build_conversational_answer(query: str, evidence_chunks: list, image_ids: l
 
     if not selected:
         title = _clean_manual_markers(str(best_chunk.get("title", "")))
+        if _is_english_text(query):
+            return f"{title}."
         return f"{title}。"
 
     # Clean selected sentences
+    is_english = _is_english_text(query)
+    sent_join = ". " if is_english else "。"
     cleaned = []
     for s in selected:
-        s = re.sub(r"^[一-鿿]{2,6}[（）\(\)\d]*\s+", "", s)
+        if not is_english:
+            s = re.sub(r"^[一-鿿]{2,6}[（）\(\)\d]*\s+", "", s)
         s = re.sub(r"^\d+[\.\、]\s*", "", s)
-        # Strip leading "2 " type numbering
         s = re.sub(r"^\d+\s+", "", s)
         if s and len(s) >= 8:
             cleaned.append(s)
 
-    answer_body = "。".join(cleaned[:4])
-    if not answer_body.endswith(("。", "！", "？")):
-        answer_body += "。"
-
+    answer_body = sent_join.join(cleaned[:4])
+    sent_endings = (".", "!", "?") if is_english else ("。", "！", "？")
+    if not answer_body.endswith(sent_endings):
+        answer_body += sent_join.strip()
     return answer_body
 
 
@@ -624,8 +639,9 @@ def _localize_answer(answer: str, query: str) -> str:
     # Replace Chinese periods with English periods for English answers
     answer = answer.replace("。", ".")
 
-    # Ensure single trailing period
-    answer = answer.rstrip(".") + "."
+    # Only add trailing period if answer doesn't already end with sentence-ending punctuation
+    if not answer.rstrip().endswith((".", "!", "?")):
+        answer = answer.rstrip(".") + "."
 
     return answer
 
@@ -737,8 +753,13 @@ def _filter_evidence(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return []
 
     top = chunks[0]
+    # For English/semantic queries, cross_encoder_score (0-1 range) is a
+    # better relevance signal than keyword _score which can be very low.
+    # Use whichever is stronger.
     top_score = float(top.get("_score", 0.0))
-    if top_score < MIN_TOP_SCORE:
+    top_ce_score = float(top.get("_cross_encoder_score", 0.0)) * 50.0
+    effective_top_score = max(top_score, top_ce_score)
+    if effective_top_score < MIN_TOP_SCORE:
         return []
 
     # Keep top chunks regardless of product, prefer same-product but allow cross-product
@@ -747,7 +768,9 @@ def _filter_evidence(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     cross_product_count = 0
     for chunk in chunks:
         score = float(chunk.get("_score", 0.0))
-        if score < MIN_KEEP_SCORE:
+        ce_score = float(chunk.get("_cross_encoder_score", 0.0)) * 50.0
+        effective_score = max(score, ce_score)
+        if effective_score < MIN_KEEP_SCORE:
             continue
         same_product = not top_product or chunk.get("product_name") == top_product
         if not same_product:
@@ -1109,6 +1132,9 @@ def _select_grounded_manual_image_ids(
     evidence_chunks: list[dict[str, Any]],
     image_terms: list[str] | None = None,
     image_features: dict[str, list[str]] | None = None,
+    image_index: dict[str, dict[str, str | bool]] | None = None,
+    answer_embedding: list[float] | None = None,
+    image_desc_embeddings: dict[str, Any] | None = None,
 ) -> list[str]:
     if not evidence_chunks:
         return []
@@ -1133,6 +1159,10 @@ def _select_grounded_manual_image_ids(
 
     # ---- 2. Score each chunk by how much of it appears in the ANSWER ----
     ranked: list[tuple[float, str, dict[str, Any]]] = []
+
+    # Extract meaningful answer keywords (Chinese nouns, product/component terms)
+    answer_keywords = _extract_keywords_for_image_grounding(answer)
+
     for chunk in evidence_chunks[:8]:
         image_ids = _parse_json_list(chunk.get("image_ids"))
         if not image_ids:
@@ -1160,6 +1190,10 @@ def _select_grounded_manual_image_ids(
             or (len(title) >= 6 and _text_overlap_count(answer, [title]) > 0)
         )
 
+        title_matches_answer = bool(answer_keywords) and (
+            _text_overlap_count(title, answer_keywords) >= 1
+        )
+
         # Phrase-level match: do answer-extracted phrases appear in this chunk?
         phrase_overlap = _text_overlap_count(combined, answer_phrases) if answer_phrases else 0
 
@@ -1170,25 +1204,39 @@ def _select_grounded_manual_image_ids(
         image_term_overlap = _text_overlap_count(combined, image_terms)
         feature_overlap = _text_overlap_count(combined, feature_terms)
 
-        # ---- 3. Compute relevance score (answer-weighted) ----
-        relevance = sentence_hits * 3.0          # strongest: answer sentences match chunk
-        relevance += (3.0 if title_in_answer else 0.0)  # strong: answer mentions the chunk topic
-        relevance += phrase_overlap * 2.0         # medium-strong: shared key phrases
-        relevance += answer_term_overlap * 1.0    # medium: keyword-level overlap
-        relevance += image_term_overlap * 0.8     # weak: query/image terms
-        relevance += feature_overlap * 0.8        # weak: visual feature terms
-        relevance += float(chunk.get("_evidence_score", 0.0)) * 0.3  # base score, deflated
-
-        # Require minimum answer-chunk relevance before considering images
-        min_relevance = 2.0 if (title_in_answer or sentence_hits > 0) else 4.0
-        if relevance < min_relevance:
-            continue
+        # ---- 3. Compute relevance score (evidence-weighted with answer grounding bonus) ----
+        evidence_base = float(chunk.get("_evidence_score", 0.0)) * 0.3
+        relevance = evidence_base
+        relevance += sentence_hits * 2.0
+        relevance += (3.0 if title_in_answer else 0.0)
+        relevance += (2.0 if title_matches_answer else 0.0)
+        relevance += phrase_overlap * 1.0
+        relevance += answer_term_overlap * 0.5
 
         for image_id in image_ids:
             normalized = str(image_id).strip()
             if not normalized:
                 continue
-            ranked.append((relevance, normalized, chunk))
+
+            # ---- 3a. Semantic similarity via image description embeddings ----
+            semantic_score = 0.0
+            if answer_embedding is not None and image_desc_embeddings is not None:
+                img_emb = image_desc_embeddings.get(normalized)
+                if img_emb is not None:
+                    # text-embedding-v4 produces normalized vectors; dot ≈ cosine sim
+                    dot = sum(a * b for a, b in zip(answer_embedding, img_emb.tolist() if hasattr(img_emb, 'tolist') else img_emb))  # type: ignore[union-attr]
+                    semantic_score = max(0.0, float(dot))
+
+            # ---- 3b. Combine: semantic similarity as primary, text overlap as secondary ----
+            if answer_embedding is not None and image_desc_embeddings is not None:
+                combined_relevance = relevance * 0.3 + semantic_score * 5.0
+            else:
+                combined_relevance = relevance
+
+            if combined_relevance < 2.0:
+                continue
+
+            ranked.append((combined_relevance, normalized, chunk))
 
     if not ranked:
         return []
@@ -1234,6 +1282,33 @@ def _extract_keywords_from_text(text: str) -> list[str]:
     cjk_terms = re.findall(r"[\u4e00-\u9fff]{2,8}", str(text))
     ascii_terms = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", str(text))
     return _unique([*cjk_terms[:10], *ascii_terms[:10]])
+
+
+def _extract_keywords_for_image_grounding(answer: str) -> list[str]:
+    """Extract meaningful topic keywords from answer for image-grounding.
+
+    Extracts both Chinese nouns and English technical terms, filters out
+    generic stop words that would cause false matches.
+    """
+    _CJK_STOP = {
+        "\u53ef\u4ee5", "\u9700\u8981", "\u4f7f\u7528", "\u8fdb\u884c", "\u4e00\u4e2a", "\u8fd9\u4e2a", "\u90a3\u4e2a", "\u4e00\u4e9b",
+        "\u907f\u514d", "\u786e\u4fdd", "\u5efa\u8bae", "\u5982\u679c", "\u7136\u540e", "\u6216\u8005", "\u4ee5\u53ca", "\u7528\u4e8e",
+        "\u901a\u8fc7", "\u4ee5\u4e0b", "\u6b65\u9aa4", "\u65b9\u6cd5", "\u65b9\u5f0f", "\u60c5\u51b5", "\u6ce8\u610f", "\u4e0d\u8981",
+        "\u53ef\u9009", "\u5176\u4ed6", "\u4e0d\u540c", "\u5408\u9002", "\u7ee7\u7eed", "\u4ee5\u4e0a",
+    }
+    _EN_STOP = {
+        "the", "this", "that", "with", "from", "which", "will", "used", "using",
+        "should", "would", "could", "must", "when", "after", "before", "been",
+        "also", "than", "into", "each", "both", "just", "very", "more", "can",
+        "not", "are", "all", "has", "have", "its", "may", "per",
+    }
+    cjk_terms = re.findall(r"[\u4e00-\u9fff]{2,6}", str(answer))
+    filtered = [t for t in cjk_terms if t not in _CJK_STOP and len(t) >= 2]
+    # English: 3+ letter words, not stop words
+    en_terms = re.findall(r"\b([A-Za-z]{3,})\b", str(answer))
+    en_filtered = [t.lower() for t in en_terms if t.lower() not in _EN_STOP]
+    combined = filtered + en_filtered
+    return _unique(combined)[:12]
 
 
 def _split_evidence_sentences(text: str) -> list[str]:
@@ -1424,7 +1499,12 @@ def _rank_evidence_chunks(
     ranked: list[dict[str, Any]] = []
     for chunk in chunks:
         row = dict(chunk)
-        base_score = max(float(row.get("_score", 0.0)), float(row.get("_fusion_score", 0.0)))
+        ce_score = float(row.get("_cross_encoder_score", 0.0))
+        base_score = max(
+            ce_score * 50.0,  # reranker score (0-1) scaled to keyword-score range
+            float(row.get("_score", 0.0)),
+            float(row.get("_fusion_score", 0.0)),
+        )
         title = str(row.get("title", ""))
         text = str(row.get("text", ""))
         image_ids = _parse_json_list(row.get("image_ids"))
@@ -1662,8 +1742,11 @@ def _merge_confidence(confidences: list[float]) -> float:
 
 def _assemble_context(
     chunks: list[dict[str, Any]],
+    *,
+    query: str = "",
 ) -> tuple[str, list[str], list[str], list[dict[str, str]]]:
     """Build context string, collect image IDs, sources, and references."""
+    is_english = _is_english_text(query) if query else False
     parts: list[str] = []
     all_image_ids: list[str] = []
     seen_images: set[str] = set()
@@ -1693,8 +1776,15 @@ def _assemble_context(
             sources.append(product)
 
         # Build context part
-        score = chunk.get("_score", "")
-        header = f"[参考{idx}] 产品：{product} | 章节：{title} | 检索分：{score}"
+        if is_english:
+            # Use the best available score (cross-encoder for semantic, keyword for lexical)
+            kw_score = float(chunk.get("_score", 0))
+            ce_score = float(chunk.get("_cross_encoder_score", 0)) * 50.0
+            display_score = max(kw_score, ce_score)
+            header = f"[Ref{idx}] Product: {product} | Section: {title} | Score: {display_score:.1f}"
+        else:
+            score = chunk.get("_score", "")
+            header = f"[参考{idx}] 产品：{product} | 章节：{title} | 检索分：{score}"
         body = text.strip()
         # Strip "参阅/查阅/参考...说明书" references from context to prevent LLM echoing them
         body = re.sub(r"详情请参阅[^。\n]*[。]?", "", body)
@@ -1703,9 +1793,16 @@ def _assemble_context(
         body = re.sub(r"请参考[^。\n]*[。]?", "", body)
         body = re.sub(r"建议参阅[^。\n]*[。]?", "", body)
         body = re.sub(r"参考\d+产品[^。\n]*[。]?", "", body)
+        # English "refer to manual" patterns
+        body = re.sub(r"(?:please\s+)?(?:refer to|consult|see)\s+(?:the\s+)?(?:user\s+)?manual[^.]*[.]?", "", body, flags=re.IGNORECASE)
+        body = re.sub(r"(?:please\s+)?see\s+(?:the\s+)?(?:relevant\s+)?section[^.]*[.]?", "", body, flags=re.IGNORECASE)
+        body = re.sub(r"for more\s+(?:information|details).*?(?:refer to|see|consult)[^.]*[.]?", "", body, flags=re.IGNORECASE)
         body = re.sub(r"\s{2,}", " ", body).strip()
         if img_ids:
-            body += f"\n（相关配图：{', '.join(img_ids)}）"
+            if is_english:
+                body += f"\n(Related images: {', '.join(img_ids)})"
+            else:
+                body += f"\n（相关配图：{', '.join(img_ids)}）"
         part = f"{header}\n{body}"
 
         if total_chars + len(part) > MAX_CONTEXT_CHARS:
@@ -1764,6 +1861,7 @@ def _load_image_index() -> dict[str, dict[str, str | bool]]:
                 "file_name": item.get("file_name") or "",
                 "path": item.get("path") or "",
                 "exists": bool(item.get("exists", False)),
+                "description": item.get("description") or "",
             }
     return records
 
@@ -1922,6 +2020,33 @@ class AgentService:
         )
         self.image_index = _load_image_index()
 
+        # Pre-computed image description embeddings for semantic grounding
+        self.image_desc_embeddings: dict[str, np.ndarray] | None = None
+        self.dashscope_embedder: Any | None = None
+        if settings.dashscope_enabled and settings.dashscope_api_key and np is not None:
+            try:
+                from industry_agent.rag.dashscope import DashScopeEmbeddingModel
+                desc_emb_path = settings.processed_dir / "image_desc_embeddings.npy"
+                desc_ids_path = settings.processed_dir / "image_desc_ids.json"
+                if desc_emb_path.exists() and desc_ids_path.exists():
+                    emb_array = np.load(str(desc_emb_path))
+                    with open(desc_ids_path, "r", encoding="utf-8") as f:
+                        desc_ids = json.load(f)
+                    self.image_desc_embeddings = {
+                        img_id: emb_array[i] for i, img_id in enumerate(desc_ids)
+                    }
+                    logger.info(
+                        "Loaded %d image description embeddings (%dd)",
+                        len(self.image_desc_embeddings), emb_array.shape[1],
+                    )
+                self.dashscope_embedder = DashScopeEmbeddingModel(
+                    api_key=settings.dashscope_api_key,
+                    model=settings.dashscope_embedding_model,
+                    dimensions=settings.dashscope_embedding_dimensions,
+                )
+            except Exception as exc:
+                logger.warning("Failed to init DashScope image embedding: %s", exc)
+
     def _build_subquestion_query(
         self,
         sub_question: SubQuestion,
@@ -2045,7 +2170,7 @@ class AgentService:
             }
 
         # 2. Assemble context / collect metadata
-        context, image_ids, sources, references = _assemble_context(evidence_chunks)
+        context, image_ids, sources, references = _assemble_context(evidence_chunks, query=query)
         confidence = _confidence_from_chunks(evidence_chunks)
 
         # 3. Build messages
@@ -2113,12 +2238,23 @@ class AgentService:
         answer = _final_answer_cleanup(answer)
         answer = _localize_answer(answer, query)
 
+        # Embed answer for semantic image selection
+        answer_embedding: list[float] | None = None
+        if self.dashscope_embedder is not None and self.image_desc_embeddings is not None:
+            try:
+                answer_embedding = self.dashscope_embedder.embed_query(answer[:1024])
+            except Exception as exc:
+                logger.warning("Failed to embed answer for image grounding: %s", exc)
+
         grounded_image_ids = _select_grounded_manual_image_ids(
             query=query,
             answer=answer,
             evidence_chunks=evidence_chunks,
             image_terms=image_terms,
             image_features=image_features,
+            image_index=self.image_index,
+            answer_embedding=answer_embedding,
+            image_desc_embeddings=self.image_desc_embeddings,
         )
         images = _image_details(grounded_image_ids, self.image_index)
 
@@ -2641,6 +2777,10 @@ class AgentService:
     # ------------------------------------------------------------------
 
     def _call_llm(self, messages: list[dict[str, str]]) -> str:
+        lc = self.llm_client
+        api_prefix = (lc.api_key or "")[:8] + "..." if lc.api_key else "NONE"
+        logger.warning("LLM call: backend=%s base_url=%s model=%s api_key=%s",
+                       lc.backend, lc.base_url, lc.model, api_prefix)
         try:
             content = self.llm_client.chat(
                 messages,
@@ -2650,4 +2790,5 @@ class AgentService:
             )
             return content.strip() if content.strip() else "模型未返回有效回答。"
         except Exception as exc:
+            logger.warning("LLM call FAILED: %s", exc)
             return f"LLM 调用失败: {exc}"

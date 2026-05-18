@@ -171,8 +171,78 @@ def run_startup_checks(
                 )
             )
 
+    # ── DashScope checks ──────────────────────────────────────────────
+    if settings.dashscope_enabled:
+        _check_dashscope(components)
+
     status = "ok" if all(component.ok or not component.required for component in components) else "degraded"
     return StartupHealthReport(status=status, components=components)
+
+
+def _check_dashscope(components: list[ComponentStatus]) -> None:
+    """Add DashScope-related health checks."""
+    components.append(
+        ComponentStatus(
+            name="dashscope_api_key",
+            ok=bool(settings.dashscope_api_key),
+            detail="configured" if settings.dashscope_api_key else "DASHSCOPE_API_KEY not set",
+            required=True,
+        )
+    )
+    components.append(
+        ComponentStatus(
+            name="dashscope_llm",
+            ok=bool(settings.dashscope_llm_model),
+            detail=f"{settings.dashscope_llm_model} @ {settings.dashscope_base_url}",
+            required=True,
+        )
+    )
+    components.append(
+        ComponentStatus(
+            name="dashscope_embedding",
+            ok=bool(settings.dashscope_embedding_model),
+            detail=settings.dashscope_embedding_model,
+            required=True,
+        )
+    )
+    components.append(
+        ComponentStatus(
+            name="dashscope_rerank",
+            ok=bool(settings.dashscope_rerank_model),
+            detail=settings.dashscope_rerank_model,
+            required=False,
+        )
+    )
+    # Vector count check
+    db_path = settings.processed_dir / "index.sqlite"
+    if db_path.exists():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path))
+            count = conn.execute("SELECT COUNT(*) FROM chunk_vectors").fetchone()[0]
+            conn.close()
+            vec_ok = count > 0
+        except Exception:
+            count = 0
+            vec_ok = False
+        components.append(
+            ComponentStatus(
+                name="chunk_vectors",
+                ok=vec_ok,
+                detail=f"{count} vectors" if vec_ok else "empty or missing",
+                required=True,
+            )
+        )
+    # BM25 check
+    bm25_path = settings.processed_dir / "bm25_index.pkl"
+    components.append(
+        ComponentStatus(
+            name="bm25_index",
+            ok=bm25_path.exists(),
+            detail=str(bm25_path) if bm25_path.exists() else "not built",
+            required=False,
+        )
+    )
 
 
 def assert_startup_ready(report: StartupHealthReport) -> None:

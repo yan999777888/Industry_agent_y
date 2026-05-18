@@ -12,9 +12,10 @@ venv/
 bge-small-zh-v1.5/
 
 # Local processed artifacts
-data/processed/index.sqlite
-data/processed/eval_chat_results.jsonl
-data/processed/quality_observation_report.json
-submission/submission_generated.csv
-submission/submission_generated_debug.jsonl
+data/processed/
+submission/
+debug_*.json
+test_response*.json
+analysis_output*.txt
+_tmp_*.py
 ./TODO.md
