@@ -54,7 +54,7 @@ FINAL_CONTEXT_CHUNKS = 8    # chunks passed into the LLM
 MAX_CONTEXT_CHARS = 7000    # truncate context to fit model window
 MAX_HISTORY_TURNS = 3       # keep last N turns per session
 MIN_TOP_SCORE = 0.5         # below this, do not ask LLM to hallucinate
-MIN_KEEP_SCORE = 0.4        # chunks below this score are discarded
+MIN_KEEP_SCORE = 0.3        # chunks below this score are discarded
 MULTIMODAL_RETRIEVAL_LIMIT = 6
 MAX_ANSWER_LENGTH = 800     # maximum Chinese answer length in characters
 MAX_ENGLISH_ANSWER_LENGTH = 1500  # English can be longer, detailed answers score higher
@@ -98,6 +98,7 @@ _NON_WORD_RE = re.compile(r"[\W_]+", flags=re.UNICODE)
 _STRONG_MANUAL_REFUSAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"根据现有资料无法准确回答此问题"),
     re.compile(r"根据现有资料无法回答此问题"),
+    re.compile(r"资料中未包含"),
     re.compile(r"Based on the available references,?\s+I cannot provide", flags=re.IGNORECASE),
     re.compile(r"The provided reference materials do not contain", flags=re.IGNORECASE),
     re.compile(r"The references only mention", flags=re.IGNORECASE),
@@ -676,13 +677,8 @@ def _final_answer_cleanup(answer: str) -> str:
     answer = _fix_encoding_artifacts(answer)
 
     cleaned = answer.strip()
-    # Remove bullet markers (•, ・, -)
+    # Remove bullet markers (•, ・)
     cleaned = cleaned.replace("•", "").replace("・", "").strip()
-    # Remove "#" headers (e.g., "# 维修" → "维修")
-    cleaned = re.sub(r"^#\s*", "", cleaned)
-    cleaned = re.sub(r"\n#\s*", "\n", cleaned)
-    # Remove Roman numeral section markers (IX., VIII., IV., etc.)
-    cleaned = re.sub(r"\b[IVX]+\.\s*", "", cleaned)
     # Remove "第X页" references (handles "第 23、24 页", "第5页", "见第5页")
     cleaned = re.sub(r"第\s*\d+[\s、，,，]*\d*\s*页", "", cleaned)
     cleaned = re.sub(r"见第\s*\d+.*?页.*?部分", "", cleaned)
@@ -698,21 +694,8 @@ def _final_answer_cleanup(answer: str) -> str:
     cleaned = re.sub(r"\(相关配图：[^)]*\)\s*$", "", cleaned)
     # Remove "■" bullets
     cleaned = cleaned.replace("■", "").strip()
-    # Remove leading step numbers after punctuation (e.g., "。2 " → "。")
-    cleaned = re.sub(r"[。]\s*\d+\s+", "。", cleaned)
-    # Remove step numbers between Chinese periods (e.g., "。3。" → "。")
-    cleaned = re.sub(r"。\s*\d+。", "。", cleaned)
-    # Remove step numbers with English period before Chinese period (e.g., "。 3.。" → "。")
-    cleaned = re.sub(r"。\s*\d+\.。", "。", cleaned)
-    # Remove leading numbers at start of answer (e.g., "2 打开" → "打开")
-    cleaned = re.sub(r"^\d+\s+", "", cleaned)
-    # Remove "结论：" and "目标：" headings
-    cleaned = re.sub(r"结论[：:]\s*", "", cleaned)
-    cleaned = re.sub(r"目标[：:]\s*", "", cleaned)
     # Remove "Note:" label mid-answer
     cleaned = re.sub(r"\s+Note:\s*", " ", cleaned)
-    # Remove step/section headings like "操作说明 4." or "步骤说明 2."
-    cleaned = re.sub(r"(?:操作|步骤)说明\s*\d+[\.\s]*", "", cleaned)
     # Clean up extra spaces
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     # Remove trailing punctuation artifacts
@@ -747,40 +730,39 @@ def _match_smalltalk_reply(question: str) -> tuple[str, str] | None:
     return None
 
 
-def _filter_evidence(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep high-confidence evidence with product-diversity awareness."""
+def _filter_evidence(
+    chunks: list[dict[str, Any]],
+    *,
+    query: str = "",
+) -> list[dict[str, Any]]:
+    """Keep top chunks by reranker score only.
+
+    The hybrid retriever already runs RRF fusion + reranker.  This function
+    simply sorts by the reranker score (``_cross_encoder_score``) and keeps
+    the top ``FINAL_CONTEXT_CHUNKS``.  No keyword heuristics, no product
+    matching — the reranker is the sole relevance signal.
+    """
     if not chunks:
         return []
 
-    top = chunks[0]
-    # For English/semantic queries, cross_encoder_score (0-1 range) is a
-    # better relevance signal than keyword _score which can be very low.
-    # Use whichever is stronger.
-    top_score = float(top.get("_score", 0.0))
-    top_ce_score = float(top.get("_cross_encoder_score", 0.0)) * 50.0
-    effective_top_score = max(top_score, top_ce_score)
-    if effective_top_score < MIN_TOP_SCORE:
-        return []
+    # Sort by reranker score descending; chunks without reranker score sink
+    scored = [
+        c for c in chunks
+        if float(c.get("_cross_encoder_score", 0.0)) > 0
+    ]
+    scored.sort(
+        key=lambda c: float(c.get("_cross_encoder_score", 0.0)),
+        reverse=True,
+    )
+    if not scored:
+        # No reranker scores at all — fall back to keyword order, keep top
+        return chunks[: FINAL_CONTEXT_CHUNKS]
 
-    # Keep top chunks regardless of product, prefer same-product but allow cross-product
-    top_product = top.get("product_name", "")
-    filtered: list[dict[str, Any]] = []
-    cross_product_count = 0
-    for chunk in chunks:
-        score = float(chunk.get("_score", 0.0))
-        ce_score = float(chunk.get("_cross_encoder_score", 0.0)) * 50.0
-        effective_score = max(score, ce_score)
-        if effective_score < MIN_KEEP_SCORE:
-            continue
-        same_product = not top_product or chunk.get("product_name") == top_product
-        if not same_product:
-            if cross_product_count >= 5:
-                continue
-            cross_product_count += 1
-        filtered.append(chunk)
-        if len(filtered) >= FINAL_CONTEXT_CHUNKS:
-            break
-    return filtered
+    top_ce = float(scored[0].get("_cross_encoder_score", 0.0))
+    if top_ce < 1e-6:
+        return chunks[: FINAL_CONTEXT_CHUNKS]
+
+    return scored[: FINAL_CONTEXT_CHUNKS]
 
 
 def _text_overlap_count(text: str, terms: list[str]) -> int:
@@ -1125,133 +1107,40 @@ def _extract_answer_key_phrases(answer: str) -> list[str]:
     return [p for p in dict.fromkeys(phrases) if p not in hedge_words]
 
 
+# Generic Chinese action/structure words to exclude from image-description topic matching
+_STOP_ACTION_WORDS: frozenset[str] = frozenset({
+    "安装", "拆卸", "操作", "使用", "检查", "打开", "关闭", "按下", "确认",
+    "调整", "清洁", "更换", "插入", "取出", "提起", "转动", "旋转", "按压",
+    "握住", "放置", "连接", "断开", "设置", "选择", "输入", "输出",
+    "步骤", "方法", "方式", "注意", "不要", "可以", "需要", "进行",
+    "确保", "避免", "如果", "然后", "或者", "以及", "用于", "通过", "以上",
+    "一个", "这个", "那个", "一些", "可选", "其他", "不同", "合适", "继续",
+    "问题", "情况", "原因", "故障", "警告", "规格", "说明", "注意事项",
+})
+
+
 def _select_grounded_manual_image_ids(
     *,
-    query: str,
-    answer: str,
     evidence_chunks: list[dict[str, Any]],
-    image_terms: list[str] | None = None,
-    image_features: dict[str, list[str]] | None = None,
-    image_index: dict[str, dict[str, str | bool]] | None = None,
-    answer_embedding: list[float] | None = None,
-    image_desc_embeddings: dict[str, Any] | None = None,
+    **kwargs: Any,
 ) -> list[str]:
+    """Collect image_ids from the most relevant evidence chunks.
+
+    Images come from the top evidence chunks only — the evidence ranking
+    already determines relevance.  No additional term-based filtering,
+    which proved unreliable (false positives from generic terms like 表带).
+    """
     if not evidence_chunks:
         return []
-
-    # ---- 1. Extract what the answer actually talks about ----
-    answer_sentences = _extract_answer_sentences(answer)
-    answer_phrases = _extract_answer_key_phrases(answer)
-    answer_terms = _build_manual_answer_terms(query, answer)
-
-    if not answer_sentences and not answer_phrases:
-        return []
-
-    image_terms = [term for term in (image_terms or []) if len(str(term).strip()) >= 2]
-    image_features = image_features or {}
-    feature_terms = _unique(
-        [
-            *(image_features.get("component_terms", []) or []),
-            *(image_features.get("status_terms", []) or []),
-            *(image_features.get("issue_terms", []) or []),
-        ]
-    )
-
-    # ---- 2. Score each chunk by how much of it appears in the ANSWER ----
-    ranked: list[tuple[float, str, dict[str, Any]]] = []
-
-    # Extract meaningful answer keywords (Chinese nouns, product/component terms)
-    answer_keywords = _extract_keywords_for_image_grounding(answer)
-
-    for chunk in evidence_chunks[:8]:
-        image_ids = _parse_json_list(chunk.get("image_ids"))
-        if not image_ids:
-            continue
-
-        title = str(chunk.get("title", ""))
-        chunk_text = str(chunk.get("text", ""))
-        combined = f"{title}\n{chunk_text}"
-
-        # --- Primary signal: does the ANSWER discuss this chunk's content? ---
-        # Check sentence-level overlap: do any answer sentences match chunk text?
-        sentence_hits = 0
-        for sentence in answer_sentences:
-            if _text_overlap_count(chunk_text, [sentence]) > 0:
-                sentence_hits += 1
-            elif len(sentence) >= 12:
-                # Check if key substrings from the sentence match the chunk
-                subs = [sentence[i:i+4] for i in range(0, len(sentence)-3, 3)]
-                if _text_overlap_count(chunk_text, subs) >= 2:
-                    sentence_hits += 1
-
-        # Check if the chunk title (topic) appears in the answer
-        title_in_answer = len(title) >= 3 and (
-            title in answer
-            or (len(title) >= 6 and _text_overlap_count(answer, [title]) > 0)
-        )
-
-        title_matches_answer = bool(answer_keywords) and (
-            _text_overlap_count(title, answer_keywords) >= 1
-        )
-
-        # Phrase-level match: do answer-extracted phrases appear in this chunk?
-        phrase_overlap = _text_overlap_count(combined, answer_phrases) if answer_phrases else 0
-
-        # Term-level match (legacy from query analysis — secondary signal)
-        answer_term_overlap = _text_overlap_count(combined, answer_terms)
-
-        # Query/image term match (weak signal, kept for disambiguation)
-        image_term_overlap = _text_overlap_count(combined, image_terms)
-        feature_overlap = _text_overlap_count(combined, feature_terms)
-
-        # ---- 3. Compute relevance score (evidence-weighted with answer grounding bonus) ----
-        evidence_base = float(chunk.get("_evidence_score", 0.0)) * 0.3
-        relevance = evidence_base
-        relevance += sentence_hits * 2.0
-        relevance += (3.0 if title_in_answer else 0.0)
-        relevance += (2.0 if title_matches_answer else 0.0)
-        relevance += phrase_overlap * 1.0
-        relevance += answer_term_overlap * 0.5
-
-        for image_id in image_ids:
-            normalized = str(image_id).strip()
-            if not normalized:
-                continue
-
-            # ---- 3a. Semantic similarity via image description embeddings ----
-            semantic_score = 0.0
-            if answer_embedding is not None and image_desc_embeddings is not None:
-                img_emb = image_desc_embeddings.get(normalized)
-                if img_emb is not None:
-                    # text-embedding-v4 produces normalized vectors; dot ≈ cosine sim
-                    dot = sum(a * b for a, b in zip(answer_embedding, img_emb.tolist() if hasattr(img_emb, 'tolist') else img_emb))  # type: ignore[union-attr]
-                    semantic_score = max(0.0, float(dot))
-
-            # ---- 3b. Combine: semantic similarity as primary, text overlap as secondary ----
-            if answer_embedding is not None and image_desc_embeddings is not None:
-                combined_relevance = relevance * 0.3 + semantic_score * 5.0
-            else:
-                combined_relevance = relevance
-
-            if combined_relevance < 2.0:
-                continue
-
-            ranked.append((combined_relevance, normalized, chunk))
-
-    if not ranked:
-        return []
-
-    # ---- 4. Select top images, deduplicated ----
-    ranked.sort(key=lambda item: item[0], reverse=True)
     selected: list[str] = []
     seen: set[str] = set()
-    for score, img_id, chunk in ranked:
-        if img_id in seen:
-            continue
-        seen.add(img_id)
-        selected.append(img_id)
-        if len(selected) >= 3:
-            break
+    # Top 4 chunks is sufficient — each chunk typically has 1-3 images.
+    for chunk in evidence_chunks[:4]:
+        for img_id in _parse_json_list(chunk.get("image_ids")):
+            normalized = str(img_id).strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                selected.append(normalized)
     return selected
 
 
@@ -1500,11 +1389,13 @@ def _rank_evidence_chunks(
     for chunk in chunks:
         row = dict(chunk)
         ce_score = float(row.get("_cross_encoder_score", 0.0))
-        base_score = max(
-            ce_score * 50.0,  # reranker score (0-1) scaled to keyword-score range
-            float(row.get("_score", 0.0)),
-            float(row.get("_fusion_score", 0.0)),
-        )
+        if ce_score > 0:
+            base_score = ce_score * 50.0  # reranker is authoritative
+        else:
+            base_score = max(
+                float(row.get("_score", 0.0)),
+                float(row.get("_fusion_score", 0.0)),
+            )
         title = str(row.get("title", ""))
         text = str(row.get("text", ""))
         image_ids = _parse_json_list(row.get("image_ids"))
@@ -1562,24 +1453,34 @@ def _rank_evidence_chunks(
                     elif word == "哪些" and any(kw in title_lower for kw in ["包括", "含有", "有"]):
                         title_relevance_boost += 1.0
 
-        evidence_score = base_score
-        evidence_score += min(query_overlap * 1.1, 5.0)
-        evidence_score += min(image_overlap * 1.8, 5.4)
-        evidence_score += min(title_component_overlap * 1.8 + text_component_overlap * 0.9, 4.8)
-        evidence_score += min(title_status_overlap * 1.2 + text_status_overlap * 1.5, 4.6)
-        evidence_score += min(issue_overlap * 1.6, 3.2)
-        evidence_score += min(title_relevance_boost, 3.0)  # Cap at 3.0
-        if image_ids and image_overlap > 0:
-            evidence_score += 1.0
-        if (title_component_overlap + text_component_overlap) > 0 and (title_status_overlap + text_status_overlap) > 0:
-            evidence_score += 2.0
-        if issue_overlap > 0 and image_ids:
-            evidence_score += 0.8
-        if int(row.get("_variant_hits", 0)) >= 2:
-            evidence_score += 1.5
-        if image_overlap == 0 and image_terms and query_overlap <= 1 and not image_ids:
-            evidence_score -= 1.2
-
+        if ce_score > 0:
+            # Reranker is primary, but add keyword safety net for cross-product chunks
+            # (e.g., camera battery manual for a drill query). Without this, the
+            # reranker under-scores product-mismatched but content-relevant chunks.
+            evidence_score = ce_score * 50.0
+            evidence_score += min(query_overlap * 0.6, 2.0)
+            if image_ids and image_overlap >= 1:
+                evidence_score += 0.3
+            if int(row.get("_variant_hits", 0)) >= 2:
+                evidence_score += 0.3
+        else:
+            evidence_score = base_score
+            evidence_score += min(query_overlap * 1.1, 5.0)
+            evidence_score += min(image_overlap * 1.8, 5.4)
+            evidence_score += min(title_component_overlap * 1.8 + text_component_overlap * 0.9, 4.8)
+            evidence_score += min(title_status_overlap * 1.2 + text_status_overlap * 1.5, 4.6)
+            evidence_score += min(issue_overlap * 1.6, 3.2)
+            evidence_score += min(title_relevance_boost, 3.0)
+            if image_ids and image_overlap > 0:
+                evidence_score += 1.0
+            if (title_component_overlap + text_component_overlap) > 0 and (title_status_overlap + text_status_overlap) > 0:
+                evidence_score += 2.0
+            if issue_overlap > 0 and image_ids:
+                evidence_score += 0.8
+            if int(row.get("_variant_hits", 0)) >= 2:
+                evidence_score += 1.5
+            if image_overlap == 0 and image_terms and query_overlap <= 1 and not image_ids:
+                evidence_score -= 1.2
         row["_evidence_score"] = round(evidence_score, 3)
         row["_query_overlap"] = query_overlap
         row["_image_overlap"] = image_overlap
@@ -1657,9 +1558,9 @@ def _filter_evidence_for_query(
             chunk_variant_hits = int(chunk.get("_variant_hits", 0))
             overlap_threshold = max(1, top_query_overlap)
             if query_has_explicit_product:
-                if chunk_query_overlap < 2:
+                if chunk_query_overlap < 1:  # OLD: 2 — relaxed for more cross-product recall
                     continue
-            if cross_product_kept >= 5:
+            if cross_product_kept >= 8:  # OLD: 5 — relaxed
                 continue
             strong_query_alignment = chunk_query_overlap >= overlap_threshold
             strong_image_alignment = chunk_image_overlap > 0 and chunk_image_overlap >= top_image_overlap
@@ -1704,13 +1605,19 @@ def _filter_evidence_for_query(
         rescue_terms.discard("")
         if rescue_terms:
             original_count = len(filtered)
-            existing_titles = {str(c.get("title", "")) for c in filtered}
+            existing_ids = {c.get("chunk_id", "") for c in filtered}
             for chunk in ranked:
-                title = str(chunk.get("title", ""))
-                if title in existing_titles:
+                chunk_id = str(chunk.get("chunk_id", ""))
+                if chunk_id in existing_ids:
                     continue
+                title = str(chunk.get("title", ""))
                 title_lower = _normalize(title)
-                if any(term in title_lower for term in rescue_terms):
+                # Check both title AND text for rescue — chunk titles like "操作 警告"
+                # don't reflect content but text may contain key query terms
+                text_lower = _normalize(str(chunk.get("text", "")))
+                title_match = any(term in title_lower for term in rescue_terms)
+                text_match = sum(1 for term in rescue_terms if term in text_lower) >= 2
+                if title_match or text_match:
                     # Only replace original (non-rescued) chunks
                     if len(filtered) >= FINAL_CONTEXT_CHUNKS and original_count > 0:
                         # Find and remove the last original chunk
@@ -1720,7 +1627,7 @@ def _filter_evidence_for_query(
                                 original_count -= 1
                                 break
                     filtered.append(chunk)
-                    existing_titles.add(title)
+                    existing_ids.add(chunk_id)
 
     return filtered
 
@@ -1982,6 +1889,11 @@ class AgentService:
         llm_backend: str | None = None,
     ) -> None:
         self.retriever = retriever or create_retriever()
+        ce = getattr(self.retriever, "cross_encoder", None)
+        if ce is not None:
+            print(f"[retriever] cross_encoder={type(ce).__name__} model={getattr(ce, 'model', 'N/A')}")
+        else:
+            print("[retriever] cross_encoder=None — reranking disabled")
         self.llm_backend = (llm_backend or settings.llm_backend).strip().lower()
         self.model = model or (settings.ollama_model if self.llm_backend == "ollama" else settings.llm_model)
         resolved_base_url = base_url or (
@@ -2142,7 +2054,7 @@ class AgentService:
 
         # Use retriever's original ranking (already optimized by _score).
         # Only apply light evidence filtering to remove clearly irrelevant chunks.
-        evidence_chunks = _filter_evidence(chunks)
+        evidence_chunks = _filter_evidence(chunks, query=query)
 
         if not evidence_chunks and chunks:
             evidence_chunks = chunks[:5]
@@ -2199,7 +2111,7 @@ class AgentService:
         answer = self._call_llm(messages)
         if answer and not answer.startswith("LLM 调用失败:"):
             answer = _strip_thinking(answer)
-            answer = _strip_llm_structured_format(answer)
+            # _strip_llm_structured_format removed: new prompts are concise/no-section style
 
         # Check if LLM answer is usable (not raw manual text, not explicit refusal)
         use_llm = False
@@ -2336,7 +2248,7 @@ class AgentService:
         )
         kb_context = self.customer_service_kb.build_context(kb_hits)
         prompt_context = (
-            f"【客服策略骨架】\n{policy_response.answer}\n\n【客服知识参考】\n{kb_context}"
+            f"【客服政策信息】\n{policy_response.answer}\n\n【客服知识参考】\n{kb_context}"
             if kb_context
             else policy_response.answer
         )

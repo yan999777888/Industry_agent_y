@@ -216,7 +216,9 @@ def _prepare_section_plans(manual: ManualDocument, marked_text: str) -> list[Sec
         if _is_toc_like(section_text):
             continue
         title = _derive_title(section_text)
-        clean_text = _strip_markers(section_text)
+        # Strip the first # heading line from body — title is already captured
+        body_text = _strip_heading_line(section_text)
+        clean_text = _strip_markers(body_text)
         semantic_type = _detect_semantic_type(
             title=title,
             text=clean_text,
@@ -226,7 +228,7 @@ def _prepare_section_plans(manual: ManualDocument, marked_text: str) -> list[Sec
         plans.append(
             SectionPlan(
                 section_index=section_index,
-                section_text=section_text,
+                section_text=body_text,
                 title=title,
                 semantic_type=semantic_type,
                 explicit_domain_label=explicit_domain_label,
@@ -463,6 +465,18 @@ def _fit_units_within_limit(units: list[str], *, max_chars: int) -> list[str]:
 
 def _hard_split(text: str, *, max_chars: int) -> list[str]:
     return [text[index : index + max_chars].strip() for index in range(0, len(text), max_chars)]
+
+
+def _strip_heading_line(section_text: str) -> str:
+    """Remove the first # heading prefix from section text (title already captured)."""
+    lines = section_text.splitlines()
+    if lines and lines[0].lstrip().startswith("#"):
+        # Only strip the # prefix from the first line, keep rest of the content
+        first = lines[0].lstrip()
+        first = re.sub(r"^#+\s*", "", first, count=1).strip()
+        lines[0] = first
+        return "\n".join(lines).strip()
+    return section_text.strip()
 
 
 def _derive_title(section_text: str) -> str:
@@ -881,15 +895,79 @@ def _detect_semantic_type(*, title: str, text: str, is_toc: bool) -> str:
         return "safety_warning"
     if _contains_any(normalized, TROUBLESHOOTING_HINTS):
         return "troubleshooting"
-    if _contains_any(normalized, PARTS_HINTS):
-        return "parts_list"
-    if _contains_any(normalized, SPECIFICATION_HINTS):
-        return "specification"
-    if has_procedure:
-        return "procedure"
-    if has_safety:
-        return "safety_warning"
-    return "general"
+
+    # Track which type hints matched — used for ambiguity detection below
+    _match_spec = _contains_any(normalized, SPECIFICATION_HINTS)
+    _match_parts = _contains_any(normalized, PARTS_HINTS)
+
+    if _match_spec:
+        result = "specification"
+    elif _match_parts:
+        result = "parts_list"
+    elif has_procedure:
+        result = "procedure"
+    elif has_safety:
+        result = "safety_warning"
+    else:
+        return "general"
+
+    # Keyword heuristics for parts_list are unreliable — generic words like
+    # "包装", "配件", "组成" frequently appear in non-parts-list contexts
+    # (e.g. waste disposal text, cleaning instructions).  Use LLM to verify
+    # EVERY chunk that keyword wants to label as parts_list.
+    if result == "parts_list":
+        llm_result = _llm_classify_chunk_type(title, text)
+        if llm_result:
+            return llm_result
+
+    return result
+
+
+def _llm_classify_chunk_type(title: str, text: str) -> str | None:
+    """Use LLM to resolve ambiguous chunk type classifications.
+
+    Called when keyword heuristics match multiple types (e.g. both
+    specification and parts_list hints).  Returns a type string on
+    success, or *None* to fall back to the keyword-based result.
+    """
+    try:
+        from industry_agent.llm.client import LLMClient
+
+        # Keep the call cheap — 300 chars is enough context
+        text_preview = text[:300].strip()
+        prompt = (
+            "You are classifying a product manual section. "
+            "Reply with EXACTLY ONE word chosen from:\n"
+            "- specification (technical specs, dimensions, parameters, weight, capacity)\n"
+            "- parts_list (package contents, included items, components, accessories)\n"
+            "- procedure (step-by-step instructions, how to install/remove/clean)\n"
+            "- troubleshooting (error diagnosis, problem solving, fault finding)\n"
+            "- safety_warning (warnings, cautions, danger, safety precautions)\n"
+            "- general (none of the above)\n\n"
+            f"Title: {title}\n"
+            f"Text: {text_preview}\n\n"
+            "Classification:"
+        )
+
+        client = LLMClient()
+        result = client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=20,
+        )
+
+        result = result.strip().lower()
+        valid = {
+            "specification", "parts_list", "procedure",
+            "troubleshooting", "safety_warning", "general",
+        }
+        for word in result.split():  # take first valid word
+            word = word.strip(",.!;:\"'")
+            if word in valid:
+                return word
+        return None
+    except Exception:
+        return None
 
 
 def _contains_any(text: str, hints: tuple[str, ...]) -> bool:

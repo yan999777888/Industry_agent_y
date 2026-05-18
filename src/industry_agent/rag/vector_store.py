@@ -200,6 +200,9 @@ def build_chunk_vector_index(
     """Create and populate the chunk vector table inside the SQLite index."""
 
     active = config or VectorSearchConfig()
+    if not active.enabled:
+        logger.info("Vector index build skipped (disabled by config / env var)")
+        return {"enabled": False, "status": "disabled", "chunk_count": 0}
     model = _create_embedding_model(active)
     dimensions = getattr(model, "dimensions", active.dimensions)
     conn.executescript(

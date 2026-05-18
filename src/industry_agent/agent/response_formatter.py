@@ -55,7 +55,42 @@ def format_manual_answer(answer: str, *, image_ids: list[str], compact: bool = F
 
 def format_customer_service_answer(answer: str) -> str:
     text = _strip_markdown(answer).replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"(您好|你好|Hello)[，,!！]?\s*", "", text).strip()
+
+    # Safety net: strip sentences that mention "手册" / "说明书" / "资料" as disclaimers
+    # These should never appear in customer service answers
+    text = re.sub(
+        r"(手册|说明书|参考资料|资料)(中|上|里)(没有|未|不).*?[。；\n，]",
+        "",
+        text,
+    ).strip()
+    # Safety: strip any sentence starting with "手册" or "资料" at the start
+    text = re.sub(r"^(手册|资料|说明书|参考资料)[^。\n]*[。；\n]", "", text).strip()
+    # Strip any "如需...请联系/咨询...客服" patterns (variants of 联系客服)
+    text = re.sub(r"如需[^。\n]*(?:联系|咨询)[^。\n]*(?:客服|售后)[^。\n]*[。\n]", "", text).strip()
+    # Strip "如您对产品有任何疑问..." type lines (violates "禁止说联系客服")
+    text = re.sub(
+        r"如您对[产商].*有任何[疑问问题][^。\n]*[。\n]",
+        "",
+        text,
+    ).strip()
+    # Strip "建议您/建议联系/咨询客服/售后" sentences (deflecting patterns only)
+    text = re.sub(
+        r"(?:建议您|您也可以|建议)[^。\n]*(?:联系|咨询|通过|向|找)[^。\n]*(?:客服|售后|人工)[^。\n]*[。\n]",
+        "",
+        text,
+    ).strip()
+    # Strip "请联系/咨询/找客服/售后" sentences (including "请通过XX联系客服")
+    text = re.sub(
+        r"请(?:联系|咨询|找)[^。\n]*(?:客服|售后)[^。\n]*[。\n]",
+        "",
+        text,
+    ).strip()
+    # Strip "请通过XX联系/咨询客服" variants
+    text = re.sub(
+        r"请[^。\n]*(?:联系|咨询)[^。\n]*(?:客服|售后)[^。\n]*[。]",
+        "",
+        text,
+    ).strip()
 
     lines: list[str] = []
     blank_pending = False

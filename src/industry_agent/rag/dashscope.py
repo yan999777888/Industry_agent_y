@@ -227,7 +227,7 @@ class DashScopeReranker:
         self,
         api_key: str,
         model: str = "qwen3-rerank",
-        top_k: int = 20,
+        top_k: int = 100,
         base_url: str = "https://dashscope.aliyuncs.com/compatible-api/v1",
         max_retries: int = 3,
     ) -> None:

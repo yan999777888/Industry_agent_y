@@ -900,10 +900,10 @@ class SQLiteRetriever:
         if analysis.products:
             if product in analysis.products:
                 product_match = 1
-                score += 20.0
+                score += 10.0   # OLD: 20.0 — reduced to prevent product dominance
                 matched_distinct_terms.add(product)
             else:
-                score -= 4.0
+                score -= 1.0    # OLD: -4.0 — reduced to let cross-product chunks compete
         elif product == "汇总英文":
             score -= 3.0
 
@@ -919,6 +919,19 @@ class SQLiteRetriever:
                 text_hits += 1
                 matched_keywords.append(model)
                 matched_distinct_terms.add(model)
+
+        # Penalize chunks mentioning model numbers the user didn't ask about
+        # e.g., query mentions DCB107/DCB112 → DCB101 chunks get a penalty
+        if analysis.models:
+            chunk_models = _MODEL_RE.findall(title + " " + text)
+            seen_models = set()
+            for cm in chunk_models:
+                cm_upper = cm.upper()
+                if cm_upper in seen_models:
+                    continue
+                seen_models.add(cm_upper)
+                if cm_upper not in analysis.models:
+                    score -= 4.0
 
         for keyword in analysis.keywords:
             if keyword in analysis.products:
@@ -990,6 +1003,16 @@ class SQLiteRetriever:
             score -= 1.5
         # Penalize low-quality chunk types when query is NOT asking for that type
         chunk_type = metadata.get("chunk_type", "")
+        # Runtime fix: parts_list chunks with spec-like titles were misclassified
+        # by the KB builder (parts_list checked before specification).
+        # Reclassify as specification to avoid -8.0 penalty until KB rebuild.
+        if chunk_type == "parts_list":
+            _title_lower = title.lower()
+            if any(cue in _title_lower for cue in ("规格", "参数", "尺寸", "重量", "容量", "型号", "specifications", "dimensions", "technical data", "weight", "rating")):
+                metadata = dict(metadata)
+                metadata["chunk_type"] = "specification"
+                metadata["semantic_type"] = "specification"
+                chunk_type = "specification"
         intents = _detect_query_semantic_intents(analysis)
         if chunk_type == "parts_list" and "parts_list" not in intents:
             score -= 8.0  # Heavy penalty: parts list returned for a non-parts question

@@ -58,7 +58,7 @@ class HybridRetriever:
         self.cross_encoder = cross_encoder
 
     def search(self, query: str, *, limit: int = 5) -> list[dict[str, Any]]:
-        fetch_limit = max(limit * 2, 10)
+        fetch_limit = max(limit * 20, 180)
         sparse_results = self.sqlite_retriever.search(query, limit=fetch_limit)
         vector_results = self.vector_retriever.search(query, limit=fetch_limit)
         if not vector_results:
@@ -79,7 +79,7 @@ class HybridRetriever:
         }
 
     def search_with_debug(self, query: str, *, limit: int = 5) -> dict[str, Any]:
-        fetch_limit = max(limit * 2, 10)
+        fetch_limit = max(limit * 20, 180)
         sparse_results = self.sqlite_retriever.search(query, limit=fetch_limit)
         vector_results = self.vector_retriever.search(query, limit=fetch_limit)
         fused = reciprocal_rank_fusion([sparse_results, vector_results], k=self.rrf_k)
