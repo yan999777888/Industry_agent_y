@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
 import os
 from dataclasses import dataclass, field
 from typing import Any
+from pathlib import Path
 
 from industry_agent.agent.context_manager import ContextManager, TurnContext
 from industry_agent.agent.customer_service_kb import CustomerServiceKnowledgeBase
@@ -728,6 +730,130 @@ def _match_smalltalk_reply(question: str) -> tuple[str, str] | None:
         if pattern.fullmatch(normalized):
             return intent, reply
     return None
+
+
+
+# =========================================================================
+# LLM-powered query analysis, chunk judging, and VL image filtering
+# =========================================================================
+
+_LLM_QUERY_ANALYSIS_SYSTEM_PROMPT = """\
+你是一个搜索关键词提取专家。分析用户问题，提取用于搜索产品手册的关键信息。
+
+只输出JSON，格式如下：
+{"product": "产品名称或null", "models": ["型号1"], "keywords": ["关键词1", "关键词2"], "question_type": "fact|step|troubleshoot|spec"}
+
+示例：
+用户问题：我的DCB107或DCB112型号电钻指示灯闪烁时代表什么含义
+输出：{"product": "电钻", "models": ["DCB107", "DCB112"], "keywords": ["指示灯", "闪烁"], "question_type": "troubleshoot"}
+
+用户问题：如何安装和拆卸电钻电池组
+输出：{"product": "电钻", "models": [], "keywords": ["电池组", "安装", "拆卸"], "question_type": "step"}
+"""
+
+
+def _llm_analyze_query(question: str, llm_client: LLMClient) -> dict[str, Any]:
+    """Use LLM to extract structured search terms from a question."""
+    try:
+        result = llm_client.chat(
+            messages=[{"role": "user", "content": f"用户问题：{question}"}],
+            system_prompt=_LLM_QUERY_ANALYSIS_SYSTEM_PROMPT,
+            temperature=0.1,
+            max_tokens=256,
+        )
+        json_match = re.search(r"\{.*\}", result, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+        else:
+            data = json.loads(result)
+        return {
+            "product": data.get("product"),
+            "models": data.get("models", []),
+            "keywords": data.get("keywords", []),
+            "question_type": data.get("question_type", "fact"),
+        }
+    except Exception as exc:
+        logger.warning("LLM query analysis failed: %s", exc)
+        return {"product": None, "models": [], "keywords": [], "question_type": "fact"}
+
+
+_LLM_CHUNK_JUDGE_SYSTEM_PROMPT = """\
+你是一个文档相关性判定专家。判断每个文档片段是否与用户问题相关。
+相关定义：片段直接回答了问题的某个方面，或提供了解决问题所需的关键信息。
+只输出JSON（不要其他内容）：{"relevant_indices": [1, 3, 5]}
+"""
+
+
+def _llm_judge_chunks(
+    question: str,
+    chunks: list[dict[str, Any]],
+    llm_client: LLMClient,
+) -> list[int]:
+    """Ask LLM which chunks are relevant. Returns 0-based indices."""
+    if not chunks:
+        return []
+    lines: list[str] = []
+    for i, chunk in enumerate(chunks, 1):
+        title = str(chunk.get("title", "")).strip()[:80]
+        text = str(chunk.get("text", "")).strip()[:200]
+        lines.append(f"[{i}] 标题：{title}\n    内容：{text}")
+    prompt = f"用户问题：{question}\n\n文档片段列表：\n" + "\n\n".join(lines)
+    try:
+        result = llm_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt=_LLM_CHUNK_JUDGE_SYSTEM_PROMPT,
+            temperature=0.1,
+            max_tokens=256,
+        )
+        json_match = re.search(r"\{.*\}", result, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            indices = data.get("relevant_indices", [])
+            return [i - 1 for i in indices if 1 <= i <= len(chunks)]
+        return list(range(len(chunks)))
+    except Exception as exc:
+        logger.warning("LLM chunk judge failed: %s", exc)
+        return list(range(len(chunks)))
+
+
+_VL_IMAGE_CHECK_PROMPT = "这张图片是否与以下答案内容相关？只回答是或否。\n\n答案：{answer}"
+
+
+def _vl_filter_images(
+    answer: str,
+    image_ids: list[str],
+    llm_client: LLMClient,
+) -> list[str]:
+    """Use VL model to filter images by relevance to the answer."""
+    if not answer or not image_ids:
+        return image_ids
+    filtered: list[str] = []
+    for img_id in image_ids:
+        try:
+            img_path: Path = settings.image_dir / f"{img_id}.jpg"
+            if not img_path.exists():
+                img_path = settings.image_dir / f"{img_id}.png"
+            if not img_path.exists():
+                filtered.append(img_id)
+                continue
+            with open(img_path, "rb") as f:
+                img_b64 = base64.b64encode(f.read()).decode("utf-8")
+            result = llm_client.chat_with_image(
+                question=_VL_IMAGE_CHECK_PROMPT.format(answer=answer[:500]),
+                image_base64=img_b64,
+                temperature=0.1,
+                max_tokens=10,
+            )
+            if "是" in result.strip() or "yes" in result.strip().lower():
+                filtered.append(img_id)
+        except Exception as exc:
+            logger.warning("VL image check failed for %s: %s", img_id, exc)
+            filtered.append(img_id)
+    logger.info("VL image filter: %d -> %d images", len(image_ids), len(filtered))
+    return filtered
+
+
+# =========================================================================
 
 
 def _filter_evidence(
@@ -2016,10 +2142,26 @@ class AgentService:
         image_terms: list[str] | None = None,
         image_features: dict[str, list[str]] | None = None,
     ) -> dict[str, Any]:
-        # 1. Retrieve
+        # === Step 0: LLM query analysis — extract product, models, keywords ===
+        analysis = _llm_analyze_query(query, self.llm_client)
+        search_parts: list[str] = []
+        if analysis.get("product"):
+            search_parts.append(analysis["product"])
+        if analysis.get("models"):
+            search_parts.extend(analysis["models"])
+        if analysis.get("keywords"):
+            search_parts.extend(analysis["keywords"])
+        enhanced_query = " ".join(search_parts) if search_parts else query
+
+        # 1. Retrieve with LLM-enhanced query
         candidate_groups: list[tuple[str, list[dict[str, Any]]]] = [
-            ("text_only", self.retriever.search(query, limit=RETRIEVAL_LIMIT))
+            ("llm_enhanced", self.retriever.search(enhanced_query, limit=RETRIEVAL_LIMIT))
         ]
+        # Keep original-query retrieval as fallback (catches cases LLM missed)
+        if enhanced_query != query:
+            candidate_groups.append(
+                ("original", self.retriever.search(query, limit=RETRIEVAL_LIMIT))
+            )
 
         # Optional: LLM query expansion for better recall (Phase 4)
         _enable_qe = os.getenv("INDUSTRY_AGENT_ENABLE_QUERY_EXPANSION", "1").strip().lower()
@@ -2052,10 +2194,10 @@ class AgentService:
 
         chunks = _merge_retrieval_candidates(candidate_groups)
 
-        # Use retriever's original ranking (already optimized by _score).
-        # Only apply light evidence filtering to remove clearly irrelevant chunks.
-        evidence_chunks = _filter_evidence(chunks, query=query)
-
+        # === Step 1b: LLM chunk relevance judge ===
+        top_for_judge = chunks[:10] if len(chunks) > 10 else chunks
+        relevant_indices = _llm_judge_chunks(query, top_for_judge, self.llm_client)
+        evidence_chunks = [top_for_judge[i] for i in relevant_indices if 0 <= i < len(top_for_judge)]
         if not evidence_chunks and chunks:
             evidence_chunks = chunks[:5]
 
@@ -2168,6 +2310,7 @@ class AgentService:
             answer_embedding=answer_embedding,
             image_desc_embeddings=self.image_desc_embeddings,
         )
+        grounded_image_ids = _vl_filter_images(answer, grounded_image_ids, self.llm_client)
         images = _image_details(grounded_image_ids, self.image_index)
 
         return {
@@ -2197,6 +2340,7 @@ class AgentService:
                 ),
                 "image_terms": image_terms or [],
                 "image_features": image_features or {},
+                "llm_analysis": analysis,
                 "candidate_image_ids": image_ids,
                 "grounded_image_ids": grounded_image_ids,
                 "candidate_titles": [str(chunk.get("title", "")) for chunk in chunks[:5]],
