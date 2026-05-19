@@ -19,6 +19,7 @@ from industry_agent.agent.prompts import (
     build_manual_qa_system_prompt,
 )
 from industry_agent.kb.models import KnowledgeChunk
+from industry_agent.model_paths import slugify_model_name, resolve_local_model_path
 from industry_agent.rag.embedding import EmbeddingManager
 from industry_agent.rag.factory import VectorOnlyRetriever, create_retriever
 from industry_agent.rag.hybrid_retriever import reciprocal_rank_fusion
@@ -61,6 +62,17 @@ class PromptTemplateTests(unittest.TestCase):
 
 
 class RetrievalConfigTests(unittest.TestCase):
+    def test_model_path_resolution_prefers_local_models_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            model_name = "BAAI/bge-m3"
+            local_dir = root / slugify_model_name(model_name)
+            local_dir.mkdir(parents=True)
+
+            resolved = resolve_local_model_path(model_name, models_root=root)
+
+        self.assertEqual(resolved, str(local_dir.resolve()))
+
     def test_vector_retrieval_reports_not_built_for_missing_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             status = describe_vector_retrieval(db_path=Path(tmpdir) / "missing.sqlite")

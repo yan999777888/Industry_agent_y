@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from industry_agent.config import settings
+from industry_agent.llm.client import LLMClient
 
 try:
     import httpx
@@ -170,6 +171,27 @@ def run_startup_checks(
                     required=False,
                 )
             )
+        probe_detail = f"{model} @ {base_url}"
+        try:
+            llm_client = LLMClient(
+                backend=backend,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                vision_model=vision_model,
+            )
+            probe_ok = llm_client.is_available()
+        except Exception as exc:
+            probe_ok = False
+            probe_detail = str(exc)
+        components.append(
+            ComponentStatus(
+                name="llm_api_probe",
+                ok=probe_ok,
+                detail=probe_detail if probe_ok else f"probe failed: {probe_detail}",
+                required=True,
+            )
+        )
 
     # ── DashScope checks ──────────────────────────────────────────────
     if settings.dashscope_enabled:

@@ -21,6 +21,8 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from industry_agent.model_paths import prefer_local_model_env
+
 KB_DIR = PROJECT_ROOT / "data" / "processed" / "kb"
 DB_PATH = KB_DIR / "index.sqlite"
 IMAGE_CHUNKS_PATH = KB_DIR / "image_chunks.jsonl"
@@ -88,7 +90,8 @@ def main():
 
     print("Loading embedding model (bge-m3)...")
     from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer("BAAI/bge-m3")
+    resolved_model_name = prefer_local_model_env("BAAI/bge-m3")
+    model = SentenceTransformer(resolved_model_name)
     print(f"  Model loaded, dim={model.get_sentence_embedding_dimension()}")
 
     # Connect to DB

@@ -71,6 +71,19 @@ export RETRIEVAL_MODE=hybrid
 
 ## 4. 构建知识库索引
 
+如果你想提前下载本地 Hugging Face 模型，避免运行时联网拉取，可以先执行：
+
+```bash
+bash scripts/download_model.sh
+```
+
+脚本默认使用国内镜像 `https://hf-mirror.com`，并把模型下载到 `./models/`。当前会下载：
+
+- `BAAI/bge-m3`
+- `BAAI/bge-reranker-v2-m3`
+
+下载完成后，系统会默认优先从 `./models/` 读取这些模型。
+
 首次运行，或修改了知识库 / 嵌入模型 / 检索配置后，需要重建索引：
 
 ```bash

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from industry_agent.config import settings
+from industry_agent.model_paths import prefer_local_model_env
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +103,8 @@ class SentenceTransformerEmbeddingModel:
             raise RuntimeError(
                 "sentence-transformers is not installed. Install it before using a neural embedding model."
             )
-        self.model_name = model_name
-        self.model = SentenceTransformer(model_name)
+        self.model_name = prefer_local_model_env(model_name)
+        self.model = SentenceTransformer(self.model_name)
         self.dimensions = int(self.model.get_sentence_embedding_dimension())
 
     def embed(self, text: str) -> list[float]:

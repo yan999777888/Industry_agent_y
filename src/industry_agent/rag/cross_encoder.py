@@ -10,6 +10,8 @@ import logging
 import os
 from typing import Any
 
+from industry_agent.model_paths import prefer_local_model_env
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CROSS_ENCODER = "BAAI/bge-reranker-v2-m3"
@@ -28,9 +30,10 @@ class CrossEncoderReranker:
         top_k: int = 30,
         device: str = "cpu",
     ):
-        self.model_name = model_name or os.getenv(
+        configured_name = model_name or os.getenv(
             "INDUSTRY_AGENT_CROSS_ENCODER_MODEL", DEFAULT_CROSS_ENCODER
         )
+        self.model_name = prefer_local_model_env(configured_name)
         self.top_k = top_k
         self.device = device
         self._model = None

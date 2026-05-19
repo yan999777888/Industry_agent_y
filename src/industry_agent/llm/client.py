@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -14,6 +15,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
+logger = logging.getLogger(__name__)
 
 
 def _strip_thinking(text: str) -> str:
@@ -82,6 +84,46 @@ class LLMClient:
             )
         return self._client
 
+    def _create_openai_chat_completion(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        extra_kwargs: dict[str, Any] | None = None,
+    ) -> Any:
+        """Send a chat completion request with compatibility fallback.
+
+        Some OpenAI-compatible providers accept ``max_tokens`` but reject
+        ``max_completion_tokens``. We try the newer field first, then retry
+        once with the legacy field when the first request fails.
+        """
+
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "top_p": 0.95,
+            "stream": False,
+            **(extra_kwargs or {}),
+        }
+
+        try:
+            return self.client.chat.completions.create(
+                **payload,
+                max_completion_tokens=max_tokens,
+            )
+        except Exception as exc:
+            logger.warning(
+                "OpenAI-compatible call with max_completion_tokens failed, retrying with max_tokens: %s",
+                exc,
+            )
+            return self.client.chat.completions.create(
+                **payload,
+                max_tokens=max_tokens,
+            )
+
     def chat(
         self,
         messages: list[dict[str, str]],
@@ -142,13 +184,11 @@ class LLMClient:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": content})
 
-        response = self.client.chat.completions.create(
+        response = self._create_openai_chat_completion(
             model=self.vision_model or self.model,
             messages=messages,
             temperature=temperature,
-            max_completion_tokens=max_tokens,
-            top_p=0.95,
-            stream=False,
+            max_tokens=max_tokens,
         )
         return _strip_thinking(response.choices[0].message.content or "")
 
@@ -164,10 +204,11 @@ class LLMClient:
             if self.is_openai_compatible:
                 if not self.api_key:
                     return False
-                self.client.chat.completions.create(
+                self._create_openai_chat_completion(
                     model=self.model,
                     messages=[{"role": "user", "content": "hi"}],
-                    max_completion_tokens=5,
+                    temperature=0.0,
+                    max_tokens=5,
                 )
                 return True
         except Exception:
@@ -212,15 +253,15 @@ class LLMClient:
         model: str | None,
         strip_think: bool,
     ) -> str:
-        response = self.client.chat.completions.create(
+        response = self._create_openai_chat_completion(
             model=model or self.model,
             messages=messages,
             temperature=temperature,
-            max_completion_tokens=max_tokens,
-            top_p=0.95,
-            frequency_penalty=0,
-            presence_penalty=0,
-            stream=False,
+            max_tokens=max_tokens,
+            extra_kwargs={
+                "frequency_penalty": 0,
+                "presence_penalty": 0,
+            },
         )
         content = response.choices[0].message.content or ""
         return _strip_thinking(content) if strip_think else content.strip()

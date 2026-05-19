@@ -39,6 +39,19 @@ export LLM_VISION_MODEL=mimo-v2.5-pro
 - 默认大模型后端：`openai_compatible`
 - 默认文本/视觉模型：`mimo-v2.5-pro`
 
+如果你希望把 Hugging Face 模型预先下载到本地，避免运行时再联网拉取，可以先执行：
+
+```bash
+bash scripts/download_model.sh
+```
+
+脚本会通过国内镜像 `https://hf-mirror.com` 下载当前项目实际会用到的 Hugging Face 模型到 `./models/`，目前包括：
+
+- `BAAI/bge-m3`
+- `BAAI/bge-reranker-v2-m3`
+
+下载完成后，服务启动和向量索引构建会默认优先从 `./models/` 加载这些模型；只有本地目录不存在时，才会退回到原始模型名。
+
 如果你修改了嵌入模型或检索模式，需要重新执行 `python3 scripts/build_kb.py` 重建向量索引。
 
 如果你想改回本地 Ollama，可以切到下面这组可选配置：

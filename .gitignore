@@ -10,6 +10,7 @@ venv/
 # Local IDE / tool files
 .vscode/
 bge-small-zh-v1.5/
+models/
 
 # Local processed artifacts
 data/processed/

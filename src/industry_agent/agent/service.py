@@ -2109,6 +2109,7 @@ class AgentService:
 
         # Try LLM
         answer = self._call_llm(messages)
+        llm_error = answer if answer.startswith("LLM 调用失败:") else ""
         if answer and not answer.startswith("LLM 调用失败:"):
             answer = _strip_thinking(answer)
             # _strip_llm_structured_format removed: new prompts are concise/no-section style
@@ -2205,6 +2206,12 @@ class AgentService:
                     "rule_count": prompt_result.rule_count,
                     "has_context": prompt_result.has_context,
                     "anti_hallucination": True,
+                },
+                "llm": {
+                    "backend": self.llm_backend,
+                    "model": self.model,
+                    "used_llm_answer": use_llm,
+                    "error": llm_error,
                 },
             },
         }
@@ -2314,6 +2321,7 @@ class AgentService:
                 "customer_service_generation": {
                     "used_llm": True,
                     "used_policy_fallback": used_policy_fallback,
+                    "llm_error": llm_answer if llm_answer.startswith("LLM 调用失败:") else "",
                     "prompt_rule_count": prompt_result.rule_count,
                     "has_policy_context": prompt_result.has_context,
                 },

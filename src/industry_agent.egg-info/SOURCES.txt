@@ -2,6 +2,7 @@ README.md
 pyproject.toml
 src/industry_agent/__init__.py
 src/industry_agent/config.py
+src/industry_agent/model_paths.py
 src/industry_agent.egg-info/PKG-INFO
 src/industry_agent.egg-info/SOURCES.txt
 src/industry_agent.egg-info/dependency_links.txt
@@ -37,7 +38,9 @@ src/industry_agent/kb/parser.py
 src/industry_agent/llm/__init__.py
 src/industry_agent/llm/client.py
 src/industry_agent/rag/__init__.py
+src/industry_agent/rag/bm25_retriever.py
 src/industry_agent/rag/cross_encoder.py
+src/industry_agent/rag/dashscope.py
 src/industry_agent/rag/embedding.py
 src/industry_agent/rag/factory.py
 src/industry_agent/rag/hybrid_retriever.py
