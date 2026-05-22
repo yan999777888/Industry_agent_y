@@ -281,6 +281,7 @@ class MilvusVectorSearcher:
                     data=[query_vector],
                     limit=limit,
                     output_fields=["chunk_id"],
+                    search_params={"metric_type": "IP", "params": {"nprobe": 16}},
                 )
                 break
             except Exception as exc:
@@ -295,15 +296,19 @@ class MilvusVectorSearcher:
         if not results or not results[0]:
             return []
 
-        # Get chunk_ids from Milvus results
+        # Get chunk_ids from Milvus results, filter by similarity threshold
         chunk_ids: list[str] = []
         score_map: dict[str, float] = {}
+        _sim_threshold = float(os.getenv("MILVUS_SIMILARITY_THRESHOLD", "0.30"))
         for hit in results[0]:
+            score = float(hit.get("distance", 0))
+            if score < _sim_threshold:
+                continue
             # chunk_id is in output_fields (merged to top-level), fallback to entity
             cid = str(hit.get("chunk_id") or hit.get("entity", {}).get("chunk_id", ""))
             if cid:
                 chunk_ids.append(cid)
-                score_map[cid] = float(hit.get("distance", 0))
+                score_map[cid] = score
 
         if not chunk_ids:
             return []

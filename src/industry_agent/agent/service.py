@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 RETRIEVAL_LIMIT = 20        # chunks to retrieve before evidence filtering
-FINAL_CONTEXT_CHUNKS = 8    # chunks passed into the LLM
+FINAL_CONTEXT_CHUNKS = 5    # chunks passed into the LLM
 MAX_CONTEXT_CHARS = 7000    # truncate context to fit model window
 MAX_HISTORY_TURNS = 3       # keep last N turns per session
 MIN_TOP_SCORE = 0.5         # below this, do not ask LLM to hallucinate
@@ -795,14 +795,13 @@ def _llm_extract_answer_spans(
                 if i in relevant_indices
             ]
             if selected:
-                # Always inject the highest-scoring chunk (by fusion_score)
-                # so Milvus-top chunks are never entirely dropped by the LLM gate.
+                # Safety net: always keep the top-1 chunk by fusion_score
+                # to prevent LLM from accidentally removing the best chunk.
                 seen_ids = {c.get("chunk_id", "") for c in selected}
-                for c in chunks:
-                    if c.get("chunk_id", "") not in seen_ids:
-                        selected.insert(0, c)
-                        break
-                logger.info("Span extraction: %d relevant / %d total (injected top chunk)", len(selected), len(chunks))
+                top_chunk = max(chunks, key=lambda c: float(c.get("_fusion_score", 0)))
+                if top_chunk.get("chunk_id", "") not in seen_ids:
+                    selected.insert(0, top_chunk)
+                logger.info("Span extraction: %d relevant / %d total (kept top-1 safety)", len(selected), len(chunks))
                 return selected
     except Exception as exc:
         logger.warning("LLM span extraction failed: %s", exc)
@@ -856,39 +855,42 @@ def _llm_analyze_query(question: str, llm_client: LLMClient) -> dict[str, Any]:
 # =========================================================================
 
 
+_SCORE_MIN_RATIO = float(os.getenv("SCORE_MIN_RATIO", "0.8"))
+
+
 def _filter_evidence(
     chunks: list[dict[str, Any]],
     *,
     query: str = "",
 ) -> list[dict[str, Any]]:
-    """Keep top chunks by reranker score only.
+    """Keep top chunks by fusion score, filtering out low-relevance ones.
 
-    The hybrid retriever already runs RRF fusion + reranker.  This function
-    simply sorts by the reranker score (``_cross_encoder_score``) and keeps
-    the top ``FINAL_CONTEXT_CHUNKS``.  No keyword heuristics, no product
-    matching — the reranker is the sole relevance signal.
+    Keeps only chunks whose fusion score >= top_score * _SCORE_MIN_RATIO.
     """
     if not chunks:
         return []
 
-    # Sort by reranker score descending; chunks without reranker score sink
     scored = [
         c for c in chunks
-        if float(c.get("_cross_encoder_score", 0.0)) > 0
+        if float(c.get("_fusion_score", 0.0)) > 0
     ]
     scored.sort(
-        key=lambda c: float(c.get("_cross_encoder_score", 0.0)),
+        key=lambda c: float(c.get("_fusion_score", 0.0)),
         reverse=True,
     )
     if not scored:
-        # No reranker scores at all — fall back to keyword order, keep top
         return chunks[: FINAL_CONTEXT_CHUNKS]
 
-    top_ce = float(scored[0].get("_cross_encoder_score", 0.0))
-    if top_ce < 1e-6:
+    top_score = float(scored[0].get("_fusion_score", 0.0))
+    if top_score < 1e-6:
         return chunks[: FINAL_CONTEXT_CHUNKS]
 
-    return scored[: FINAL_CONTEXT_CHUNKS]
+    min_score = top_score * _SCORE_MIN_RATIO
+    filtered = [
+        c for c in scored
+        if float(c.get("_fusion_score", 0.0)) >= min_score
+    ]
+    return filtered[: FINAL_CONTEXT_CHUNKS]
 
 
 def _text_overlap_count(text: str, terms: list[str]) -> int:
@@ -1805,17 +1807,27 @@ def _assemble_context(
             seen_sources.add(product)
             sources.append(product)
 
-        # Build context part
+        # Build context part — title and body on separate lines for clarity
         if is_english:
-            # Use the best available score (cross-encoder for semantic, keyword for lexical)
             kw_score = float(chunk.get("_score", 0))
             ce_score = float(chunk.get("_cross_encoder_score", 0)) * 100.0
             display_score = max(kw_score, ce_score)
             header = f"[Ref{idx}] Product: {product} | Section: {title} | Score: {display_score:.1f}"
         else:
-            score = chunk.get("_score", "")
-            header = f"[参考{idx}] 产品：{product} | 章节：{title} | 检索分：{score}"
+            score = chunk.get("_fusion_score", chunk.get("_score", ""))
+            header = f"[参考{idx}] 产品：{product} | 标题：{title}\n内容："
         body = text.strip()
+        # Strip leading category name from body when it duplicates the title.
+        # Only strip if the matched text is followed by space/newline (a list separator),
+        # not if it's part of a sentence.
+        # e.g. title="健身单车轻松骑行模式", body="轻松骑行 起伏山丘\n\n公园骑行"
+        # → strips "轻松骑行 " (followed by space), body="起伏山丘\n\n公园骑行"
+        if title and len(title) >= 2:
+            for match_len in range(min(len(title), 8), 1, -1):
+                candidate = body[:match_len]
+                if candidate in title and len(body) > match_len and body[match_len] in (" ", "\n"):
+                    body = body[match_len:].lstrip()
+                    break
         # Strip "参阅/查阅/参考...说明书" references from context to prevent LLM echoing them
         body = re.sub(r"详情请参阅[^。\n]*[。]?", "", body)
         body = re.sub(r"请参阅[^。\n]*[。]?", "", body)
@@ -1859,7 +1871,7 @@ def _assemble_context(
             "title": title,
             "text_snippet": text[:320],
             "product_name": product,
-            "score": str(chunk.get("_score", "")),
+            "score": str(chunk.get("_fusion_score", chunk.get("_score", ""))),
         })
 
     context = "\n\n".join(parts)
@@ -1978,13 +1990,13 @@ def _merge_retrieval_candidates(
                 record["_retrieval_variants"] = [variant_name]
                 record["_variant_hits"] = 1
                 _new_fs = _best_chunk_score(record) + variant_bonus
-                logger.warning("BEST_SCORE chunk=%s score=%.2f _vec=%.4f _rrf=%.6f _ce=%.4f",
+                record["_fusion_score"] = round(_new_fs, 3)
+                logger.warning("BEST_SCORE chunk=%s fusion=%.2f _vec=%.4f _rrf=%.6f _ce=%.4f",
                                chunk_id[:8],
-                               float(record.get("_score") or 0.0),
+                               _new_fs,
                                float(record.get("_vector_score") or 0.0),
                                float(record.get("_rrf_score") or 0.0),
                                float(record.get("_cross_encoder_score") or 0.0))
-                record["_fusion_score"] = round(_new_fs, 3)
                 merged[chunk_id] = record
                 continue
 
@@ -2028,6 +2040,149 @@ def _build_visual_focus_terms(image_features: dict[str, list[str]] | None) -> li
             *image_features.get("issue_terms", []),
         ]
     )[:MULTIMODAL_RETRIEVAL_LIMIT]
+
+
+# ---------------------------------------------------------------------------
+# VL-based image selection — uses vision model to rank candidate images
+# ---------------------------------------------------------------------------
+
+_VL_IMAGE_SELECT_PROMPT = """\
+以下是产品客服的回答内容和若干候选产品图片。请判断哪些图片与回答内容最相关、能帮助用户理解回答。
+
+【回答内容】
+{answer}
+
+【候选图片】
+每张图片标有编号。请从左到右依次查看，选出与回答内容最相关的图片。
+
+要求：
+1. 只选能帮助理解回答内容的图片（如产品外观、部件图示、操作步骤图、指示灯说明等）
+2. 不选与回答无关的图片
+3. 按相关性从高到低输出图片编号，用逗号分隔
+4. 如果没有相关图片，输出空数组 []
+
+输出格式（只输出编号，不要其他内容）：
+[1, 3, 5]"""
+
+
+def _encode_image_to_base64(image_path: str, max_size: int = 800) -> str | None:
+    """Read image file, resize if needed, return base64 string."""
+    try:
+        from PIL import Image
+        import io
+        img = Image.open(image_path)
+        if img.mode == "RGBA":
+            img = img.convert("RGB")
+        w, h = img.size
+        if max(w, h) > max_size:
+            scale = max_size / max(w, h)
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=80)
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception:
+        try:
+            with open(image_path, "rb") as f:
+                raw = base64.b64encode(f.read()).decode("utf-8")
+            if len(raw) > 500_000:
+                return None
+            return raw
+        except Exception:
+            return None
+
+
+def _vl_select_images(
+    *,
+    answer: str,
+    candidate_image_ids: list[str],
+    image_index: dict[str, dict[str, str | bool]],
+    llm_client: LLMClient,
+    max_candidates: int = 8,
+    max_return: int = 3,
+) -> list[str]:
+    """Use VL model to select the most answer-relevant images from candidates.
+
+    Sends answer text + candidate images to the vision model in one request,
+    asks it to rank by relevance, returns top images.
+    """
+    if not candidate_image_ids or not answer.strip():
+        return []
+
+    # Build candidate list with file paths
+    candidates: list[tuple[str, str]] = []  # (image_id, abs_path)
+    for img_id in candidate_image_ids[:max_candidates]:
+        meta = image_index.get(img_id, {})
+        rel_path = str(meta.get("path", ""))
+        if not rel_path:
+            abs_path = str(settings.image_dir / f"{img_id}.png")
+        else:
+            abs_path = str(settings.project_root / rel_path)
+        if os.path.exists(abs_path):
+            candidates.append((img_id, abs_path))
+
+    if not candidates:
+        return []
+
+    # Encode images to base64
+    image_payloads: list[tuple[str, str]] = []  # (image_id, base64)
+    for img_id, abs_path in candidates:
+        b64 = _encode_image_to_base64(abs_path)
+        if b64:
+            image_payloads.append((img_id, b64))
+
+    if not image_payloads:
+        return []
+
+    # Build multi-image content for VL model
+    content: list[dict[str, Any]] = [
+        {"type": "text", "text": _VL_IMAGE_SELECT_PROMPT.format(answer=answer[:600])},
+    ]
+    for idx, (img_id, b64) in enumerate(image_payloads, 1):
+        content.append({"type": "text", "text": f"图片{idx}（{img_id}）："})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+        })
+
+    messages = [{"role": "user", "content": content}]
+
+    # Call VL model
+    try:
+        kwargs: dict[str, Any] = dict(
+            model=llm_client.vision_model or llm_client.model,
+            messages=messages,
+            temperature=0.1,
+            max_completion_tokens=128,
+            top_p=0.95,
+            stream=False,
+        )
+        if settings.dashscope_enabled:
+            kwargs["extra_body"] = {"enable_thinking": False}
+        response = llm_client.client.chat.completions.create(**kwargs)
+        result_text = (response.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.warning("VL image selection failed: %s", exc)
+        return []
+
+    # Parse result — extract numbers from response
+    numbers = re.findall(r"\d+", result_text)
+    selected: list[str] = []
+    seen_indices: set[int] = set()
+    for num_str in numbers:
+        idx = int(num_str)
+        if 1 <= idx <= len(image_payloads) and idx not in seen_indices:
+            seen_indices.add(idx)
+            selected.append(image_payloads[idx - 1][0])
+        if len(selected) >= max_return:
+            break
+
+    # If VL returned nothing useful, fall back to first candidate
+    if not selected and image_payloads:
+        selected = [image_payloads[0][0]]
+
+    logger.info("VL image selection: %d candidates -> %d selected: %s",
+                len(image_payloads), len(selected), selected)
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -2225,7 +2380,7 @@ class AgentService:
         chunks = _merge_retrieval_candidates(candidate_groups)
 
         # === Step 1b: LLM extracts answer spans from candidate chunks ===
-        top_candidates = chunks[:15]
+        top_candidates = chunks[:20]
         evidence_chunks = _llm_extract_answer_spans(query, top_candidates, self.llm_client)
         logger.info("Span extraction: %d/%d chunks kept", len(evidence_chunks), len(top_candidates))
 
@@ -2251,7 +2406,7 @@ class AgentService:
                 },
             }
 
-        # 2. Assemble context / collect metadata
+        # 2. Assemble context / collect metadata (evidence already filtered by LLM span extraction)
         context, image_ids, sources, references = _assemble_context(evidence_chunks, query=query)
         confidence = _confidence_from_chunks(evidence_chunks)
 
@@ -2324,26 +2479,41 @@ class AgentService:
         # Also strip bare <PIC> tags from chunk text that leaked through.
         answer = re.sub(r"\s*<PIC>", "", answer).strip()
         grounded_image_ids = []
-        seen: set[str] = set()
+        _candidate_img_ids: list[str] = []
 
-        # ── Image selection (top-3 by Milvus vector score) ────────────
-        _vec_sorted = sorted(
+        # ── Image selection: from top fusion-score chunks ──
+        _img_seen: set[str] = set()
+        _top_img_chunks = sorted(
             evidence_chunks,
-            key=lambda c: float(c.get("_vector_score") or 0.0),
+            key=lambda c: float(c.get("_fusion_score", 0)),
             reverse=True,
         )
-        for chunk in _vec_sorted[:3]:
+        for chunk in _top_img_chunks[:1]:
             for img_id in _parse_json_list(chunk.get("image_ids")):
                 normalized = str(img_id).strip()
-                if normalized and normalized not in seen:
-                    seen.add(normalized)
+                if normalized and normalized not in _img_seen:
+                    _img_seen.add(normalized)
+                    _candidate_img_ids.append(normalized)
                     grounded_image_ids.append(normalized)
+        # Only expand to other chunks if top-1 has fewer than 2 images
+        if len(grounded_image_ids) < 2:
+            for chunk in _top_img_chunks[1:3]:
+                for img_id in _parse_json_list(chunk.get("image_ids")):
+                    normalized = str(img_id).strip()
+                    if normalized and normalized not in _img_seen:
+                        _img_seen.add(normalized)
+                        _candidate_img_ids.append(normalized)
+                        grounded_image_ids.append(normalized)
 
-        # 2) Fallback: still no images — use evidence-only image selector
+        # Fallback: no Milvus chunks had images — use top evidence chunks
         if not grounded_image_ids:
-            grounded_image_ids = _select_grounded_manual_image_ids(
-                evidence_chunks=evidence_chunks,
-            )
+            for chunk in evidence_chunks[:3]:
+                for img_id in _parse_json_list(chunk.get("image_ids")):
+                    normalized = str(img_id).strip()
+                    if normalized and normalized not in _img_seen:
+                        _img_seen.add(normalized)
+                        _candidate_img_ids.append(normalized)
+                        grounded_image_ids.append(normalized)
         images = _image_details(grounded_image_ids, self.image_index)
 
         return {
@@ -2376,8 +2546,9 @@ class AgentService:
                 "image_terms": image_terms or [],
                 "image_features": image_features or {},
                 "llm_analysis": analysis,
-                "candidate_image_ids": image_ids,
+                "candidate_image_ids": _candidate_img_ids,
                 "grounded_image_ids": grounded_image_ids,
+                "vl_image_selection": len(_candidate_img_ids) > 0,
                 "candidate_titles": [str(chunk.get("title", "")) for chunk in chunks[:5]],
                 "selected_titles": [str(chunk.get("title", "")) for chunk in evidence_chunks],
                 "selected_reranker_scores": [float(chunk.get("_cross_encoder_score", 0)) for chunk in evidence_chunks],
