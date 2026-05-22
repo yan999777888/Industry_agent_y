@@ -9,6 +9,7 @@ with the current AgentService.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -17,7 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from industry_agent.config import settings
-from industry_agent.rag.vector_store import SQLiteVectorSearcher, VectorSearcher, describe_vector_retrieval
+from industry_agent.rag.vector_store import SQLiteVectorSearcher, MilvusVectorSearcher, VectorSearcher, describe_vector_retrieval
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Query analysis resources
@@ -606,7 +609,12 @@ class SQLiteRetriever:
         bm25_retriever: Any | None = None,
     ) -> None:
         self.db_path = db_path
-        self.vector_searcher = vector_searcher or SQLiteVectorSearcher(db_path)
+        if vector_searcher is not None:
+            self.vector_searcher = vector_searcher
+        elif settings.vector_backend == "milvus":
+            self.vector_searcher = MilvusVectorSearcher(db_path)
+        else:
+            self.vector_searcher = SQLiteVectorSearcher(db_path)
         self.bm25_retriever = bm25_retriever
 
     def retrieval_status(self) -> dict[str, Any]:
@@ -615,12 +623,14 @@ class SQLiteRetriever:
         channels = ["like", "fts5_bm25", "vector"]
         if self.bm25_retriever is not None:
             channels.append("bm25")
+        # Determine vector backend type from the active searcher
+        _vb = "milvus" if isinstance(self.vector_searcher, MilvusVectorSearcher) else "sqlite"
         return {
             "strategy": "hybrid_lexical_with_optional_vector",
             "channels": channels,
             "lexical_channels": ["like", "fts5_bm25"],
             "bm25": self.bm25_retriever.is_loaded if self.bm25_retriever else False,
-            "vector": describe_vector_retrieval(db_path=self.db_path),
+            "vector": describe_vector_retrieval(db_path=self.db_path, backend=_vb),
         }
 
     def search(self, query: str, *, limit: int = 5) -> list[dict[str, Any]]:
@@ -1033,7 +1043,7 @@ class SQLiteRetriever:
 
         if int(row.get("fts_hit", 0)):
             score += 5.0
-            rank_bonus = _fts_rank_bonus(row.get("fts_rank"))
+            rank_bonus = _fts_rank_bonus(row.get("fts_rank"), char_count=row.get("char_count", 0) or 0)
             score += rank_bonus
         vector_score = row.get("_vector_score")
         if isinstance(vector_score, (int, float)):
@@ -1076,6 +1086,27 @@ class SQLiteRetriever:
         if signal_terms:
             coverage = len(matched_distinct_terms) / max(1, min(len(signal_terms), 6))
             score += min(coverage * 4.0, 4.0)
+
+        # Short chunk boost — short text has fewer keyword hits, compensate
+        # to give short/precise chunks equal competitive advantage vs long chunks
+        char_count = row.get("char_count", 0)
+        if isinstance(char_count, (int, float)) and char_count > 0:
+            if char_count < 100:
+                score += 10.0
+            elif char_count < 200:
+                score += 5.0
+            elif char_count < 300:
+                score += 3.0
+            # Length normalization — long chunks naturally accumulate more
+            # keyword hits across more text, so scale down their advantage.
+            # Formula: adjusted = score / sqrt(max(1, char_count / 100))
+            #   39 chars → /1.0 (no change)
+            #  100 chars → /1.0 (no change)
+            #  200 chars → /1.41 (29% reduction)
+            #  400 chars → /2.0 (50% reduction)
+            #  800 chars → /2.83 (65% reduction)
+            norm = max(1.0, char_count / 100.0) ** 0.5
+            score = score / norm
 
         row["_score"] = round(score, 3)
         row["_matched_keywords"] = _unique(matched_keywords)
@@ -1338,9 +1369,18 @@ def _parse_json_list(value: Any) -> list[str]:
         return []
     try:
         parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return []
-    return [str(v) for v in parsed] if isinstance(parsed, list) else []
+        return [str(v) for v in parsed] if isinstance(parsed, list) else []
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # Fallback: some image_ids are stored as Python literals (single quotes)
+    try:
+        import ast
+        parsed = ast.literal_eval(value)
+        if isinstance(parsed, list):
+            return [str(v) for v in parsed]
+    except (ValueError, SyntaxError, MemoryError):
+        pass
+    return []
 
 
 def _parse_json_object(value: Any) -> dict[str, Any]:
@@ -1424,13 +1464,22 @@ def _build_cjk_aware_fts_query(terms: list[str]) -> str:
     return " OR ".join(clauses)
 
 
-def _fts_rank_bonus(value: Any) -> float:
+def _fts_rank_bonus(value: Any, char_count: int = 0) -> float:
     try:
         rank = float(value)
     except (TypeError, ValueError):
         return 0.0
     rank = abs(rank)
-    return max(0.0, 4.0 - min(4.0, math.log1p(rank + 1e-6)))
+    bonus = max(0.0, 4.0 - min(4.0, math.log1p(rank + 1e-6)))
+    # Short chunk FTS5 compensation: short texts have fewer tokens → lower BM25
+    if char_count > 0:
+        if char_count < 100:
+            bonus += 2.0
+        elif char_count < 200:
+            bonus += 1.0
+        elif char_count < 300:
+            bonus += 0.5
+    return bonus
 
 
 def _unique(values: Any) -> list[str]:

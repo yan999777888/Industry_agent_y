@@ -5,12 +5,18 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 from industry_agent.config import settings
 from industry_agent.rag.hybrid_retriever import HybridRetriever
 from industry_agent.rag.retriever import SQLiteRetriever
-from industry_agent.rag.vector_store import DisabledVectorSearcher, SQLiteVectorSearcher, describe_vector_retrieval
+from industry_agent.rag.vector_store import (
+    DisabledVectorSearcher,
+    SQLiteVectorSearcher,
+    MilvusVectorSearcher,
+    describe_vector_retrieval,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +82,12 @@ def create_retriever(mode: str | None = None) -> Any:
 
     # ── DashScope mode ──────────────────────────────────────────────
     if settings.dashscope_enabled:
-        db_path = str(settings.processed_dir / "index.sqlite")
 
         # BM25 retriever
         bm25 = None
         if BM25Retriever is not None:
             bm25_index_path = settings.processed_dir / "bm25_index.pkl"
+            db_path = str(settings.processed_dir / "index.sqlite")
             chunks = _load_all_chunks(db_path)
             if bm25_index_path.exists():
                 bm25 = BM25Retriever(index_path=bm25_index_path)
@@ -92,9 +98,9 @@ def create_retriever(mode: str | None = None) -> Any:
         else:
             logger.warning("BM25Retriever not available (install rank_bm25)")
 
-        # DashScope reranker
+        # DashScope reranker (qwen3-rerank, via API)
         reranker = None
-        if DashScopeReranker is not None:
+        if DashScopeReranker is not None and settings.dashscope_api_key:
             reranker = DashScopeReranker(
                 api_key=settings.dashscope_api_key,
                 model=settings.dashscope_rerank_model,
@@ -102,14 +108,17 @@ def create_retriever(mode: str | None = None) -> Any:
                 base_url=settings.dashscope_rerank_url,
             )
         else:
-            logger.warning("DashScopeReranker not available")
+            logger.warning("DashScopeReranker not available — no reranking")
 
         sqlite_retriever = SQLiteRetriever(
-            vector_searcher=SQLiteVectorSearcher(),
+            db_path=Path(db_path),
             bm25_retriever=bm25,
+            vector_searcher=DisabledVectorSearcher(),
         )
+        vector_searcher = MilvusVectorSearcher()
         return HybridRetriever(
             sqlite_retriever=sqlite_retriever,
+            vector_retriever=vector_searcher,
             cross_encoder=reranker,
         )
 

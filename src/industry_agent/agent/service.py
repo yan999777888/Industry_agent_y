@@ -698,8 +698,13 @@ def _final_answer_cleanup(answer: str) -> str:
     cleaned = cleaned.replace("■", "").strip()
     # Remove "Note:" label mid-answer
     cleaned = re.sub(r"\s+Note:\s*", " ", cleaned)
-    # Clean up extra spaces
+    # Clean up extra spaces and number formatting
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    # Remove spaces between CJK characters and numbers (e.g. "第 1 章" -> "第1章")
+    cleaned = re.sub(r"([一-鿿])\s+(\d)", r"\1\2", cleaned)
+    cleaned = re.sub(r"(\d)\s+([一-鿿])", r"\1\2", cleaned)
+    # Remove spaces within numbers (e.g. "1 234" -> "1234")
+    cleaned = re.sub(r"(\d)\s+(\d)", r"\1\2", cleaned)
     # Remove trailing punctuation artifacts
     cleaned = re.sub(r"[，,。.、]+\s*$", "", cleaned)
     # Ensure it ends with proper punctuation
@@ -734,7 +739,76 @@ def _match_smalltalk_reply(question: str) -> tuple[str, str] | None:
 
 
 # =========================================================================
-# LLM-powered query analysis, chunk judging, and VL image filtering
+# LLM answer-span extraction for chunk selection
+# =========================================================================
+
+_LLM_SPAN_EXTRACTION_PROMPT = """\
+你是一个产品文档分析专家。用户的问题是：
+{question}
+
+下面是检索到的文档片段，请逐一判断每个片段是否包含问题的答案。
+如果包含，原样引用直接回答问题的句子；如果不包含，标记为不相关。
+
+文档片段：
+{chunks}
+
+输出JSON数组，只包含 relevant 为 true 的条目（不要输出 irrelevant 的条目）：
+[
+  {{"index": 1, "relevant": true, "extract": "直接回答问题的原句"}},
+  {{"index": 3, "relevant": true, "extract": "另一条原文"}}
+]
+如果都不相关，返回空数组 []。不要输出任何其他内容。
+"""
+
+
+def _llm_extract_answer_spans(
+    question: str,
+    chunks: list[dict[str, Any]],
+    llm_client: LLMClient,
+) -> list[dict[str, Any]]:
+    """LLM reads each chunk's content and keeps only those containing answer spans."""
+    if not chunks:
+        return []
+    lines: list[str] = []
+    for i, c in enumerate(chunks, 1):
+        title = str(c.get("title", "")).strip()[:60]
+        text = str(c.get("text", "")).strip()[:400]
+        lines.append(f"[{i}] 标题：{title}\n内容：{text}")
+    prompt = _LLM_SPAN_EXTRACTION_PROMPT.format(
+        question=question,
+        chunks="\n\n".join(lines),
+    )
+    try:
+        result = llm_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=1024,
+        )
+        json_match = re.search(r"\[.*\]", result, re.DOTALL)
+        if json_match:
+            results = json.loads(json_match.group(0))
+            relevant_indices = {
+                r["index"] for r in results if r.get("relevant") and r.get("extract", "").strip()
+            }
+            selected = [
+                c for i, c in enumerate(chunks, 1)
+                if i in relevant_indices
+            ]
+            if selected:
+                # Always inject the highest-scoring chunk (by fusion_score)
+                # so Milvus-top chunks are never entirely dropped by the LLM gate.
+                seen_ids = {c.get("chunk_id", "") for c in selected}
+                for c in chunks:
+                    if c.get("chunk_id", "") not in seen_ids:
+                        selected.insert(0, c)
+                        break
+                logger.info("Span extraction: %d relevant / %d total (injected top chunk)", len(selected), len(chunks))
+                return selected
+    except Exception as exc:
+        logger.warning("LLM span extraction failed: %s", exc)
+    return chunks[:3]
+
+
 # =========================================================================
 
 _LLM_QUERY_ANALYSIS_SYSTEM_PROMPT = """\
@@ -777,80 +851,6 @@ def _llm_analyze_query(question: str, llm_client: LLMClient) -> dict[str, Any]:
         return {"product": None, "models": [], "keywords": [], "question_type": "fact"}
 
 
-_LLM_CHUNK_JUDGE_SYSTEM_PROMPT = """\
-你是一个文档相关性判定专家。判断每个文档片段是否与用户问题相关。
-相关定义：片段直接回答了问题的某个方面，或提供了解决问题所需的关键信息。
-只输出JSON（不要其他内容）：{"relevant_indices": [1, 3, 5]}
-"""
-
-
-def _llm_judge_chunks(
-    question: str,
-    chunks: list[dict[str, Any]],
-    llm_client: LLMClient,
-) -> list[int]:
-    """Ask LLM which chunks are relevant. Returns 0-based indices."""
-    if not chunks:
-        return []
-    lines: list[str] = []
-    for i, chunk in enumerate(chunks, 1):
-        title = str(chunk.get("title", "")).strip()[:80]
-        text = str(chunk.get("text", "")).strip()[:200]
-        lines.append(f"[{i}] 标题：{title}\n    内容：{text}")
-    prompt = f"用户问题：{question}\n\n文档片段列表：\n" + "\n\n".join(lines)
-    try:
-        result = llm_client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            system_prompt=_LLM_CHUNK_JUDGE_SYSTEM_PROMPT,
-            temperature=0.1,
-            max_tokens=256,
-        )
-        json_match = re.search(r"\{.*\}", result, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group(0))
-            indices = data.get("relevant_indices", [])
-            return [i - 1 for i in indices if 1 <= i <= len(chunks)]
-        return list(range(len(chunks)))
-    except Exception as exc:
-        logger.warning("LLM chunk judge failed: %s", exc)
-        return list(range(len(chunks)))
-
-
-_VL_IMAGE_CHECK_PROMPT = "这张图片是否与以下答案内容相关？只回答是或否。\n\n答案：{answer}"
-
-
-def _vl_filter_images(
-    answer: str,
-    image_ids: list[str],
-    llm_client: LLMClient,
-) -> list[str]:
-    """Use VL model to filter images by relevance to the answer."""
-    if not answer or not image_ids:
-        return image_ids
-    filtered: list[str] = []
-    for img_id in image_ids:
-        try:
-            img_path: Path = settings.image_dir / f"{img_id}.jpg"
-            if not img_path.exists():
-                img_path = settings.image_dir / f"{img_id}.png"
-            if not img_path.exists():
-                filtered.append(img_id)
-                continue
-            with open(img_path, "rb") as f:
-                img_b64 = base64.b64encode(f.read()).decode("utf-8")
-            result = llm_client.chat_with_image(
-                question=_VL_IMAGE_CHECK_PROMPT.format(answer=answer[:500]),
-                image_base64=img_b64,
-                temperature=0.1,
-                max_tokens=10,
-            )
-            if "是" in result.strip() or "yes" in result.strip().lower():
-                filtered.append(img_id)
-        except Exception as exc:
-            logger.warning("VL image check failed for %s: %s", img_id, exc)
-            filtered.append(img_id)
-    logger.info("VL image filter: %d -> %d images", len(image_ids), len(filtered))
-    return filtered
 
 
 # =========================================================================
@@ -1250,18 +1250,18 @@ def _select_grounded_manual_image_ids(
     evidence_chunks: list[dict[str, Any]],
     **kwargs: Any,
 ) -> list[str]:
-    """Collect image_ids from the most relevant evidence chunks.
-
-    Images come from the top evidence chunks only — the evidence ranking
-    already determines relevance.  No additional term-based filtering,
-    which proved unreliable (false positives from generic terms like 表带).
-    """
+    """Collect image_ids from the top evidence chunks by Milvus vector score."""
     if not evidence_chunks:
         return []
     selected: list[str] = []
     seen: set[str] = set()
-    # Top 4 chunks is sufficient — each chunk typically has 1-3 images.
-    for chunk in evidence_chunks[:4]:
+    # Top 3 by Milvus vector score
+    _sorted = sorted(
+        evidence_chunks,
+        key=lambda c: float(c.get("_vector_score") or 0.0),
+        reverse=True,
+    )
+    for chunk in _sorted[:3]:
         for img_id in _parse_json_list(chunk.get("image_ids")):
             normalized = str(img_id).strip()
             if normalized and normalized not in seen:
@@ -1516,12 +1516,9 @@ def _rank_evidence_chunks(
         row = dict(chunk)
         ce_score = float(row.get("_cross_encoder_score", 0.0))
         if ce_score > 0:
-            base_score = ce_score * 50.0  # reranker is authoritative
+            base_score = ce_score * 100.0  # reranker is authoritative
         else:
-            base_score = max(
-                float(row.get("_score", 0.0)),
-                float(row.get("_fusion_score", 0.0)),
-            )
+            base_score = _best_chunk_score(row)
         title = str(row.get("title", ""))
         text = str(row.get("text", ""))
         image_ids = _parse_json_list(row.get("image_ids"))
@@ -1580,10 +1577,10 @@ def _rank_evidence_chunks(
                         title_relevance_boost += 1.0
 
         if ce_score > 0:
-            # Reranker is primary, but add keyword safety net for cross-product chunks
-            # (e.g., camera battery manual for a drill query). Without this, the
-            # reranker under-scores product-mismatched but content-relevant chunks.
-            evidence_score = ce_score * 50.0
+            # Reranker is primary, plus vector / RRF from Milvus for semantic ranking
+            evidence_score = ce_score * 100.0
+            evidence_score += float(row.get("_vector_score") or 0.0) * 300.0
+            evidence_score += float(row.get("_rrf_score") or 0.0) * 500.0
             evidence_score += min(query_overlap * 0.6, 2.0)
             if image_ids and image_overlap >= 1:
                 evidence_score += 0.3
@@ -1812,7 +1809,7 @@ def _assemble_context(
         if is_english:
             # Use the best available score (cross-encoder for semantic, keyword for lexical)
             kw_score = float(chunk.get("_score", 0))
-            ce_score = float(chunk.get("_cross_encoder_score", 0)) * 50.0
+            ce_score = float(chunk.get("_cross_encoder_score", 0)) * 100.0
             display_score = max(kw_score, ce_score)
             header = f"[Ref{idx}] Product: {product} | Section: {title} | Score: {display_score:.1f}"
         else:
@@ -1831,6 +1828,11 @@ def _assemble_context(
         body = re.sub(r"(?:please\s+)?see\s+(?:the\s+)?(?:relevant\s+)?section[^.]*[.]?", "", body, flags=re.IGNORECASE)
         body = re.sub(r"for more\s+(?:information|details).*?(?:refer to|see|consult)[^.]*[.]?", "", body, flags=re.IGNORECASE)
         body = re.sub(r"\s{2,}", " ", body).strip()
+        # Strip <PIC> and [[PIC:...]] markers from chunk text — images are
+        # tracked separately via image_ids and appended below; raw markers
+        # leak into LLM output and are not useful as context.
+        body = re.sub(r"\s*<PIC>", "", body)
+        body = re.sub(r"\s*\[\[PIC:[^\]]*\]\]", "", body)
         if img_ids:
             if is_english:
                 body += f"\n(Related images: {', '.join(img_ids)})"
@@ -1872,7 +1874,17 @@ def _parse_json_list(value: Any) -> list[str]:
         parsed = json.loads(value)
         return [str(v) for v in parsed] if isinstance(parsed, list) else []
     except (json.JSONDecodeError, TypeError):
-        return []
+        pass
+    # Fallback: some image_ids are stored as Python literals (single quotes)
+    if isinstance(value, str):
+        try:
+            import ast
+            parsed = ast.literal_eval(value)
+            if isinstance(parsed, list):
+                return [str(v) for v in parsed]
+        except (ValueError, SyntaxError, MemoryError):
+            pass
+    return []
 
 
 def _load_image_index() -> dict[str, dict[str, str | bool]]:
@@ -1938,6 +1950,16 @@ def _merge_images(image_groups: list[list[dict[str, str | bool]]]) -> list[dict[
     return merged
 
 
+def _best_chunk_score(record: dict[str, Any]) -> float:
+    """Weighted combination favoring Milvus vector and reranker scores."""
+    return (
+        float(record.get("_vector_score") or 0.0) * 300.0 +
+        float(record.get("_cross_encoder_score") or 0.0) * 100.0 +
+        float(record.get("_rrf_score") or 0.0) * 1000.0 +
+        float(record.get("_score") or 0.0) * 0.3
+    )
+
+
 def _merge_retrieval_candidates(
     candidate_groups: list[tuple[str, list[dict[str, Any]]]],
 ) -> list[dict[str, Any]]:
@@ -1955,7 +1977,14 @@ def _merge_retrieval_candidates(
             if existing is None:
                 record["_retrieval_variants"] = [variant_name]
                 record["_variant_hits"] = 1
-                record["_fusion_score"] = round(float(record.get("_score", 0.0)) + variant_bonus, 3)
+                _new_fs = _best_chunk_score(record) + variant_bonus
+                logger.warning("BEST_SCORE chunk=%s score=%.2f _vec=%.4f _rrf=%.6f _ce=%.4f",
+                               chunk_id[:8],
+                               float(record.get("_score") or 0.0),
+                               float(record.get("_vector_score") or 0.0),
+                               float(record.get("_rrf_score") or 0.0),
+                               float(record.get("_cross_encoder_score") or 0.0))
+                record["_fusion_score"] = round(_new_fs, 3)
                 merged[chunk_id] = record
                 continue
 
@@ -1965,7 +1994,8 @@ def _merge_retrieval_candidates(
             existing["_retrieval_variants"] = existing_variants
             existing["_variant_hits"] = len(existing_variants)
             existing["_fusion_score"] = round(
-                max(float(existing.get("_fusion_score", 0.0)), float(record.get("_score", 0.0)) + variant_bonus)
+                max(float(existing.get("_fusion_score", 0.0)),
+                    _best_chunk_score(record) + variant_bonus)
                 + (1.2 if len(existing_variants) >= 2 else 0.0),
                 3,
             )
@@ -2142,8 +2172,9 @@ class AgentService:
         image_terms: list[str] | None = None,
         image_features: dict[str, list[str]] | None = None,
     ) -> dict[str, Any]:
-        # === Step 0: LLM query analysis — extract product, models, keywords ===
+        # === Step 0: LLM query analysis — supplementary search terms ===
         analysis = _llm_analyze_query(query, self.llm_client)
+        logger.info("LLM query analysis: %s", analysis)
         search_parts: list[str] = []
         if analysis.get("product"):
             search_parts.append(analysis["product"])
@@ -2153,14 +2184,13 @@ class AgentService:
             search_parts.extend(analysis["keywords"])
         enhanced_query = " ".join(search_parts) if search_parts else query
 
-        # 1. Retrieve with LLM-enhanced query
+        # 1. Retrieve — original query is primary, LLM-enhanced as supplement
         candidate_groups: list[tuple[str, list[dict[str, Any]]]] = [
-            ("llm_enhanced", self.retriever.search(enhanced_query, limit=RETRIEVAL_LIMIT))
+            ("text_only", self.retriever.search(query, limit=RETRIEVAL_LIMIT))
         ]
-        # Keep original-query retrieval as fallback (catches cases LLM missed)
         if enhanced_query != query:
             candidate_groups.append(
-                ("original", self.retriever.search(query, limit=RETRIEVAL_LIMIT))
+                ("llm_enhanced", self.retriever.search(enhanced_query, limit=RETRIEVAL_LIMIT))
             )
 
         # Optional: LLM query expansion for better recall (Phase 4)
@@ -2194,12 +2224,10 @@ class AgentService:
 
         chunks = _merge_retrieval_candidates(candidate_groups)
 
-        # === Step 1b: LLM chunk relevance judge ===
-        top_for_judge = chunks[:10] if len(chunks) > 10 else chunks
-        relevant_indices = _llm_judge_chunks(query, top_for_judge, self.llm_client)
-        evidence_chunks = [top_for_judge[i] for i in relevant_indices if 0 <= i < len(top_for_judge)]
-        if not evidence_chunks and chunks:
-            evidence_chunks = chunks[:5]
+        # === Step 1b: LLM extracts answer spans from candidate chunks ===
+        top_candidates = chunks[:15]
+        evidence_chunks = _llm_extract_answer_spans(query, top_candidates, self.llm_client)
+        logger.info("Span extraction: %d/%d chunks kept", len(evidence_chunks), len(top_candidates))
 
         if not evidence_chunks:
             return {
@@ -2291,26 +2319,31 @@ class AgentService:
         # Final cleanup
         answer = _final_answer_cleanup(answer)
         answer = _localize_answer(answer, query)
+        # Strip any [[PIC:id]] markers the LLM may have added.
+        answer = re.sub(r"\s*\[\[PIC:[^\]]+\]\]", "", answer).strip()
+        # Also strip bare <PIC> tags from chunk text that leaked through.
+        answer = re.sub(r"\s*<PIC>", "", answer).strip()
+        grounded_image_ids = []
+        seen: set[str] = set()
 
-        # Embed answer for semantic image selection
-        answer_embedding: list[float] | None = None
-        if self.dashscope_embedder is not None and self.image_desc_embeddings is not None:
-            try:
-                answer_embedding = self.dashscope_embedder.embed_query(answer[:1024])
-            except Exception as exc:
-                logger.warning("Failed to embed answer for image grounding: %s", exc)
-
-        grounded_image_ids = _select_grounded_manual_image_ids(
-            query=query,
-            answer=answer,
-            evidence_chunks=evidence_chunks,
-            image_terms=image_terms,
-            image_features=image_features,
-            image_index=self.image_index,
-            answer_embedding=answer_embedding,
-            image_desc_embeddings=self.image_desc_embeddings,
+        # ── Image selection (top-3 by Milvus vector score) ────────────
+        _vec_sorted = sorted(
+            evidence_chunks,
+            key=lambda c: float(c.get("_vector_score") or 0.0),
+            reverse=True,
         )
-        grounded_image_ids = _vl_filter_images(answer, grounded_image_ids, self.llm_client)
+        for chunk in _vec_sorted[:3]:
+            for img_id in _parse_json_list(chunk.get("image_ids")):
+                normalized = str(img_id).strip()
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    grounded_image_ids.append(normalized)
+
+        # 2) Fallback: still no images — use evidence-only image selector
+        if not grounded_image_ids:
+            grounded_image_ids = _select_grounded_manual_image_ids(
+                evidence_chunks=evidence_chunks,
+            )
         images = _image_details(grounded_image_ids, self.image_index)
 
         return {
@@ -2325,6 +2358,8 @@ class AgentService:
                 "evidence_count": len(evidence_chunks),
                 "top_score": evidence_chunks[0].get("_score", 0) if evidence_chunks else 0,
                 "top_evidence_score": evidence_chunks[0].get("_evidence_score", 0) if evidence_chunks else 0,
+                "top_reranker_score": evidence_chunks[0].get("_cross_encoder_score", 0) if evidence_chunks else 0,
+                "top_reranker_rank": evidence_chunks[0].get("_reranker_rank", 0) if evidence_chunks else 0,
                 "top_title": evidence_chunks[0].get("title", "") if evidence_chunks else "",
                 "top_product": evidence_chunks[0].get("product_name", "") if evidence_chunks else "",
                 "query_variants": [name for name, _ in candidate_groups],
@@ -2345,6 +2380,8 @@ class AgentService:
                 "grounded_image_ids": grounded_image_ids,
                 "candidate_titles": [str(chunk.get("title", "")) for chunk in chunks[:5]],
                 "selected_titles": [str(chunk.get("title", "")) for chunk in evidence_chunks],
+                "selected_reranker_scores": [float(chunk.get("_cross_encoder_score", 0)) for chunk in evidence_chunks],
+                "selected_reranker_ranks": [float(chunk.get("_reranker_rank", 0)) for chunk in evidence_chunks],
                 "prompt": {
                     "rule_count": prompt_result.rule_count,
                     "has_context": prompt_result.has_context,
@@ -2840,8 +2877,8 @@ class AgentService:
         try:
             content = self.llm_client.chat(
                 messages,
-                temperature=0.3,
-                max_tokens=2048,
+                temperature=0.5,
+                max_tokens=4096,
                 strip_think=True,
             )
             return content.strip() if content.strip() else "模型未返回有效回答。"

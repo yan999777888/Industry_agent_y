@@ -131,17 +131,17 @@ class DashScopeEmbeddingModel:
             "model": self.model,
             "input": {
                 "texts": valid_texts,
+                "dimensions": self.dimensions,
             },
             "parameters": {
                 "text_type": text_type,
-                "dimensions": self.dimensions,
             },
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        url = self._embed_url
+        url = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
 
         last_exc: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
@@ -176,15 +176,12 @@ class DashScopeEmbeddingModel:
                 response.raise_for_status()
                 data = response.json()
 
-                # Native format: output.embeddings[*].embedding -> list[float]
-                embeddings = data.get("output", {}).get("embeddings", [])
-                # Try both "embedding" and "text_embedding" field names
-                first = embeddings[0] if embeddings else {}
-                vec_key = "embedding" if "embedding" in first else "text_embedding"
-                return [
-                    e[vec_key]
-                    for e in sorted(embeddings, key=lambda x: x.get("embedding_index", 0))
-                ]
+                # Native format: output.embeddings[*].embedding
+                embeddings = sorted(
+                    data.get("output", {}).get("embeddings", []),
+                    key=lambda x: int(x.get("embedding_index", 0)),
+                )
+                return [e["embedding"] for e in embeddings]
 
             except (AuthError, DashScopeError):
                 raise
@@ -264,23 +261,58 @@ class DashScopeReranker:
         if not to_score:
             return candidates
 
+        # Build adjacency map from candidate list for short-chunk context padding
+        adj_context: dict[str, tuple[str, str]] = {}
+        by_manual: dict[str, list[dict[str, Any]]] = {}
+        for c in candidates:
+            mid = str(c.get("manual_id") or "")
+            if mid:
+                by_manual.setdefault(mid, []).append(c)
+        for group in by_manual.values():
+            group.sort(key=lambda x: int(x.get("chunk_index", 0) or 0))
+            for i, c in enumerate(group):
+                prev_text = group[i - 1].get("text", "") if i > 0 else ""
+                next_text = group[i + 1].get("text", "") if i < len(group) - 1 else ""
+                adj_context[str(c.get("chunk_id", ""))] = (prev_text, next_text)
+
         # Build document strings (title + text, truncated for API limits)
+        # Short chunks (<300 chars) get context padding from adjacent candidates
         documents: list[str] = []
         for c in to_score:
             title = (c.get("title") or "").strip()
             text = (c.get("text") or "").strip()
+            char_count = c.get("char_count", 0) or len(text)
+            if isinstance(char_count, (int, float)) and 0 < char_count < 300:
+                prev_text, next_text = adj_context.get(str(c.get("chunk_id", "")), ("", ""))
+                if prev_text:
+                    text = f"{prev_text[-150:]} {text}"
+                if next_text:
+                    text = f"{text} {next_text[:150]}"
             combined = f"{title} {text}".strip()
             # qwen3-rerank supports 4K tokens per doc; 2048 chars is safe
             documents.append(combined[:2048])
 
         try:
             scores = self._call_rerank_api(query, documents)
+            logger.warning("DashScope reranked %d docs for query='%s' (top_score=%.4f)",
+                           len(scores), query[:40], scores[0] if scores else 0)
         except Exception as exc:
             logger.warning("DashScope reranking failed (using fallback order): %s", exc)
             return candidates
 
         for chunk, score in zip(to_score, scores):
             chunk["_cross_encoder_score"] = round(float(score), 6)
+
+        # Short chunk boost — counteract reranker length bias:
+        #   adjusted = original × (1 + α × max(0, 1 - len/100))
+        # where α=1.0 gives up to 2× multiplier for very short chunks.
+        for chunk in to_score:
+            cc = chunk.get("char_count", 0)
+            if isinstance(cc, (int, float)) and cc > 0:
+                boost = max(0.0, 1.0 - cc / 100.0) * 1.0
+                chunk["_cross_encoder_score"] = round(
+                    float(chunk["_cross_encoder_score"]) * (1.0 + boost), 6
+                )
 
         to_score.sort(
             key=lambda c: float(c.get("_cross_encoder_score", 0.0)),

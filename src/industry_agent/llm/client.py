@@ -142,7 +142,7 @@ class LLMClient:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": content})
 
-        response = self.client.chat.completions.create(
+        kwargs: dict[str, Any] = dict(
             model=self.vision_model or self.model,
             messages=messages,
             temperature=temperature,
@@ -150,6 +150,9 @@ class LLMClient:
             top_p=0.95,
             stream=False,
         )
+        if settings.dashscope_enabled:
+            kwargs["extra_body"] = {"enable_thinking": False}
+        response = self.client.chat.completions.create(**kwargs)
         return _strip_thinking(response.choices[0].message.content or "")
 
     def is_available(self) -> bool:
@@ -164,11 +167,14 @@ class LLMClient:
             if self.is_openai_compatible:
                 if not self.api_key:
                     return False
-                self.client.chat.completions.create(
+                kwargs: dict[str, Any] = dict(
                     model=self.model,
                     messages=[{"role": "user", "content": "hi"}],
                     max_completion_tokens=5,
                 )
+                if settings.dashscope_enabled:
+                    kwargs["extra_body"] = {"enable_thinking": False}
+                self.client.chat.completions.create(**kwargs)
                 return True
         except Exception:
             return False
@@ -212,7 +218,7 @@ class LLMClient:
         model: str | None,
         strip_think: bool,
     ) -> str:
-        response = self.client.chat.completions.create(
+        kwargs: dict[str, Any] = dict(
             model=model or self.model,
             messages=messages,
             temperature=temperature,
@@ -222,5 +228,9 @@ class LLMClient:
             presence_penalty=0,
             stream=False,
         )
+        # DashScope qwen3 models require enable_thinking=false for non-streaming
+        if settings.dashscope_enabled:
+            kwargs["extra_body"] = {"enable_thinking": False}
+        response = self.client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or ""
         return _strip_thinking(content) if strip_think else content.strip()

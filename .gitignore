@@ -18,4 +18,9 @@ debug_*.json
 test_response*.json
 analysis_output*.txt
 _tmp_*.py
+tmp_*.py
 ./TODO.md
+
+# Local Milvus vector databases
+milvus.db/
+milvus_test.db/

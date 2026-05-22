@@ -55,6 +55,7 @@ class ResponseData(BaseModel):
     references: list[ReferenceItem] = Field(default_factory=list)
     confidence: float = 0.0
     timestamp: int
+    retrieval_debug: dict = Field(default_factory=dict)
 
 
 class ChatResponse(BaseModel):
@@ -114,6 +115,10 @@ def create_app() -> FastAPI:
         payload = report.to_dict()
         payload["agent_backend"] = getattr(app.state, "agent_backend", settings.agent_backend)
         payload["llm_backend"] = settings.llm_backend
+        # Add retrieval channels status
+        retriever = getattr(app.state, "retriever", None)
+        if retriever is not None and hasattr(retriever, "retrieval_status"):
+            payload["retrieval"] = retriever.retrieval_status()
         return payload
 
     @app.post(
@@ -157,6 +162,8 @@ def create_app() -> FastAPI:
         except FileNotFoundError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
+            import traceback
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=f"chat failed: {exc}") from exc
 
         return ChatResponse(
@@ -173,6 +180,7 @@ def create_app() -> FastAPI:
                 ],
                 confidence=resp.confidence,
                 timestamp=int(time.time()),
+                retrieval_debug=resp.retrieval_debug,
             )
         )
 

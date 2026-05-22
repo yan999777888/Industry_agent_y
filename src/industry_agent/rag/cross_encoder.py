@@ -26,13 +26,20 @@ class CrossEncoderReranker:
         self,
         model_name: str | None = None,
         top_k: int = 30,
-        device: str = "cpu",
+        device: str | None = None,
     ):
         self.model_name = model_name or os.getenv(
             "INDUSTRY_AGENT_CROSS_ENCODER_MODEL", DEFAULT_CROSS_ENCODER
         )
         self.top_k = top_k
-        self.device = device
+        if device is None:
+            try:
+                import torch
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            except ImportError:
+                self.device = "cpu"
+        else:
+            self.device = device
         self._model = None
 
     @property
@@ -62,10 +69,32 @@ class CrossEncoderReranker:
         if not to_score:
             return candidates
 
-        pairs = [
-            (query, f"{c.get('title', '')} {c.get('text', '')}"[:1024])
-            for c in to_score
-        ]
+        # Build adjacency map for short-chunk context padding
+        adj_context: dict[str, tuple[str, str]] = {}
+        by_manual: dict[str, list[dict[str, Any]]] = {}
+        for c in candidates:
+            mid = str(c.get("manual_id") or "")
+            if mid:
+                by_manual.setdefault(mid, []).append(c)
+        for group in by_manual.values():
+            group.sort(key=lambda x: int(x.get("chunk_index", 0) or 0))
+            for i, c in enumerate(group):
+                prev_text = group[i - 1].get("text", "") if i > 0 else ""
+                next_text = group[i + 1].get("text", "") if i < len(group) - 1 else ""
+                adj_context[str(c.get("chunk_id", ""))] = (prev_text, next_text)
+
+        pairs = []
+        for c in to_score:
+            title = str(c.get("title", "") or "")
+            text = str(c.get("text", "") or "")
+            char_count = c.get("char_count", 0) or len(text)
+            if isinstance(char_count, (int, float)) and 0 < char_count < 300:
+                prev_text, next_text = adj_context.get(str(c.get("chunk_id", "")), ("", ""))
+                if prev_text:
+                    text = f"{prev_text[-150:]} {text}"
+                if next_text:
+                    text = f"{text} {next_text[:150]}"
+            pairs.append((query, f"{title} {text}"[:1024]))
 
         try:
             scores = self.model.predict(pairs, batch_size=8, show_progress_bar=False)
@@ -75,6 +104,15 @@ class CrossEncoderReranker:
 
         for chunk, score in zip(to_score, scores):
             chunk["_cross_encoder_score"] = round(float(score), 6)
+
+        # Short chunk boost — counteract cross-encoder length bias
+        for chunk in to_score:
+            cc = chunk.get("char_count", 0)
+            if isinstance(cc, (int, float)) and cc > 0:
+                boost = max(0.0, 1.0 - cc / 100.0) * 1.0
+                chunk["_cross_encoder_score"] = round(
+                    float(chunk["_cross_encoder_score"]) * (1.0 + boost), 6
+                )
 
         to_score.sort(
             key=lambda c: float(c.get("_cross_encoder_score", 0.0)),

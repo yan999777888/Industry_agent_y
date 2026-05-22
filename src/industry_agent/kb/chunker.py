@@ -165,13 +165,14 @@ def chunk_manual(
     *,
     project_root: Path,
     max_chars: int = 1200,
+    min_chars: int = 150,
 ) -> list[KnowledgeChunk]:
     """Create ordered chunks from a marked manual text."""
 
     chunks: list[KnowledgeChunk] = []
     section_plans = _prepare_section_plans(manual, marked_text)
     for plan in section_plans:
-        for part in _split_to_size(plan.section_text, max_chars=max_chars, semantic_type=plan.semantic_type):
+        for part in _split_to_size(plan.section_text, max_chars=max_chars, semantic_type=plan.semantic_type, min_chars=min_chars):
             clean_text = _strip_markers(part)
             if not clean_text:
                 continue
@@ -261,7 +262,7 @@ def _split_sections(text: str) -> list[str]:
     return sections
 
 
-def _split_to_size(section_text: str, *, max_chars: int, semantic_type: str) -> list[str]:
+def _split_to_size(section_text: str, *, max_chars: int, semantic_type: str, min_chars: int = 150) -> list[str]:
     units = _merge_picture_neighborhood(_section_units(section_text, semantic_type=semantic_type))
     chunks: list[str] = []
     buffer: list[str] = []
@@ -288,7 +289,11 @@ def _split_to_size(section_text: str, *, max_chars: int, semantic_type: str) -> 
 
     if buffer:
         chunks.append("\n".join(buffer).strip())
-    return [chunk for chunk in chunks if chunk.strip()]
+    chunks = [chunk for chunk in chunks if chunk.strip()]
+    # Merge adjacent undersized chunks so no fragment falls below min_chars
+    if min_chars > 0:
+        return _merge_undersized(chunks, min_chars=min_chars, max_chars=max_chars)
+    return chunks
 
 
 def _section_units(section_text: str, *, semantic_type: str) -> list[str]:
@@ -465,6 +470,80 @@ def _fit_units_within_limit(units: list[str], *, max_chars: int) -> list[str]:
 
 def _hard_split(text: str, *, max_chars: int) -> list[str]:
     return [text[index : index + max_chars].strip() for index in range(0, len(text), max_chars)]
+
+
+def _merge_undersized(chunks: list[str], *, min_chars: int, max_chars: int = 1200) -> list[str]:
+    """Merge adjacent chunks below min_chars into neighbors.
+
+    Prevents tiny fragments that are hard to retrieve via keyword/vector search.
+    PIC markers are preserved through the text merge.
+    """
+    if not chunks:
+        return []
+    merged: list[str] = []
+    pending = chunks[0]
+    for chunk in chunks[1:]:
+        if len(pending) < min_chars:
+            # Merge pending into current chunk
+            pending = f"{pending}\n{chunk}"
+        elif len(chunk) < min_chars and len(pending) + len(chunk) < max_chars * 1.2:
+            # Chunk is short and merging won't make pending too large
+            pending = f"{pending}\n{chunk}"
+        else:
+            merged.append(pending)
+            pending = chunk
+    if pending:
+        if merged and len(pending) < min_chars and len(merged[-1]) + len(pending) < max_chars * 1.5:
+            merged[-1] = f"{merged[-1]}\n{pending}"
+        else:
+            merged.append(pending)
+    return merged
+
+
+def _merge_two_chunks(a: KnowledgeChunk, b: KnowledgeChunk) -> KnowledgeChunk:
+    """Merge two adjacent chunks into one, keeping first chunk's identity fields."""
+    combined_text = f"{a.text}\n{b.text}".strip()
+    combined_image_ids = _unique_in_order(a.image_ids + b.image_ids)
+    return KnowledgeChunk(
+        chunk_id=a.chunk_id,
+        manual_id=a.manual_id,
+        product_name=a.product_name,
+        source_path=a.source_path,
+        title=a.title,
+        text=combined_text,
+        image_ids=combined_image_ids,
+        section_index=a.section_index,
+        chunk_index=a.chunk_index,
+        char_count=len(combined_text),
+        metadata=a.metadata,
+    )
+
+
+def _merge_chunks_post_process(chunks: list[KnowledgeChunk], *, min_chars: int, max_chars: int = 1200) -> list[KnowledgeChunk]:
+    """Merge adjacent short chunks across section boundaries (post-processing pass)."""
+    if min_chars <= 0 or not chunks:
+        return chunks
+    merged: list[KnowledgeChunk] = []
+    carry = chunks[0]
+    for chunk in chunks[1:]:
+        if carry.char_count < min_chars:
+            carry = _merge_two_chunks(carry, chunk)
+        elif chunk.char_count < min_chars and carry.char_count + chunk.char_count <= int(max_chars * 1.3):
+            carry = _merge_two_chunks(carry, chunk)
+        else:
+            merged.append(carry)
+            carry = chunk
+    if carry:
+        if merged and carry.char_count < min_chars and merged[-1].char_count + carry.char_count <= int(max_chars * 1.3):
+            merged[-1] = _merge_two_chunks(merged[-1], carry)
+        else:
+            merged.append(carry)
+
+    # Renumber chunk_index and regenerate chunk_id
+    for i, chunk in enumerate(merged):
+        chunk.chunk_index = i
+        chunk.chunk_id = _make_chunk_id(chunk.manual_id, i, chunk.text)
+    return merged
 
 
 def _strip_heading_line(section_text: str) -> str:
