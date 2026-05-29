@@ -3,11 +3,96 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from industry_agent.kb.models import KnowledgeChunk, ManualDocument
+
+# Optional: local embedding model for semantic chunking
+# Disabled by default: requires sentence-transformers which may not be available
+_SEMANTIC_CHUNKING = os.getenv("KB_SEMANTIC_CHUNKING", "0").strip().lower() in ("1", "true", "yes")
+_SEMANTIC_MODEL_NAME = os.getenv("KB_EMBEDDING_MODEL", "BAAI/bge-m3")
+_SEMANTIC_SIM_THRESHOLD = float(os.getenv("KB_SEMANTIC_THRESHOLD", "0.55"))
+_SEMANTIC_MODEL = None  # lazy-loaded
+
+# English-specific chunking constants
+_EN_MAX_CHARS = int(os.getenv("KB_EN_MAX_CHARS", "1600"))
+_EN_MIN_CHARS = int(os.getenv("KB_EN_MIN_CHARS", "200"))
+_EN_MIN_MEANINGFUL_CHARS = int(os.getenv("KB_EN_MIN_MEANINGFUL_CHARS", "40"))
+_EN_WORD_OVERLAP_THRESHOLD = 0.25
+_EN_OCR_FIX = os.getenv("KB_EN_OCR_FIX", "1").strip().lower() in ("1", "true", "yes")
+
+_OCR_FIX_PROMPT = """Fix ALL OCR/scanning errors in this English text. The text was extracted from a PDF manual by OCR and contains damaged words. Your job is to restore it to proper English. This text will be used to build a knowledge base (RAG) for product technical support, so every sentence must be clean, complete, and factually accurate.
+
+Common error patterns to fix:
+- Split words: "be en"→"been", "the ir"→"their", "a ny"→"any", "in a re as"→"in areas"
+- Merged words: "topof"→"top of", "Thereareno"→"There are no"
+- Character swaps: "fo"→"to", "fh"→"th", "ou f"→"out"
+- Nonsense strings: "i Ad a pf local iz a fi on"→ try to reconstruct what makes sense in context
+- Preserve product names, model numbers, technical terms — only fix words that are clearly damaged
+
+Example input:
+"Before using vacuum, pickup objects like clothing loose papers, pull cords fo be supervised fo ensure f hey do n of play with vacuum. Thereareno user-serviceable parts in side. Clean i Ad a pf local iz a fi on camera with a cloth."
+
+Example output:
+"Before using vacuum, pick up objects like clothing, loose papers, pull cords to be supervised to ensure they do not play with vacuum. There are no user-serviceable parts inside. Clean with a cloth."
+
+Rules:
+- Fix every word that looks damaged — no word should be left garbled
+- Keep the same structure (headings, line breaks, numbering) unchanged
+- Output ONLY the corrected text, no explanation
+
+Text:
+{text}
+
+Corrected:"""
+
+
+def _fix_english_ocr_llm(text: str) -> str:
+    """Clean English OCR errors using the configured LLM."""
+    text = text.strip()
+    if not text or len(text) < 30:
+        return text
+    try:
+        import httpx
+        api_key = os.getenv("KB_OCR_API_KEY", "sk-afb92d9130384509885c6de4a50ddf9a")
+        base_url = os.getenv("KB_OCR_BASE_URL", "https://api.deepseek.com/v1")
+        model = os.getenv("KB_OCR_MODEL", "deepseek-v4-flash")
+        if not api_key:
+            return text
+        # Only fix if there are clear OCR indicators (random spaces in short words)
+        short_broken = len(re.findall(r'\b[a-z]{1,2}\s[a-z]{1,4}\s[a-z]{1,2}\b', text, re.IGNORECASE))
+        if short_broken < 3:
+            return text
+        logger.warning("OCR_FIX: sending %d chars to %s", len(text[:4000]), model)
+        resp = httpx.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": _OCR_FIX_PROMPT.format(text=text[:4000])}],
+                "temperature": 0.05, "max_tokens": 4096,
+            },
+            timeout=120.0,
+        )
+        resp.raise_for_status()
+        result = resp.json()["choices"][0]["message"]["content"].strip()
+        # Remove common prefixes the LLM might add
+        for prefix in ("Corrected:", "Corrected text:", "Fixed text:"):
+            if result.startswith(prefix):
+                result = result[len(prefix):].strip()
+        if len(result) >= len(text) * 0.5:
+            return result
+    except Exception as exc:
+        logger.warning("OCR fix failed: %s", exc)
+    return text
+
+logger = logging.getLogger(__name__)
 
 PIC_MARKER_RE = re.compile(r"\[\[PIC:([^\]]+)\]\]")
 PIC_MISSING_RE = re.compile(r"\[\[PIC_MISSING\]\]")
@@ -170,15 +255,31 @@ def chunk_manual(
     """Create ordered chunks from a marked manual text."""
 
     chunks: list[KnowledgeChunk] = []
+    is_english = manual.manual_id.startswith("汇总英文手册")
     section_plans = _prepare_section_plans(manual, marked_text)
+    if is_english:
+        splitter = _split_english  # English: word-overlap semantic boundaries
+    elif _SEMANTIC_CHUNKING:
+        splitter = _split_semantic  # Embedding-based semantic boundaries
+    else:
+        splitter = _split_to_size  # Size-based greedy packing
     for plan in section_plans:
-        for part in _split_to_size(plan.section_text, max_chars=max_chars, semantic_type=plan.semantic_type, min_chars=min_chars):
-            clean_text = _strip_markers(part)
+        if is_english and _EN_OCR_FIX:
+            plan.section_text = _fix_english_ocr_llm(plan.section_text)
+        if is_english:
+            parts = splitter(plan.section_text, max_chars=_EN_MAX_CHARS, min_chars=_EN_MIN_CHARS)
+        else:
+            parts = splitter(plan.section_text, max_chars=max_chars, semantic_type=plan.semantic_type, min_chars=min_chars)
+        for part in parts:
+            clean_text = _embed_image_anchors(part, is_english=is_english)
             if not clean_text:
                 continue
 
             image_ids = _unique_in_order(PIC_MARKER_RE.findall(part))
             if _is_low_value_fragment(clean_text, image_ids=image_ids):
+                continue
+            # Filter truly empty chunks (no text, no images)
+            if not image_ids and not re.sub(r'\s', '', clean_text):
                 continue
             chunk_index = len(chunks)
             chunk_id = _make_chunk_id(manual.manual_id, chunk_index, clean_text)
@@ -192,11 +293,23 @@ def chunk_manual(
                 section_domain_inferred=plan.domain_inferred,
                 domain_segment_index=plan.domain_segment_index,
             )
+            # English: use domain_label as actual product name
+            _product = manual.product_name
+            if is_english and plan.domain_label:
+                _domain_map = {
+                    'boat': 'boat', 'camera': 'camera', 'motherboard': 'motherboard',
+                    'snowmobile': 'snowmobile', 'lawn_mower': 'lawn mower', 'landline': 'landline phone',
+                    'microwave': 'microwave', 'grill': 'grill', 'airfryer': 'air fryer',
+                    'television': 'television', 'ereader': 'e-reader', 'pressure_cooker': 'pressure cooker',
+                    'fax': 'fax machine', 'toothbrush': 'toothbrush', 'washing_machine': 'washing machine',
+                    'coffee_machine': 'coffee machine', 'vacuum': 'vacuum cleaner', 'earphone': 'earphone',
+                }
+                _product = _domain_map.get(plan.domain_label, manual.product_name)
             chunks.append(
                 KnowledgeChunk(
                     chunk_id=chunk_id,
                     manual_id=manual.manual_id,
-                    product_name=manual.product_name,
+                    product_name=_product,
                     source_path=str(manual.source_path.relative_to(project_root)),
                     title=plan.title,
                     text=clean_text,
@@ -207,7 +320,55 @@ def chunk_manual(
                     metadata=metadata,
                 )
             )
-    return chunks
+    # English: generate child chunks (sentences) for fine-grained vector retrieval.
+    # Each child points to its parent via metadata.parent_chunk_id.
+    if is_english:
+        _parent_index = len(chunks)
+        for pi in range(_parent_index):
+            parent = chunks[pi]
+            text_clean = re.sub(r'\[IMG_\d+_[a-zA-Z0-9_\-]+\]', '', parent.text).strip()
+            sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+(?=[A-Z"])', text_clean) if s.strip()]
+            if len(sents) < 2:
+                continue
+            for si, sent in enumerate(sents):
+                if len(sent) < 30:
+                    continue
+                child_id = f"{parent.chunk_id}_c{si}"
+                child_meta = dict(parent.metadata)
+                child_meta["parent_chunk_id"] = parent.chunk_id
+                child_meta["is_child"] = True
+                child_meta["parent_text"] = parent.text
+                child_meta["parent_image_ids"] = parent.image_ids
+                chunks.append(KnowledgeChunk(
+                    chunk_id=child_id,
+                    manual_id=parent.manual_id,
+                    product_name=parent.product_name,
+                    source_path=parent.source_path,
+                    title=parent.title,
+                    text=sent,
+                    image_ids=[],
+                    section_index=parent.section_index,
+                    chunk_index=len(chunks),
+                    char_count=len(sent),
+                    metadata=child_meta,
+                ))
+
+    # Merge pure-image chunks into the preceding chunk
+    merged: list[KnowledgeChunk] = []
+    for c in chunks:
+        text_only = re.sub(r'\[IMG_\d+_[a-zA-Z0-9_\-]+\]', '', c.text).strip()
+        if not text_only and c.image_ids and merged:
+            prev = merged[-1]
+            for img in c.image_ids:
+                if img not in prev.image_ids:
+                    prev.image_ids.append(img)
+                    prev.text += f'\n[IMG_{prev.image_ids.index(img)}_{img}]'
+                    prev.char_count = len(prev.text)
+                    prev.metadata.setdefault("image_count", 0)
+                    prev.metadata["image_count"] = len(prev.image_ids)
+        else:
+            merged.append(c)
+    return merged
 
 
 def _prepare_section_plans(manual: ManualDocument, marked_text: str) -> list[SectionPlan]:
@@ -219,7 +380,7 @@ def _prepare_section_plans(manual: ManualDocument, marked_text: str) -> list[Sec
         title = _derive_title(section_text)
         # Strip the first # heading line from body — title is already captured
         body_text = _strip_heading_line(section_text)
-        clean_text = _strip_markers(body_text)
+        clean_text = _embed_image_anchors(body_text)
         semantic_type = _detect_semantic_type(
             title=title,
             text=clean_text,
@@ -262,8 +423,115 @@ def _split_sections(text: str) -> list[str]:
     return sections
 
 
-def _split_to_size(section_text: str, *, max_chars: int, semantic_type: str, min_chars: int = 150) -> list[str]:
-    units = _merge_picture_neighborhood(_section_units(section_text, semantic_type=semantic_type))
+def _add_english_sentences(text: str, out: list[str]) -> None:
+    """Split English prose into sentences, respecting abbreviations."""
+    if not text.strip():
+        return
+    _abbr = r'(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Ave|Rd|Blvd|vs|etc|e\.g|i\.e|fig|Fig|approx|No)'
+    pattern = re.compile(
+        rf'(?:(?:{_abbr})|[^.!?\n])+'
+        rf'(?:[.!?]|$)(?:\s|(?=\n|$))',
+        re.MULTILINE,
+    )
+    for m in pattern.finditer(text):
+        sent = m.group().strip()
+        if sent:
+            out.append(sent)
+
+
+def _split_english(section_text: str, *, max_chars: int = _EN_MAX_CHARS, min_chars: int = _EN_MIN_CHARS) -> list[str]:
+    """Split English text into topically coherent chunks using sentence boundaries and size limits."""
+    # Split into proper English sentences
+    sentences: list[str] = []
+    position = 0
+    for m in PIC_MARKER_RE.finditer(section_text):
+        _add_english_sentences(section_text[position:m.start()], sentences)
+        sentences.append(m.group(0))
+        position = m.end()
+    _add_english_sentences(section_text[position:], sentences)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    if not sentences:
+        return []
+
+    # Compute word overlap as topic-shift indicator (soft signal)
+    def _word_terms(t: str) -> set[str]:
+        words = re.findall(r'[a-zA-Z0-9]{3,}', t.lower())
+        return set(words) | {f"{words[i]}_{words[i+1]}" for i in range(len(words) - 1)}
+
+    s_terms = [_word_terms(s) for s in sentences]
+    overlaps: list[float] = []
+    for i in range(len(sentences) - 1):
+        a, b = s_terms[i], s_terms[i + 1]
+        overlaps.append(len(a & b) / max(len(a | b), 1.0) if a and b else 0.0)
+    # Mark boundary only if overlap is extremely low AND buffer is substantial
+    boundaries: set[int] = set()
+    for i, ov in enumerate(overlaps):
+        if ov < 0.08 and i > 0:
+            boundaries.add(i)
+
+    # Greedy pack with sentence-boundary backtracking: never cut mid-sentence
+    def _flush_backtrack(buf: list[str]) -> tuple[str, list[str]]:
+        """Flush buf at last sentence boundary; return (chunk_text, carryover)."""
+        if len(buf) <= 1:
+            return " ".join(buf), []
+        text = " ".join(buf)
+        # Find all sentence boundaries after the halfway point
+        mid = len(text) // 2
+        best = -1
+        for m in re.finditer(r'(?<=[.!?])\s+(?=[A-Z"[{\(])|(?<=\n)\s*', text):
+            if m.end() >= mid:
+                best = m.end()
+        if best > 0:
+            return text[:best].strip(), [text[best:].strip()]
+        return text, []
+
+    chunks: list[str] = []
+    buf: list[str] = []
+    buf_len = 0
+    for i, sent in enumerate(sentences):
+        s_len = len(sent)
+        if s_len > max_chars:
+            if buf:
+                flushed, carry = _flush_backtrack(buf)
+                if flushed: chunks.append(flushed)
+                buf = carry if carry else []
+                buf_len = sum(len(s) for s in buf) if carry else 0
+            chunks.append(sent)
+            continue
+        next_len = buf_len + s_len + 1
+        force_split = (i - 1) in boundaries and buf_len >= min_chars and next_len > max_chars * 0.7
+        if force_split:
+            flushed, carry = _flush_backtrack(buf)
+            if flushed: chunks.append(flushed)
+            buf = carry if carry else []
+            buf_len = sum(len(s) for s in buf) if carry else 0
+        if buf_len + s_len + 1 > max_chars:
+            flushed, carry = _flush_backtrack(buf)
+            if flushed: chunks.append(flushed)
+            buf = carry if carry else []
+            buf_len = sum(len(s) for s in buf) if carry else 0
+        buf.append(sent)
+        buf_len += s_len
+    if buf:
+        flushed, _ = _flush_backtrack(buf)
+        if flushed: chunks.append(flushed)
+
+    # Precise filter: remove chunks with almost no alpha-numeric content
+    result: list[str] = []
+    for chunk in chunks:
+        stripped = chunk.strip()
+        if not stripped:
+            continue
+        text_only = re.sub(r'\[IMG_\d+_[a-zA-Z0-9_\-]+\]', '', stripped).strip()
+        alpha = re.sub(r'[^a-zA-Z0-9]', '', text_only)
+        if len(alpha) < _EN_MIN_MEANINGFUL_CHARS:
+            continue
+        result.append(stripped)
+    return result
+
+
+def _split_to_size(section_text: str, *, max_chars: int, semantic_type: str, min_chars: int = 150, is_english: bool = False) -> list[str]:
+    units = _merge_picture_neighborhood(_section_units(section_text, semantic_type=semantic_type, is_english=is_english))
     chunks: list[str] = []
     buffer: list[str] = []
     buffer_len = 0
@@ -296,28 +564,109 @@ def _split_to_size(section_text: str, *, max_chars: int, semantic_type: str, min
     return chunks
 
 
-def _section_units(section_text: str, *, semantic_type: str) -> list[str]:
+def _load_embedding_model() -> object | None:
+    """Lazy-load sentence-transformers for semantic chunking."""
+    global _SEMANTIC_MODEL
+    if _SEMANTIC_MODEL is None and _SEMANTIC_CHUNKING:
+        try:
+            from sentence_transformers import SentenceTransformer
+            _SEMANTIC_MODEL = SentenceTransformer(_SEMANTIC_MODEL_NAME)
+            logger.warning("SEMANTIC_CHUNK: loaded model=%s", _SEMANTIC_MODEL_NAME)
+        except Exception as exc:
+            logger.warning("SEMANTIC_CHUNK: failed to load model: %s", exc)
+    return _SEMANTIC_MODEL
+
+
+def _compute_unit_embeddings(units: list[str]) -> list[np.ndarray]:
+    """Batch-compute embeddings for text units using the local model."""
+    model = _load_embedding_model()
+    if model is None:
+        return []
+    cleaned = [u[:512] for u in units]
+    embeddings = model.encode(cleaned, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
+    return [np.array(e, dtype=np.float32) for e in embeddings]
+
+
+def _split_semantic(section_text: str, *, max_chars: int, semantic_type: str, min_chars: int = 150, is_english: bool = False) -> list[str]:
+    """Split section text into chunks at semantic boundaries (topic shifts)."""
+    units = _merge_picture_neighborhood(_section_units(section_text, semantic_type=semantic_type, is_english=is_english))
+    if not units:
+        return []
+    model = _load_embedding_model()
+    if model is None:
+        return _split_to_size(section_text, max_chars=max_chars, semantic_type=semantic_type, min_chars=min_chars)
+    embeddings = _compute_unit_embeddings(units)
+    sim_gaps: list[float] = []
+    for i in range(len(units) - 1):
+        if i < len(embeddings) and i + 1 < len(embeddings):
+            sim_gaps.append(float(np.dot(embeddings[i], embeddings[i + 1])))
+        else:
+            sim_gaps.append(1.0)
+    chunks: list[str] = []
+    buffer: list[str] = []
+    buffer_len = 0
+    for idx, unit in enumerate(units):
+        if len(unit) > max_chars:
+            if buffer:
+                chunks.append("\n".join(buffer).strip())
+                buffer = []; buffer_len = 0
+            chunks.extend(_hard_split(unit, max_chars=max_chars))
+            continue
+        next_len = buffer_len + len(unit) + 1
+        should_split = (
+            buffer_len >= min_chars
+            and idx > 0 and idx - 1 < len(sim_gaps)
+            and sim_gaps[idx - 1] < _SEMANTIC_SIM_THRESHOLD
+            and next_len <= max_chars * 1.2
+        )
+        if should_split:
+            chunks.append("\n".join(buffer).strip())
+            buffer = []; buffer_len = 0
+        if next_len > max_chars:
+            chunks.append("\n".join(buffer).strip())
+            overlap = _overlap_units(buffer, semantic_type=semantic_type, max_chars=max_chars)
+            buffer = _fit_units_within_limit([*overlap, unit], max_chars=max_chars)
+            buffer_len = _joined_length(buffer)
+        else:
+            buffer.append(unit)
+            buffer_len = _joined_length(buffer)
+    if buffer:
+        chunks.append("\n".join(buffer).strip())
+    chunks = [c for c in chunks if c.strip()]
+    if min_chars > 0:
+        chunks = _merge_undersized(chunks, min_chars=min_chars, max_chars=max_chars)
+    logger.warning("SEMANTIC_CHUNK: %d units → %d chunks (thresh=%.2f)", len(units), len(chunks), _SEMANTIC_SIM_THRESHOLD)
+    return chunks
+
+
+_EN_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'(])|\n+")
+
+def _section_units(section_text: str, *, semantic_type: str, is_english: bool = False) -> list[str]:
     lines = [line.rstrip() for line in section_text.splitlines()]
     if semantic_type in {"procedure", "troubleshooting"}:
         return _procedure_like_units(lines)
     if semantic_type in {"parts_list", "specification", "safety_warning"}:
         return _line_group_units(lines)
+    if is_english:
+        return _sentence_units(section_text, split_re=_EN_SENTENCE_SPLIT_RE)
     return _sentence_units(section_text)
 
 
-def _sentence_units(text: str) -> list[str]:
+def _sentence_units(text: str, split_re: re.Pattern | None = None) -> list[str]:
+    splitter = split_re or SENTENCE_SPLIT_RE
     units: list[str] = []
     position = 0
     for match in PIC_MARKER_RE.finditer(text):
-        units.extend(_plain_sentence_units(text[position : match.start()]))
+        units.extend(_plain_sentence_units(text[position : match.start()], split_re=splitter))
         units.append(match.group(0))
         position = match.end()
-    units.extend(_plain_sentence_units(text[position:]))
+    units.extend(_plain_sentence_units(text[position:], split_re=splitter))
     return [unit.strip() for unit in units if unit.strip()]
 
 
-def _plain_sentence_units(text: str) -> list[str]:
-    rough_units = SENTENCE_SPLIT_RE.split(text)
+def _plain_sentence_units(text: str, split_re: re.Pattern | None = None) -> list[str]:
+    splitter = split_re or SENTENCE_SPLIT_RE
+    rough_units = splitter.split(text)
     return [unit.strip() for unit in rough_units if unit.strip()]
 
 
@@ -631,7 +980,45 @@ def _leading_english_phrase(line: str) -> str:
     return ""
 
 
+def _embed_image_anchors(text: str, *, is_english: bool = False) -> str:
+    """Replace [[PIC:id]] with numbered [IMG_X_id] anchors in the text."""
+    counter = 0
+    def _replacer(m: re.Match) -> str:
+        nonlocal counter
+        img_id = m.group(1)
+        anchor = f"[IMG_{counter}_{img_id}]"
+        counter += 1
+        return anchor
+
+    text = PIC_MARKER_RE.sub(_replacer, text)
+    text = PIC_MISSING_RE.sub("", text)
+    text = re.sub(r"[（(]\s*[）)]", "", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    if is_english:
+        text = _fix_english_spacing(text)
+    return _strip_layout_artifacts(text.strip())
+
+
+_EN_WORDS = {"the","to","at","in","on","of","for","and","or","is","it","as",
+             "by","with","from","an","a","be","no","up","if","we","he","she",
+             "are","was","were","been","has","had","not","but","all","can","may",
+             "will","this","that","have","their","there","which","what","when",
+             "where","how","each","would","could","should","than","then","into",
+             "your","our","its","you","they","them","these","those","some","any",
+             "more","most","much","many","about","after","before","between",
+             "during","without","because","also","just","very","well","such"}
+
+def _fix_english_spacing(text: str) -> str:
+    """Insert missing spaces between merged English words (OCR artifact)."""
+    for word in sorted(_EN_WORDS, key=len, reverse=True):
+        text = re.sub(rf'(?<!\w)({word})([a-z]{{2,}})(?!\w)', r'\1 \2', text)
+        text = re.sub(rf'(?<!\w)({word})([A-Z])', r'\1 \2', text)
+    return text
+
+
 def _strip_markers(text: str) -> str:
+    """Remove all [[PIC:id]] markers (for title/noise checking)."""
     text = PIC_MARKER_RE.sub("", text)
     text = PIC_MISSING_RE.sub("", text)
     text = re.sub(r"[ \t]+", " ", text)

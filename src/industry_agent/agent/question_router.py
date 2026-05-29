@@ -27,6 +27,7 @@ _MANUAL_TERMS: tuple[str, ...] = (
     "安装", "充电", "指示灯", "闪烁", "故障", "表带", "尺寸", "更换", "连接",
     "设置", "说明书", "默认密码", "安全注意事项", "开机", "关机", "按键", "模式",
     "屏幕", "接口", "电池", "程序", "钻孔", "佩戴", "清洁", "保养", "组装",
+    "保修", "质保", "保修期", "质保期", "保修范围", "维修",
 )
 _CUSTOMER_SERVICE_RE = re.compile(
     "|".join(re.escape(term) for term in sorted(_CUSTOMER_SERVICE_TERMS, key=len, reverse=True))
@@ -49,7 +50,7 @@ _FORCED_SERVICE_TERMS = (
     "少发", "补寄", "运费", "客服", "售后服务", "发票", "物流",
     "快递", "退款", "退货", "换货", "投诉", "催发货", "订单", "改地址",
     "试用", "试用期", "试用期间", "延长试用",
-    "保质期", "乡镇", "配送", "保修", "配件", "附件",
+    "保质期", "乡镇", "配送", "配件", "附件",
 )
 _FORCED_SERVICE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(退款|取消订单).*(到账|原路返回|信用卡)"),
@@ -111,6 +112,8 @@ class QuestionRouter:
             manual_score += 2
         if "客服" in normalized and not (analysis.products or analysis.models):
             service_score += 2
+        if "生产日期" in normalized and not (analysis.products or analysis.models):
+            service_score += 4
         if has_platform_service_term:
             service_score += 2
         if forced_service_match:

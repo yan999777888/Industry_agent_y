@@ -107,8 +107,16 @@ def format_customer_service_answer(answer: str) -> str:
 
 
 def format_multi_question_answer(sub_answers: list[tuple[str, str]]) -> str:
-    """Merge per-sub-question answers into one natural reply."""
-    texts = [answer.strip() for _, answer in sub_answers if answer.strip()]
+    """Merge per-sub-question answers into one natural reply, stripping extra greetings."""
+    texts: list[str] = []
+    for i, (_, answer) in enumerate(sub_answers):
+        text = answer.strip()
+        if not text:
+            continue
+        # Remove leading greeting from 2nd+ sub-answers to avoid "您好您好" stacking
+        if i > 0:
+            text = re.sub(r'^(您好|你好|hello|hi)\s*[，,!\s]*', '', text, flags=re.IGNORECASE).lstrip()
+        texts.append(text)
     return "\n\n".join(texts)
 
 

@@ -402,15 +402,39 @@ _PRODUCT_ALIASES: dict[str, str] = {
     "清洁机": "蒸汽清洁机",
     "蓝牙激光鼠标": "蓝牙激光鼠标",
     "鼠标": "蓝牙激光鼠标",
-    # English product aliases → 汇总英文
-    "jetski": "汇总英文",
-    "jet ski": "汇总英文",
-    "watercraft": "汇总英文",
-    "boat": "汇总英文",
-    "airfryer": "汇总英文",
-    "air fryer": "汇总英文",
-    "vacuum": "汇总英文",
-    "vacuum cleaner": "汇总英文",
+    # English product aliases
+    "jetski": "boat",
+    "jet ski": "boat",
+    "watercraft": "boat",
+    "boat": "boat",
+    "motorboat": "boat",
+    "airfryer": "air fryer",
+    "air fryer": "air fryer",
+    "vacuum": "vacuum cleaner",
+    "vacuum cleaner": "vacuum cleaner",
+    "camera": "camera",
+    "snowmobile": "snowmobile",
+    "lawn mower": "lawn mower",
+    "lawnmower": "lawn mower",
+    "motherboard": "motherboard",
+    "bios": "motherboard",
+    "grill": "grill",
+    "microwave": "microwave",
+    "washing machine": "washing machine",
+    "coffee machine": "coffee machine",
+    "coffee maker": "coffee machine",
+    "pressure cooker": "pressure cooker",
+    "toothbrush": "toothbrush",
+    "earphone": "earphone",
+    "headphone": "earphone",
+    "earbuds": "earphone",
+    "landline": "landline phone",
+    "landline phone": "landline phone",
+    "fax": "fax machine",
+    "television": "television",
+    "ereader": "e-reader",
+    "e-reader": "e-reader",
+    "ebook": "e-reader",
     "lawn mower": "汇总英文",
     "snowmobile": "汇总英文",
     "motherboard": "汇总英文",
@@ -454,11 +478,16 @@ def analyze_query(query: str) -> QueryAnalysis:
     """Analyze product scope, model numbers and useful search keywords."""
 
     normalized = _normalize(query)
-    products = _unique(
-        product
-        for alias, product in _PRODUCT_ALIASES.items()
-        if alias and alias in normalized
-    )
+    # English queries: clear product names (stored product_name is "汇总英文",
+    # not the actual product, so the filter would match nothing)
+    if not re.search(r'[一-鿿]', query):
+        products: list[str] = []
+    else:
+        products = _unique(
+            product
+            for alias, product in _PRODUCT_ALIASES.items()
+            if alias and alias in normalized
+        )
     models = _unique(match.group(0).upper() for match in _MODEL_RE.finditer(query))
     phrases = extract_query_phrases(query)
     keywords = extract_keywords(query)
@@ -1120,6 +1149,7 @@ class SQLiteRetriever:
         row["_vector_score"] = row.get("_vector_score")
         row["_retrieval_channels"] = _unique(row.get("_retrieval_channels", []))
         row["_retrieval_strategy"] = "like+fts+vector_optional"
+        row["metadata"] = metadata
         return row
 
 

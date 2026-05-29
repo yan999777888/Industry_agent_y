@@ -16,7 +16,7 @@ from urllib.request import Request, urlopen
 DEFAULT_FALLBACK_ANSWER = "根据现有资料无法回答此问题。请补充更明确的产品名称、型号、故障现象或图片后再试。"
 MAX_SINGLE_ANSWER_CHARS = 800
 MAX_MULTI_ANSWER_CHARS = 1000
-MAX_PIC_MARKERS = 5
+MAX_PIC_MARKERS = 20
 SUBMISSION_INCLUDE_PIC = True
 
 _IMAGE_CHUNKS_CACHE: dict[str, str] | None = None
@@ -554,7 +554,30 @@ def _format_with_images(text: str, image_ids: list[str]) -> str:
         text = re.sub(r"[ \t]{2,}", " ", text).strip(" \n\r\t，,；;")
         if text and not text.endswith(("。", "！", "？", ".", "!", "?")):
             text += "。"
-        return text
+        ids_json = json.dumps([], ensure_ascii=False)
+        return f"{text},{ids_json}"
+
+    # If server already placed <PIC> in the answer, trust its placement.
+    # Use original image_ids order (from API response) to keep PIC↔image correspondence.
+    if "<PIC>" in text:
+        text = re.sub(r"[ \t]{2,}", " ", text).strip(" \n\r\t，,；;")
+        # Deduplicate while preserving original API order
+        seen_img: set[str] = set()
+        ordered_ids: list[str] = []
+        for iid in image_ids:
+            if iid not in seen_img:
+                seen_img.add(iid)
+                ordered_ids.append(iid)
+        pic_count = min(len(ordered_ids), MAX_PIC_MARKERS)
+        # Trim extra PICs to match image count
+        while text.count('<PIC>') > pic_count:
+            idx = text.rfind('<PIC>')
+            if idx >= 0:
+                text = text[:idx] + text[idx + 5:]
+        if text and not text.endswith(("。", "！", "？", ".", "!", "?", ">")):
+            text += "。"
+        ids_json = json.dumps(ordered_ids[:pic_count], ensure_ascii=False)
+        return f"{text},{ids_json}"
 
     cleaned_text = re.sub(r"\s*<PIC>\s*", " ", text, flags=re.IGNORECASE)
     cleaned_text = re.sub(r"[ \t]{2,}", " ", cleaned_text).strip(" \n\r\t，,；;")
@@ -772,36 +795,15 @@ def _strip_submission_artifacts(text: str) -> str:
     cleaned = re.sub(r'^\s*"""(.+?)"""\s*;\s*\[.*?\]\s*$', r"\1", cleaned, flags=re.DOTALL)
     cleaned = re.sub(r'^\s*"(.+)"\s*;\s*\[(?:"[^"]*"\s*,?\s*)*\]\s*$', r"\1", cleaned, flags=re.DOTALL)
     cleaned = re.sub(r'";\s*\[(?:"[^"]*"\s*,?\s*)*\]\s*$', "", cleaned, flags=re.DOTALL)
-    cleaned = re.sub(r"\[(?:\"(?:Manual\d+_\d+|[A-Za-z]+_\d+)\"\s*,?\s*)+\]\s*$", "", cleaned)
-    cleaned = re.sub(r"\[(?:\"?\s*(?:Manual\s*\d+|[A-Za-z]+(?:_[A-Za-z0-9]+)*_\d+)\s*\"?\s*,?\s*)+\]\s*$", "", cleaned)
-    cleaned = re.sub(r";\s*\[(?:\"?\s*(?:Manual\s*\d+|[A-Za-z]+(?:_[A-Za-z0-9]+)*_\d+)\s*\"?\s*,?\s*)+\]\s*$", "", cleaned)
-    cleaned = re.sub(r"（相关配图：[,、\s]*）", "", cleaned)
-    cleaned = re.sub(r"\(相关配图：[,、\s]*\)", "", cleaned)
-    cleaned = re.sub(r"相关配图：[,、\s]*", "", cleaned)
+    cleaned = re.sub(r"[（(]相关配图[：:][,、\s]*[）)]", "", cleaned)
+    cleaned = re.sub(r"相关配图[：:][,、\s]*", "", cleaned)
     cleaned = re.sub(r"[（(][A-Za-z]+\d+_\d+.*?[）)]", "", cleaned)
-    cleaned = re.sub(r'\[(?:\s*"\s*"\s*,?\s*)+\]', " ", cleaned)
-    cleaned = re.sub(r'\[(?:\s*"\s+"\s*,?\s*)+\]', " ", cleaned)
     for pattern in _BAD_TAG_PATTERNS:
         cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<IMG\b[^。！？!?<]*(?:[。！？!?]|$)", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"</?PIC[^>]*>", "<PIC>", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<\s*/?\s*(?!PIC\b)[A-Za-z][^>]{0,80}>", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"(?m)^\s*#{1,6}\s*", "", cleaned)
-    cleaned = re.sub(r"(?m)^\s*[-*]\s+", "", cleaned)
-    cleaned = re.sub(r"(?m)^\s*(?:问题\s*\d+|回答|结论|操作/说明|操作说明|操作|说明|处理步骤|时效/费用|时效费用|补充说明|注意事项|相关图片)\s*[:：]\s*", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"(?m)^\s*\d+\s*[.)、。]\s*", "", cleaned)
-    cleaned = re.sub(r"(?m)^\s*[一二三四五六七八九十]+\s*[、.．]\s*", "", cleaned)
-    cleaned = re.sub(r"(?:^|[\n。；;:：])\s*(?:直接结论|操作步骤|操作要点|使用前与连接|注意事项|补充说明)(?:\s*[:：]|\s+)", "。", cleaned)
-    cleaned = re.sub(
-        r"(?:^|[\n。；;:：])\s*(?:Direct Conclusion|Conclusion|Details/Description|Description|Operation/Steps|Steps|Notes|Note)(?:\s*[:：]|\s+)",
-        "。",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(r"(?:^|[\n。；;:：])\s*(?:操作/说明|注意事项)\s*（[^）]{0,30}）\s*[:：]?", "。", cleaned)
-    cleaned = cleaned.replace("###", " ")
-    cleaned = cleaned.replace("1.。", "")
-    cleaned = re.sub(r"\d+\.。", "", cleaned)
     cleaned = re.sub(r"【参考\d+】", "", cleaned)
     cleaned = re.sub(r"[：:]\s*[。.]", "：", cleaned)
     cleaned = cleaned.replace('\\"', '"')

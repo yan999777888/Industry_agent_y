@@ -52,13 +52,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 RETRIEVAL_LIMIT = 20        # chunks to retrieve before evidence filtering
-FINAL_CONTEXT_CHUNKS = 5    # chunks passed into the LLM
+FINAL_CONTEXT_CHUNKS = 7    # chunks passed into the LLM
 MAX_CONTEXT_CHARS = 7000    # truncate context to fit model window
 MAX_HISTORY_TURNS = 3       # keep last N turns per session
 MIN_TOP_SCORE = 0.5         # below this, do not ask LLM to hallucinate
 MIN_KEEP_SCORE = 0.3        # chunks below this score are discarded
 MULTIMODAL_RETRIEVAL_LIMIT = 6
-MAX_ANSWER_LENGTH = 800     # maximum Chinese answer length in characters
+MAX_ANSWER_LENGTH = 1200    # maximum Chinese answer length in characters
 MAX_ENGLISH_ANSWER_LENGTH = 1500  # English can be longer, detailed answers score higher
 
 OLLAMA_BASE_URL = settings.ollama_base_url
@@ -719,6 +719,12 @@ def _final_answer_cleanup(answer: str) -> str:
     cleaned = cleaned.replace(".。", ".")
     cleaned = cleaned.replace("。。", "。")
     cleaned = cleaned.replace("，，", "，")
+    # If only one numbered step exists, remove the numbering for natural flow
+    numbered_steps = re.findall(r'(?:^|[。\n])\s*(\d+\.\s)', cleaned)
+    if len(numbered_steps) == 1:
+        logger.warning("CLEANUP_SINGLE_STEP: removing single step '%s'", numbered_steps[0].strip())
+        cleaned = re.sub(r'\s*\d+\.\s', ' ', cleaned)
+        cleaned = re.sub(r'请按照以下步骤操作[：:]\s*', '', cleaned)
     return cleaned.strip()
 
 
@@ -742,23 +748,56 @@ def _match_smalltalk_reply(question: str) -> tuple[str, str] | None:
 # LLM answer-span extraction for chunk selection
 # =========================================================================
 
-_LLM_SPAN_EXTRACTION_PROMPT = """\
-你是一个产品文档分析专家。用户的问题是：
-{question}
+_LLM_SPAN_EXTRACTION_PROMPT = """用户问题：{question}
 
-下面是检索到的文档片段，请逐一判断每个片段是否包含问题的答案。
-如果包含，原样引用直接回答问题的句子；如果不包含，标记为不相关。
+严格选择规则——同时满足以下两条才保留，否则一律排除：
+
+规则1：片段内容必须**精确且充分地回答**了用户问题的核心，不能只是关键词命中或边缘沾边。
+规则2：选出的多个片段之间必须有**主题一致性**——它们应该从不同角度共同回答同一个问题，不能是不同主题的拼凑。
+
+【必须排除的典型例】
+问题：表带有其他尺寸可选吗？
+•"包装盒内含小号表带、充电线" → 排除（包装清单属于"包装内容"主题，与"表带尺寸选项"主题不一致）
+•"可拆卸表带提供多种颜色和材质，需单独购买" → 排除（说的是购买选项不是尺寸规格）
+•"手表的其他功能说明" → 排除（完全无关主题）
+
+问题：如何清洁空调等离子滤网？
+•"滤网的位置和形状可能因机型不同而有所差异" → 排除（说的是形状位置，与清洁步骤不同主题）
+•"功能会根据机型有所调整" → 排除（通用免责说明，不属清洁主题）
+
+问题：空调的滤网怎么清洁？
+•"佩戴时将表带穿入环扣收紧" → 排除（不同产品主题）
 
 文档片段：
 {chunks}
 
-输出JSON数组，只包含 relevant 为 true 的条目（不要输出 irrelevant 的条目）：
-[
-  {{"index": 1, "relevant": true, "extract": "直接回答问题的原句"}},
-  {{"index": 3, "relevant": true, "extract": "另一条原文"}}
-]
-如果都不相关，返回空数组 []。不要输出任何其他内容。
-"""
+输出JSON数组，只保留同时满足（精确回答+主题一致）的片段：
+[{{"index": 1, "relevant": true, "extract": "回答问题的原句"}}]
+如果没有，返回 []。"""
+
+_LLM_SPAN_EXTRACTION_PROMPT_EN = """Question: {question}
+
+Select ONLY the document chunks that **precisely and sufficiently answer** the core question. Reject anything that only partially overlaps or matches on keywords alone.
+
+Selection criteria:
+1. The chunk must contain information that directly answers what the user asked.
+2. Selected chunks must share a common theme — they must collectively address the SAME question from different angles, not be a random mix of topics.
+
+Examples of what to EXCLUDE:
+Question: How do I clean the air filter of my AC unit?
+• "The AC unit has multiple modes like cooling and heating" → EXCLUDE (not about cleaning)
+• "Filter shapes vary by model" → EXCLUDE (describes variation, not cleaning steps)
+• "How to wear a wristband" → EXCLUDE (different product)
+
+Question: What band sizes are available for the fitness tracker?
+• "The box contains a small band, charger, and manual" → EXCLUDE (packing list, not band sizes)
+• "Detachable bands come in multiple colors and materials, sold separately" → EXCLUDE (purchasing info, not size specs)
+
+Document chunks:
+{chunks}
+
+Output a JSON array with only the chunks that match BOTH criteria. If none match, return []:
+[{{"index": 1, "relevant": true, "extract": "the sentence that answers the question"}}]"""
 
 
 def _llm_extract_answer_spans(
@@ -769,39 +808,42 @@ def _llm_extract_answer_spans(
     """LLM reads each chunk's content and keeps only those containing answer spans."""
     if not chunks:
         return []
+    is_en = _is_english_text(question)
     lines: list[str] = []
     for i, c in enumerate(chunks, 1):
         title = str(c.get("title", "")).strip()[:60]
         text = str(c.get("text", "")).strip()[:400]
-        lines.append(f"[{i}] 标题：{title}\n内容：{text}")
-    prompt = _LLM_SPAN_EXTRACTION_PROMPT.format(
+        if is_en:
+            lines.append(f"[{i}] Title: {title}\nContent: {text}")
+        else:
+            lines.append(f"[{i}] 标题：{title}\n内容：{text}")
+    template = _LLM_SPAN_EXTRACTION_PROMPT_EN if is_en else _LLM_SPAN_EXTRACTION_PROMPT
+    prompt = template.format(
         question=question,
         chunks="\n\n".join(lines),
     )
+    logger.warning("SPAN_PROMPT (first 800 chars): %s", prompt[:800])
     try:
         result = llm_client.chat(
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=1024,
         )
+        logger.warning("SPAN_RAW_LLM_OUTPUT: %s", result[:500])
         json_match = re.search(r"\[.*\]", result, re.DOTALL)
         if json_match:
             results = json.loads(json_match.group(0))
+            logger.warning("SPAN_PARSED: %s", json.dumps(results, ensure_ascii=False)[:500])
             relevant_indices = {
                 r["index"] for r in results if r.get("relevant") and r.get("extract", "").strip()
             }
+            logger.warning("SPAN_SELECTED_INDICES: %s (out of %d chunks)", relevant_indices, len(chunks))
             selected = [
                 c for i, c in enumerate(chunks, 1)
                 if i in relevant_indices
             ]
             if selected:
-                # Safety net: always keep the top-1 chunk by fusion_score
-                # to prevent LLM from accidentally removing the best chunk.
-                seen_ids = {c.get("chunk_id", "") for c in selected}
-                top_chunk = max(chunks, key=lambda c: float(c.get("_fusion_score", 0)))
-                if top_chunk.get("chunk_id", "") not in seen_ids:
-                    selected.insert(0, top_chunk)
-                logger.info("Span extraction: %d relevant / %d total (kept top-1 safety)", len(selected), len(chunks))
+                logger.info("Span extraction: %d relevant / %d total", len(selected), len(chunks))
                 return selected
     except Exception as exc:
         logger.warning("LLM span extraction failed: %s", exc)
@@ -823,6 +865,70 @@ _LLM_QUERY_ANALYSIS_SYSTEM_PROMPT = """\
 用户问题：如何安装和拆卸电钻电池组
 输出：{"product": "电钻", "models": [], "keywords": ["电池组", "安装", "拆卸"], "question_type": "step"}
 """
+
+
+_QUERY_REWRITE_PROMPT = """\
+用户消息可能包含多个动作背景表述，但实际只问一个问题。请提取用户唯一的核心问题，合并为一个简洁、完整的问句。
+
+规则：
+- 如果用户同时说了动作意图和核心疑问（如"我想换表带，有其他尺寸可选吗"），必须剥离动作背景，只保留并突出核心疑问部分。
+- 删除"我想"、"请问"、"麻烦"、"您好"等无实际含义的修饰前缀。
+- 保留产品名称、型号等关键限定条件。
+- 严禁输出任何解释、严禁包含"重写后的问句："等前缀，直接输出核心问句。
+- 输出问句不超过30个字。
+
+【示例】
+输入：我想更换健身追踪器的表带，有其他尺寸可选吗？
+输出：健身追踪器表带有其他尺寸可选吗？
+
+输入：我购买的商品售后维修后使用不到10天又出现同样的故障，请问该怎么处理？
+输出：维修后短期内重复故障怎么处理？
+
+用户消息：{question}
+输出："""
+
+_QUERY_REWRITE_PROMPT_EN = """\
+The user message may contain background context but only asks one core question. Extract the core question and rewrite it as a concise, complete English question.
+
+Rules:
+- If the user includes action intent ("I want to...", "I need to...") before the actual question, strip the action background and keep only the core question.
+- Remove filler words ("I want to", "I was wondering", "could you tell me", "hello", "hi").
+- Keep product names, model numbers, and key details.
+- Output ONLY the rewritten question, no explanations, no prefixes.
+- Maximum 50 words.
+
+Examples:
+Input: I want to replace the band on my fitness tracker, are there other sizes available?
+Output: What band sizes are available for the fitness tracker?
+
+Input: My product broke after 10 days of repair, what should I do?
+Output: How to handle a product that fails again shortly after repair?
+
+User message: {question}
+Output:"""
+
+
+def _rewrite_query(question: str, llm_client: LLMClient) -> str:
+    """Consolidate user query into a single core question via LLM."""
+    if not question.strip():
+        return question
+    is_english = _is_english_text(question)
+    prompt = _QUERY_REWRITE_PROMPT_EN if is_english else _QUERY_REWRITE_PROMPT
+    sys_prompt = "You are a query rewrite assistant. Output only the rewritten question." if is_english else "你是query重写助手。只输出重写后的问句，不要任何解释或前缀。"
+    try:
+        result = llm_client.chat(
+            system_prompt=sys_prompt,
+            messages=[{"role": "user", "content": prompt.format(question=question)}],
+            temperature=0.1,
+            max_tokens=80,
+        )
+        rewritten = result.strip().strip('"\'`“”‘’')
+        logger.warning("REWRITE: %r -> %r", question, rewritten)
+        if 2 <= len(rewritten) <= len(question) * 2:
+            return rewritten
+    except Exception as exc:
+        logger.warning("REWRITE_FAILED: %s", exc)
+    return question
 
 
 def _llm_analyze_query(question: str, llm_client: LLMClient) -> dict[str, Any]:
@@ -1839,17 +1945,17 @@ def _assemble_context(
         body = re.sub(r"(?:please\s+)?(?:refer to|consult|see)\s+(?:the\s+)?(?:user\s+)?manual[^.]*[.]?", "", body, flags=re.IGNORECASE)
         body = re.sub(r"(?:please\s+)?see\s+(?:the\s+)?(?:relevant\s+)?section[^.]*[.]?", "", body, flags=re.IGNORECASE)
         body = re.sub(r"for more\s+(?:information|details).*?(?:refer to|see|consult)[^.]*[.]?", "", body, flags=re.IGNORECASE)
+        # Strip manual figure references like "（图3）" / "Figure 9" / "Fig. 3-2" so LLM doesn't echo them
+        body = re.sub(r"[（(][图Figure][^）)]*[）)]", "", body)
+        body = re.sub(r"(?:Figure|Fig\.?)\s*\d+[\-.]?\d*", "", body, flags=re.IGNORECASE)
+        # Move [IMG_X_id] markers from separate lines to end of preceding text (inline placement)
+        body = re.sub(r'\n\s*(\[IMG_\d+_[a-zA-Z0-9_\-]+\])', r' \1', body)
         body = re.sub(r"\s{2,}", " ", body).strip()
-        # Strip <PIC> and [[PIC:...]] markers from chunk text — images are
-        # tracked separately via image_ids and appended below; raw markers
-        # leak into LLM output and are not useful as context.
-        body = re.sub(r"\s*<PIC>", "", body)
-        body = re.sub(r"\s*\[\[PIC:[^\]]*\]\]", "", body)
-        if img_ids:
-            if is_english:
-                body += f"\n(Related images: {', '.join(img_ids)})"
-            else:
-                body += f"\n（相关配图：{', '.join(img_ids)}）"
+        logger.warning("CONTEXT_BODY: %.1fch Figure_in_body=%s", len(body), 'Figure' in body)
+        # Replace "详见xxx" with "(参见下文相关步骤)" so LLM knows content follows
+        body = re.sub(r"[（(]?\s*详见\s*[“""」]?\s*[^）)「\n。，]{2,20}\s*[“""」]?\s*[）)]?", "（参见下文相关步骤）", body)
+        body = re.sub(r"[，,]\s*详见\s*[^。，,\n]+", "，具体步骤参见下文", body)
+        body = re.sub(r"[。，,]\s*(详情请[见参阅参考]|详细内容请[见参见]|更多信息请[参见]|详细操作请[参见参考])[^。.\n]+", "。", body)
         part = f"{header}\n{body}"
 
         if total_chars + len(part) > MAX_CONTEXT_CHARS:
@@ -1963,12 +2069,10 @@ def _merge_images(image_groups: list[list[dict[str, str | bool]]]) -> list[dict[
 
 
 def _best_chunk_score(record: dict[str, Any]) -> float:
-    """Weighted combination favoring Milvus vector and reranker scores."""
+    """Weighted combination — vector + RRF only."""
     return (
-        float(record.get("_vector_score") or 0.0) * 300.0 +
-        float(record.get("_cross_encoder_score") or 0.0) * 100.0 +
-        float(record.get("_rrf_score") or 0.0) * 1000.0 +
-        float(record.get("_score") or 0.0) * 0.3
+        float(record.get("_vector_score") or 0.0) * 400.0 +
+        float(record.get("_rrf_score") or 0.0) * 500.0
     )
 
 
@@ -2185,8 +2289,194 @@ def _vl_select_images(
     return selected
 
 
-# ---------------------------------------------------------------------------
-# Agent service
+_VL_INSERT_PIC_PROMPT = """\
+下面有一段产品回答和若干产品图片。请判断哪些图片与回答内容相关，并在回答中插入引用。
+
+严格规则：
+1. 只使用提供的图片，不要编造任何图片名称或ID
+2. 引用格式必须是：中文回答用"如<PIC>所示"，英文回答用"as shown in <PIC>"
+3. <PIC>标签内不要写任何内容，保持为空
+4. 每张相关图片只插入一次引用，放在对应的句子末尾
+5. 不要改动回答的其他任何内容，只在句末插入引用
+6. 如果图片与回答内容无关，不要插入引用
+7. 不要在<PIC>标签内写图片名称、编号或其他文字
+
+【回答文本】
+{answer}
+
+直接输出插入引用后的完整回答，不要输出其他内容。"""
+
+
+def _vl_insert_pic_markers(
+    *,
+    answer: str,
+    image_ids: list[str],
+    image_index: dict[str, dict[str, str | bool]],
+    llm_client: LLMClient,
+    max_images: int = 3,
+) -> str | None:
+    """Use VL model to insert <PIC> markers into answer at image-relevant positions."""
+    if not image_ids or not answer.strip():
+        return None
+
+    # Load images as base64
+    image_payloads: list[tuple[str, str]] = []
+    for img_id in image_ids[:max_images]:
+        meta = image_index.get(img_id, {})
+        rel_path = str(meta.get("path", ""))
+        abs_path = str(settings.project_root / rel_path) if rel_path else str(settings.image_dir / f"{img_id}.png")
+        if os.path.exists(abs_path):
+            b64 = _encode_image_to_base64(abs_path)
+            if b64:
+                image_payloads.append((img_id, b64))
+
+    if not image_payloads:
+        return None
+
+    # Build multi-image content
+    content: list[dict[str, Any]] = [
+        {"type": "text", "text": _VL_INSERT_PIC_PROMPT.format(answer=answer[:800])},
+    ]
+    for idx, (img_id, b64) in enumerate(image_payloads, 1):
+        content.append({"type": "text", "text": f"图片{idx}："})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+        })
+
+    messages = [{"role": "user", "content": content}]
+
+    try:
+        kwargs: dict[str, Any] = dict(
+            model=llm_client.vision_model or llm_client.model,
+            messages=messages,
+            temperature=0.1,
+            max_completion_tokens=1024,
+            top_p=0.95,
+            stream=False,
+        )
+        if settings.dashscope_enabled:
+            kwargs["extra_body"] = {"enable_thinking": False}
+        response = llm_client.client.chat.completions.create(**kwargs)
+        result = (response.choices[0].message.content or "").strip()
+        result = _THINK_TAG_RE.sub("", result).strip()
+        # Verify result has <PIC> markers
+        if result and len(result) > 20 and "<PIC>" in result:
+            logger.info("VL PIC insert: %d chars, %d <PIC> markers", len(result), result.count("<PIC>"))
+            return result
+        else:
+            logger.info("VL PIC insert: no <PIC> markers in output, using original answer")
+    except Exception as exc:
+        logger.warning("VL PIC insert failed: %s", exc)
+
+    return None
+
+
+_VL_CHUNK_FILTER_PROMPT = """\
+用户问题：{question}
+
+下面有若干文档片段（文字+图片）。请严格筛选：只保留能**直接回答**用户问题的片段。
+
+判断方法：
+1. 先明确用户在问什么（问"有哪些尺寸"→需要尺寸数字/规格表/大小号列表）
+2. 文字和图片都要看——有些信息可能只在图片里
+3. 以下情况必须排除：
+   - 只是提到了同产品但内容是其他方面（如佩戴方法、包装清单、兼容型号）
+   - 只是提到了相关关键词但没有给出问题的答案
+4. 宁可少选也不要选错——只选确实回答了问题的片段
+
+输出保留的片段编号数组，如 [1, 3]。如果没有能回答问题的，返回 []。
+只输出编号数组，不要输出其他内容。"""
+
+
+def _vl_filter_chunks(
+    *,
+    question: str,
+    chunks: list[dict[str, Any]],
+    image_index: dict[str, dict[str, str | bool]],
+    llm_client: LLMClient,
+    max_images_per_chunk: int = 2,
+) -> list[dict[str, Any]]:
+    """Use VL model to filter chunks by relevance, considering both text and images."""
+    if not chunks:
+        return []
+
+    # Build content: prompt + chunk text + chunk images
+    content: list[dict[str, Any]] = [
+        {"type": "text", "text": _VL_CHUNK_FILTER_PROMPT.format(question=question)},
+    ]
+
+    chunk_summaries: list[str] = []
+    for i, c in enumerate(chunks, 1):
+        title = str(c.get("title", "")).strip()[:60]
+        text = str(c.get("text", "")).strip()[:200]
+        chunk_summaries.append(f"[{i}] 标题：{title}\n内容：{text}")
+
+        # Load chunk's images
+        img_ids = _parse_json_list(c.get("image_ids"))
+        for img_id in img_ids[:max_images_per_chunk]:
+            meta = image_index.get(img_id, {})
+            rel_path = str(meta.get("path", ""))
+            abs_path = str(settings.project_root / rel_path) if rel_path else str(settings.image_dir / f"{img_id}.png")
+            if os.path.exists(abs_path):
+                b64 = _encode_image_to_base64(abs_path, max_size=600)
+                if b64:
+                    content.append({"type": "text", "text": f"[{i}]的图片："})
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    })
+
+    # Insert chunk summaries after the prompt
+    content.insert(1, {"type": "text", "text": "\n\n".join(chunk_summaries)})
+
+    messages = [{"role": "user", "content": content}]
+    _img_count = sum(1 for c in content if isinstance(c, dict) and c.get("type") == "image_url")
+    logger.warning("VL_FILTER_INPUT: %d chunks, %d images, content_parts=%d", len(chunks), _img_count, len(content))
+
+    try:
+        kwargs: dict[str, Any] = dict(
+            model=llm_client.vision_model or llm_client.model,
+            messages=messages,
+            temperature=0.1,
+            max_completion_tokens=256,
+            top_p=0.95,
+            stream=False,
+        )
+        if settings.dashscope_enabled:
+            kwargs["extra_body"] = {"enable_thinking": False}
+        response = llm_client.client.chat.completions.create(**kwargs)
+        result = (response.choices[0].message.content or "").strip()
+        result = _THINK_TAG_RE.sub("", result).strip()
+        logger.warning("VL_FILTER_RAW: %s", result[:300])
+
+        # Parse indices from result
+        numbers = re.findall(r"\d+", result)
+        selected_indices = set()
+        for n in numbers:
+            idx = int(n)
+            if 1 <= idx <= len(chunks):
+                selected_indices.add(idx)
+
+        if selected_indices:
+            selected = [chunks[i - 1] for i in selected_indices]
+            # If VL selected too few, supplement with top-scored chunks
+            if len(selected) < 2:
+                seen_ids = {c.get("chunk_id", "") for c in selected}
+                for c in chunks:
+                    if c.get("chunk_id", "") not in seen_ids:
+                        selected.append(c)
+                        seen_ids.add(c.get("chunk_id", ""))
+                    if len(selected) >= 2:
+                        break
+            logger.warning("VL_FILTER_SELECTED: indices=%s chunks=%d", selected_indices, len(selected))
+            return selected
+
+    except Exception as exc:
+        logger.warning("VL chunk filter failed: %s", exc)
+
+    # Fallback: use top chunks by score
+    return chunks[:3]
 # ---------------------------------------------------------------------------
 
 class AgentService:
@@ -2227,6 +2517,13 @@ class AgentService:
             base_url=self.base_url,
             model=self.model,
             vision_model=self.vision_model,
+        )
+        # Separate LLM client for span extraction filtering (uses qwen3-max)
+        self.span_llm_client = LLMClient(
+            backend="openai_compatible",
+            base_url=settings.dashscope_base_url,
+            model="qwen3-max",
+            api_key=settings.dashscope_api_key,
         )
         self.image_skill = ImageSkill(
             llm_backend=self.llm_backend,
@@ -2327,7 +2624,12 @@ class AgentService:
         image_terms: list[str] | None = None,
         image_features: dict[str, list[str]] | None = None,
     ) -> dict[str, Any]:
-        # === Step 0: LLM query analysis — supplementary search terms ===
+        # === Step 0a: Query re-write — consolidate intent ===
+        # Prevents a single query from being treated as multiple questions
+        query = _rewrite_query(query, self.llm_client)
+        logger.info("Rewritten query: %s", query)
+
+        # === Step 0b: LLM query analysis — supplementary search terms ===
         analysis = _llm_analyze_query(query, self.llm_client)
         logger.info("LLM query analysis: %s", analysis)
         search_parts: list[str] = []
@@ -2379,11 +2681,74 @@ class AgentService:
 
         chunks = _merge_retrieval_candidates(candidate_groups)
 
-        # === Step 1b: LLM extracts answer spans from candidate chunks ===
-        top_candidates = chunks[:20]
-        evidence_chunks = _llm_extract_answer_spans(query, top_candidates, self.llm_client)
-        logger.info("Span extraction: %d/%d chunks kept", len(evidence_chunks), len(top_candidates))
+        # Parent-Child resolution: child chunks carry sentence-level vectors for precise
+        # matching, but we serve the parent's full context text to the LLM.
+        _existing_ids: set[str] = {str(c.get("chunk_id", "")) for c in chunks}
+        _parent_in_results: set[str] = set()
+        for c in chunks:
+            _pid = str(c.get("metadata", {}).get("parent_chunk_id", ""))
+            if _pid and _pid in _existing_ids:
+                _parent_in_results.add(_pid)
+        # Phase 2: Replace child text with parent text (for children whose parent isn't in results)
+        _p_lookup: dict[str, dict[str, Any]] = {}
+        for c in chunks:
+            _cid = str(c.get("chunk_id", ""))
+            if _cid in _parent_in_results:
+                _p_lookup[_cid] = c
+        for c in chunks:
+            _pid = str(c.get("metadata", {}).get("parent_chunk_id", ""))
+            if _pid and _pid in _p_lookup:
+                _p = _p_lookup[_pid]
+                c["text"] = str(_p.get("text", ""))
+                c["image_ids"] = _p.get("image_ids", [])
+            elif _pid:
+                _pt = c.get("metadata", {}).get("parent_text", "")
+                if _pt:
+                    c["text"] = str(_pt)
+                _pi = c.get("metadata", {}).get("parent_image_ids", [])
+                if _pi:
+                    c["image_ids"] = list(_pi) if isinstance(_pi, list) else [str(_pi)]
+        # Phase 3: Remove children whose parent is also in results (dedup)
+        chunks = [c for c in chunks if str(c.get("metadata", {}).get("parent_chunk_id", "")) not in _parent_in_results]
 
+        # === Step 1a: Score gap filter — drop low-scoring chunks, skip for English ===
+        if chunks and not _is_english_text(query):
+            _top_fusion = max(float(c.get("_fusion_score", 0)) for c in chunks)
+            chunks = [c for c in chunks if float(c.get("_fusion_score", 0)) >= _top_fusion - 40.0]
+            logger.warning("SCORE_GAP: top=%.1f kept=%d", _top_fusion, len(chunks))
+
+        # === Step 1b: Ranking + LLM filter ===
+        # English: sort by fusion_score (RRF-based) so keyword-only chunks also reach SPAN
+        _sort_key = (lambda c: float(c.get('_cross_encoder_score', 0))) if _is_english_text(query) else (lambda c: float(c.get('_vector_score', 0)))
+        ranked = sorted(chunks, key=_sort_key, reverse=True)
+        _span_limit = 12 if _is_english_text(query) else 8
+        evidence_chunks = [ranked[0]] if ranked else []
+        if len(ranked) > 1:
+            llm_filtered = _llm_extract_answer_spans(query, ranked[1:_span_limit], self.llm_client)
+            seen_ids = {e.get('chunk_id', '') for e in evidence_chunks}
+            for c in llm_filtered:
+                if c.get('chunk_id', '') not in seen_ids:
+                    evidence_chunks.append(c)
+                    seen_ids.add(c.get('chunk_id', ''))
+
+        # === Step 1c: Supplement chunks referenced via "详见" but filtered out ===
+        for chunk in list(evidence_chunks):
+            for m in re.finditer(r'详见\s*[（(]?[“""]?\s*([^）)\n。，,""""]{2,30}?)', str(chunk.get("text", ""))):
+                ref_topic = re.sub(r'^[\s"""""”\'"]+|[\s"""""”\'"]+$', '', m.group(1))
+                if len(ref_topic) < 3:
+                    continue
+                for rc in chunks:
+                    if ref_topic in str(rc.get("title", "")):
+                        cid = rc.get("chunk_id", "")
+                        if cid and cid not in seen_ids:
+                            evidence_chunks.append(rc)
+                            seen_ids.add(cid)
+                            logger.warning("XREF_SUPPLEMENT: added chunk=%s ref=%s", cid[:12], ref_topic)
+                        break
+        
+        evidence_chunks = evidence_chunks[:FINAL_CONTEXT_CHUNKS]
+        logger.warning("EVIDENCE_FINAL: %d chunks: %s", len(evidence_chunks),
+                       [f"{c.get('chunk_id','')[:8]} {c.get('title','')[:30]}" for c in evidence_chunks])
         if not evidence_chunks:
             return {
                 "answer": "根据现有资料无法回答此问题。请补充更明确的产品名称、型号、故障现象或图片后再试。",
@@ -2412,7 +2777,11 @@ class AgentService:
 
         # 3. Build messages
         lang_instruction = _detect_and_get_lang_instruction(query)
-        prompt_result = build_manual_qa_system_prompt(lang_instruction + "\n\n" + context if lang_instruction else context)
+        is_english = bool(lang_instruction)
+        prompt_result = build_manual_qa_system_prompt(
+            lang_instruction + "\n\n" + context if lang_instruction else context,
+            english=is_english,
+        )
         messages: list[dict[str, str]] = [{"role": "system", "content": prompt_result.content}]
         if dialog_summary:
             messages.append({"role": "system", "content": f"【会话上下文】\n{dialog_summary}"})
@@ -2474,45 +2843,40 @@ class AgentService:
         # Final cleanup
         answer = _final_answer_cleanup(answer)
         answer = _localize_answer(answer, query)
-        # Strip any [[PIC:id]] markers the LLM may have added.
-        answer = re.sub(r"\s*\[\[PIC:[^\]]+\]\]", "", answer).strip()
-        # Also strip bare <PIC> tags from chunk text that leaked through.
-        answer = re.sub(r"\s*<PIC>", "", answer).strip()
-        grounded_image_ids = []
-        _candidate_img_ids: list[str] = []
 
-        # ── Image selection: from top fusion-score chunks ──
-        _img_seen: set[str] = set()
-        _top_img_chunks = sorted(
-            evidence_chunks,
-            key=lambda c: float(c.get("_fusion_score", 0)),
-            reverse=True,
-        )
-        for chunk in _top_img_chunks[:1]:
-            for img_id in _parse_json_list(chunk.get("image_ids")):
-                normalized = str(img_id).strip()
-                if normalized and normalized not in _img_seen:
-                    _img_seen.add(normalized)
-                    _candidate_img_ids.append(normalized)
-                    grounded_image_ids.append(normalized)
-        # Only expand to other chunks if top-1 has fewer than 2 images
-        if len(grounded_image_ids) < 2:
-            for chunk in _top_img_chunks[1:3]:
-                for img_id in _parse_json_list(chunk.get("image_ids")):
-                    normalized = str(img_id).strip()
-                    if normalized and normalized not in _img_seen:
-                        _img_seen.add(normalized)
-                        _candidate_img_ids.append(normalized)
-                        grounded_image_ids.append(normalized)
+        # ── Post-processing: extract [img_id] markers → <PIC> + image_ids ──
+        # Build set of valid image IDs from evidence chunks
+        _valid_img_ids: set[str] = set()
+        for c in evidence_chunks:
+            for i in _parse_json_list(c.get("image_ids")):
+                _valid_img_ids.add(str(i).strip())
 
-        # Fallback: no Milvus chunks had images — use top evidence chunks
+        # Extract all [IMG_X_id] markers from answer
+        _answer_img_ids = re.findall(r'\[IMG_\d+_([a-zA-Z0-9_\-]+)\]', answer)
+        grounded_image_ids = [i for i in _answer_img_ids if i in _valid_img_ids]
+
+        # Replace valid [IMG_X_id] → <PIC> in answer. Always remove ALL [IMG_X_id]
+        # (including hallucinated ones) — only convert those that match real image IDs.
+        answer = re.sub(r'\[参考\d+\]', '', answer)
+        seen_pics: set[str] = set()
+        def _replace_img(m: re.Match[str]) -> str:
+            img_id = m.group(1)
+            if img_id in grounded_image_ids and img_id not in seen_pics:
+                seen_pics.add(img_id)
+                return '<PIC>'
+            return ''
+        answer = re.sub(r'\[IMG_\d+_([a-zA-Z0-9_\-]+)\]', _replace_img, answer)
+            # grounded_image_ids already in answer order (from extraction above) — keep it
+
+        # ── Image details (from extracted [img_id] markers) ──
+        # If no markers in answer, fall back to top chunk images
         if not grounded_image_ids:
-            for chunk in evidence_chunks[:3]:
+            _img_seen: set[str] = set()
+            for chunk in sorted(evidence_chunks, key=lambda c: float(c.get("_fusion_score", 0)), reverse=True)[:3]:
                 for img_id in _parse_json_list(chunk.get("image_ids")):
                     normalized = str(img_id).strip()
                     if normalized and normalized not in _img_seen:
                         _img_seen.add(normalized)
-                        _candidate_img_ids.append(normalized)
                         grounded_image_ids.append(normalized)
         images = _image_details(grounded_image_ids, self.image_index)
 
@@ -2546,9 +2910,9 @@ class AgentService:
                 "image_terms": image_terms or [],
                 "image_features": image_features or {},
                 "llm_analysis": analysis,
-                "candidate_image_ids": _candidate_img_ids,
+                "candidate_image_ids": grounded_image_ids,
                 "grounded_image_ids": grounded_image_ids,
-                "vl_image_selection": len(_candidate_img_ids) > 0,
+                "image_count": len(grounded_image_ids),
                 "candidate_titles": [str(chunk.get("title", "")) for chunk in chunks[:5]],
                 "selected_titles": [str(chunk.get("title", "")) for chunk in evidence_chunks],
                 "selected_reranker_scores": [float(chunk.get("_cross_encoder_score", 0)) for chunk in evidence_chunks],
@@ -2742,61 +3106,89 @@ class AgentService:
 
         sub_results: list[dict[str, Any]] = []
         turn_service_topics: list[str] = []
-        for sub_question in sub_questions:
-            route_decision = self._resolve_route_decision(
-                question=sub_question.normalized_text,
-                session=session,
-                turn_service_topics=turn_service_topics,
+
+        # If all sub-questions route to customer_service, use the original question
+        # as a single query so the LLM generates one coherent answer (not merged fragments).
+        _cs_count = 0
+        for sq in sub_questions:
+            _rd = self._resolve_route_decision(
+                question=sq.normalized_text, session=session, turn_service_topics=turn_service_topics,
             )
-            if route_decision.route == "customer_service":
-                result = self._generate_customer_service_response(
-                    question=sub_question.normalized_text,
-                    route_decision=route_decision,
-                    context_topics=_unique(
-                        [
-                            *(session.current_service_topics if session is not None else []),
-                            *turn_service_topics,
-                        ]
-                    ),
-                )
-                resolved_query = sub_question.normalized_text
-            else:
-                base_query = self._build_subquestion_query(
-                    sub_question=sub_question,
-                    original_question=request.question,
-                    turn_context=turn_context,
-                )
-                resolved_query = base_query
-                result = self.generate_response(
-                    query=base_query,
-                    history=turn_context.history,
-                    image_input=request.images[0] if request.images else None,
-                    dialog_summary=turn_context.dialog_summary,
-                    image_context=image_result.combined_summary,
-                    image_terms=image_result.retrieval_terms,
-                    image_features=image_result.visual_features,
-                )
+            if _rd.route == "customer_service":
+                _cs_count += 1
+        _all_cs = _cs_count == len(sub_questions) and len(sub_questions) > 1
+
+        if _all_cs:
+            result = self._generate_customer_service_response(
+                question=request.question.strip(),
+                route_decision=self._resolve_route_decision(
+                    question=sub_questions[0].normalized_text, session=session, turn_service_topics=turn_service_topics,
+                ),
+                context_topics=[],
+            )
             result["retrieval_debug"] = {
                 **result.get("retrieval_debug", {}),
-                "base_query": base_query if route_decision.route != "customer_service" else resolved_query,
-                "resolved_query": resolved_query,
+                "base_query": request.question.strip(),
+                "resolved_query": request.question.strip(),
                 "image_understanding": image_result.to_debug_dict(),
-                "route_decision": {
-                    "route": route_decision.route,
-                    "confidence": route_decision.confidence,
-                    "matched_terms": route_decision.matched_terms,
-                    "manual_score": route_decision.manual_score,
-                    "service_score": route_decision.service_score,
-                    "reason": route_decision.reason,
-                },
             }
             sub_results.append(result)
-            turn_service_topics = _unique(
-                [
-                    *turn_service_topics,
-                    *result["retrieval_debug"].get("matched_policy_topics", []),
-                ]
-            )
+        else:
+            for sub_question in sub_questions:
+                route_decision = self._resolve_route_decision(
+                    question=sub_question.normalized_text,
+                    session=session,
+                    turn_service_topics=turn_service_topics,
+                )
+                if route_decision.route == "customer_service":
+                    result = self._generate_customer_service_response(
+                        question=sub_question.normalized_text,
+                        route_decision=route_decision,
+                        context_topics=_unique(
+                            [
+                                *(session.current_service_topics if session is not None else []),
+                                *turn_service_topics,
+                            ]
+                        ),
+                    )
+                    resolved_query = sub_question.normalized_text
+                else:
+                    base_query = self._build_subquestion_query(
+                        sub_question=sub_question,
+                        original_question=request.question,
+                        turn_context=turn_context,
+                    )
+                    resolved_query = base_query
+                    result = self.generate_response(
+                        query=base_query,
+                        history=turn_context.history,
+                        image_input=request.images[0] if request.images else None,
+                        dialog_summary=turn_context.dialog_summary,
+                        image_context=image_result.combined_summary,
+                        image_terms=image_result.retrieval_terms,
+                        image_features=image_result.visual_features,
+                    )
+                result["retrieval_debug"] = {
+                    **result.get("retrieval_debug", {}),
+                    "base_query": base_query if route_decision.route != "customer_service" else resolved_query,
+                    "resolved_query": resolved_query,
+                    "image_understanding": image_result.to_debug_dict(),
+                    "route_decision": {
+                        "route": route_decision.route,
+                        "confidence": route_decision.confidence,
+                        "matched_terms": route_decision.matched_terms,
+                        "manual_score": route_decision.manual_score,
+                        "service_score": route_decision.service_score,
+                        "reason": route_decision.reason,
+                    },
+                }
+                sub_results.append(result)
+                turn_service_topics = _unique(
+                    [
+                        *turn_service_topics,
+                        *result["retrieval_debug"].get("matched_policy_topics", []),
+                    ]
+                )
 
         merged_answer = self._merge_subquestion_answers(
             original_question=request.question,

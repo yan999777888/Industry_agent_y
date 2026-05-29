@@ -12,6 +12,21 @@ _CLAUSE_SPLIT_RE = re.compile(r"[，,；;]\s*")
 _LEADING_FILLER_RE = re.compile(
     r"^(请问|我想咨询一下|我想了解一下|我想问一下|帮我看一下|想问一下|我想知道|麻烦问一下)[，,\s]*"
 )
+_CONSTRAINT_RE = re.compile(
+    r"^(只需|只要|仅仅|只|仅|简单|简短|简略|简要|简洁|麻烦|帮我|请|不用|不要|不需要)"
+    r".{0,10}(告诉我|说|列|给|回答|描述|介绍|总结|概括)"
+    r".{0,10}(前?[一二三四五六七八九十\d]+[条个项]|几句|主要|关键|重点|大概|大致|简明)"
+)
+_QUANTITY_CONSTRAINT_RE = re.compile(
+    r"^(只需|只要|仅仅|只|仅).{0,5}(前[一二三四五六七八九十\d]+|最?多?[一二三四五六七八九十\d]+[条个])"
+)
+
+
+def _is_constraint_segment(segment: str) -> bool:
+    """Check if segment is a constraint (e.g. '只需告诉我前五条'), not a new question."""
+    return bool(_CONSTRAINT_RE.match(segment) or _QUANTITY_CONSTRAINT_RE.match(segment))
+
+
 _INTENT_TERMS = (
     "退货", "换货", "退款", "发票", "投诉", "运费", "物流", "维修", "安装",
     "设置", "清洁", "保修", "充电", "指示灯", "尺寸", "表带", "密码", "注意事项",
@@ -50,10 +65,25 @@ def split_complex_question(question: str) -> list[SubQuestion]:
 
     segments = _extract_segments(cleaned)
     sub_questions: list[SubQuestion] = []
-    for index, segment in enumerate(segments, start=1):
+    for segment in segments:
         normalized = _normalize_segment(segment)
         if not normalized:
             continue
+        # Skip segments that are constraints on the previous question
+        # e.g. "只需告诉我前五条" is not a separate question
+        if _is_constraint_segment(normalized):
+            if sub_questions:
+                # Append constraint to previous question's text
+                prev = sub_questions[-1]
+                sub_questions[-1] = SubQuestion(
+                    sub_question_id=prev.sub_question_id,
+                    text=prev.text + " " + normalized,
+                    normalized_text=prev.normalized_text + " " + normalized,
+                    intent=prev.intent,
+                    depends_on_previous=prev.depends_on_previous,
+                )
+            continue
+        index = len(sub_questions) + 1
         sub_questions.append(
             SubQuestion(
                 sub_question_id=f"q{index}",

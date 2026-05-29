@@ -12,6 +12,7 @@ openai>=1.0
 
 # ── Optional neural embedding backend ─────────────────────────────────────
 sentence-transformers>=2.2
+numpy>=1.24
 
 # ── Testing / dev utilities ──────────────────────────────────────────────
 requests>=2.31                # test_api.py smoke test script

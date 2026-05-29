@@ -299,7 +299,7 @@ class MilvusVectorSearcher:
         # Get chunk_ids from Milvus results, filter by similarity threshold
         chunk_ids: list[str] = []
         score_map: dict[str, float] = {}
-        _sim_threshold = float(os.getenv("MILVUS_SIMILARITY_THRESHOLD", "0.30"))
+        _sim_threshold = float(os.getenv("MILVUS_SIMILARITY_THRESHOLD", "0.15"))
         for hit in results[0]:
             score = float(hit.get("distance", 0))
             if score < _sim_threshold:

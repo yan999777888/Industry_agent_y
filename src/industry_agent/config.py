@@ -46,12 +46,12 @@ class Settings:
     dashscope_api_key: str = os.getenv("DASHSCOPE_API_KEY", "")
     dashscope_base_url: str = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     dashscope_rerank_url: str = os.getenv("DASHSCOPE_RERANK_URL", "https://dashscope.aliyuncs.com/compatible-api/v1")
-    dashscope_embedding_model: str = os.getenv("DASHSCOPE_EMBEDDING_MODEL", "text-embedding-v3")
+    dashscope_embedding_model: str = os.getenv("DASHSCOPE_EMBEDDING_MODEL", "text-embedding-v4")
     dashscope_embedding_dimensions: int = int(os.getenv("DASHSCOPE_EMBEDDING_DIMENSIONS", "1024"))
     dashscope_rerank_model: str = os.getenv("DASHSCOPE_RERANK_MODEL", "qwen3-rerank")
     dashscope_rerank_top_k: int = int(os.getenv("DASHSCOPE_RERANK_TOP_K", "20"))
-    dashscope_llm_model: str = os.getenv("DASHSCOPE_LLM_MODEL", "qwen3.5-flash")
-    dashscope_vision_model: str = os.getenv("DASHSCOPE_VISION_MODEL", "qwen3-vl-plus")
+    dashscope_llm_model: str = os.getenv("DASHSCOPE_LLM_MODEL", "qwen3.5-plus")
+    dashscope_vision_model: str = os.getenv("DASHSCOPE_VISION_MODEL", "qwen3-vl-plus-2025-09-23")
 
     @property
     def image_dir(self) -> Path:
