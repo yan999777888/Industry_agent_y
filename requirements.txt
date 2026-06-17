@@ -1,21 +1,29 @@
 # ── Core ──────────────────────────────────────────────────────────────────
-httpx>=0.27,<1.0              # Ollama native API client
+httpx>=0.27,<1.0              # Ollama native API client + DashScope API
 pillow>=10.0,<12.0            # uploaded image parsing (format / size / metadata)
+numpy>=1.24                   # array ops for embeddings / chunker
 
 # ── API server ────────────────────────────────────────────────────────────
 fastapi>=0.110,<1.0
 uvicorn[standard]>=0.27,<1.0
 pydantic>=2.0,<3.0
 
-# ── Optional cloud LLM backend ────────────────────────────────────────────
-openai>=1.0
+# ── LLM backends ──────────────────────────────────────────────────────────
+openai>=1.0                   # OpenAI-compatible cloud LLM (Mimo / DashScope)
 
-# ── Optional neural embedding backend ─────────────────────────────────────
-sentence-transformers>=2.2
-numpy>=1.24
+# ── Retrieval / RAG ──────────────────────────────────────────────────────
+jieba>=0.42                   # Chinese text segmentation for BM25
+rank-bm25>=0.2.2              # BM25Okapi keyword retriever
+pymilvus>=2.4,<3.0            # Zilliz Cloud Milvus vector store
+
+# ── Neural embedding / reranking (optional, heavy) ───────────────────────
+sentence-transformers>=2.2    # CrossEncoder reranker + local embedding fallback
+
+# ── DashScope (Alibaba Cloud AI) ─────────────────────────────────────────
+dashscope>=1.20               # text-embedding-v4 + qwen3-rerank
 
 # ── Testing / dev utilities ──────────────────────────────────────────────
-requests>=2.31                # test_api.py smoke test script
+requests>=2.31                # test_api.py / submission scripts
 
 # ── Build tools ──────────────────────────────────────────────────────────
 setuptools>=68

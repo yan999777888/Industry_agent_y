@@ -53,6 +53,9 @@ class Settings:
     dashscope_llm_model: str = os.getenv("DASHSCOPE_LLM_MODEL", "qwen3.5-plus")
     dashscope_vision_model: str = os.getenv("DASHSCOPE_VISION_MODEL", "qwen3-vl-plus-2025-09-23")
 
+    # --- Competition API auth ---
+    kafu_api_token: str = os.getenv("KAFU_API_TOKEN", "")
+
     @property
     def image_dir(self) -> Path:
         return self.knowledge_dir / "插图"

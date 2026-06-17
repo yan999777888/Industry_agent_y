@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import logging
 from industry_agent.config import settings
+
+logger = logging.getLogger(__name__)
 
 try:  # pragma: no cover - optional dependency
     import httpx
@@ -43,8 +46,9 @@ class LLMClient:
         if settings.dashscope_enabled:
             ds_base = settings.dashscope_base_url.rstrip("/")
             self.api_key = api_key or settings.dashscope_api_key
-            # Do NOT append /chat/completions — the OpenAI SDK adds it automatically.
-            # Also ignore passed model/vision_model — use DashScope config directly.
+            logger.warning("LLMClient DashScope init: api_key=%s... base_url=%s model=%s enabled=%s",
+                           self.api_key[:15] if self.api_key else "EMPTY",
+                           ds_base, settings.dashscope_llm_model, settings.dashscope_enabled)
             self.base_url = ds_base
             self.model = settings.dashscope_llm_model
             self.vision_model = settings.dashscope_vision_model

@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  agent:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - KAFU_API_TOKEN=${KAFU_API_TOKEN}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_MODEL=${LLM_MODEL:-mimo-v2.5-pro}
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+      - INDUSTRY_AGENT_DASHSCOPE_ENABLED=${INDUSTRY_AGENT_DASHSCOPE_ENABLED:-1}
+      - VECTOR_BACKEND=${VECTOR_BACKEND:-milvus}
+      - MILVUS_URI=${MILVUS_URI}
+      - MILVUS_TOKEN=${MILVUS_TOKEN}
+      - RETRIEVAL_MODE=${RETRIEVAL_MODE:-hybrid}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; r = httpx.get('http://localhost:8080/health'); exit(0 if r.status_code == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

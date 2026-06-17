@@ -652,8 +652,8 @@ def _localize_answer(answer: str, query: str) -> str:
 def _fix_encoding_artifacts(text: str) -> str:
     """Remove unicode replacement characters and fix common encoding issues."""
     # Fix curly quotes and other smart punctuation to ASCII
-    text = text.replace("‘", "'").replace("’", "'")  # curly single quotes
-    text = text.replace("“", '"').replace("”", '"')  # curly double quotes
+    text = text.replace("'", "'").replace("'", "'")  # curly single quotes
+    text = text.replace(""", '"').replace(""", '"')  # curly double quotes
     text = text.replace("–", "-").replace("—", "--")  # en/em dashes
     text = text.replace(" ", " ")  # non-breaking space
     text = text.replace("…", "...")  # ellipsis
@@ -916,13 +916,17 @@ def _rewrite_query(question: str, llm_client: LLMClient) -> str:
     prompt = _QUERY_REWRITE_PROMPT_EN if is_english else _QUERY_REWRITE_PROMPT
     sys_prompt = "You are a query rewrite assistant. Output only the rewritten question." if is_english else "你是query重写助手。只输出重写后的问句，不要任何解释或前缀。"
     try:
-        result = llm_client.chat(
-            system_prompt=sys_prompt,
-            messages=[{"role": "user", "content": prompt.format(question=question)}],
-            temperature=0.1,
-            max_tokens=80,
-        )
-        rewritten = result.strip().strip('"\'`“”‘’')
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                llm_client.chat,
+                system_prompt=sys_prompt,
+                messages=[{"role": "user", "content": prompt.format(question=question)}],
+                temperature=0.1,
+                max_tokens=80,
+            )
+            result = future.result(timeout=5)
+        rewritten = result.strip().strip('"\'`""''')
         logger.warning("REWRITE: %r -> %r", question, rewritten)
         if 2 <= len(rewritten) <= len(question) * 2:
             return rewritten
@@ -1953,7 +1957,7 @@ def _assemble_context(
         body = re.sub(r"\s{2,}", " ", body).strip()
         logger.warning("CONTEXT_BODY: %.1fch Figure_in_body=%s", len(body), 'Figure' in body)
         # Replace "详见xxx" with "(参见下文相关步骤)" so LLM knows content follows
-        body = re.sub(r"[（(]?\s*详见\s*[“""」]?\s*[^）)「\n。，]{2,20}\s*[“""」]?\s*[）)]?", "（参见下文相关步骤）", body)
+        body = re.sub(r"[(（]?\s*详见\s*[\"\"「」]?\s*[^)）「\n。，]{2,20}\s*[\"\"「」]?\s*[)）]?", "(参见下文相关步骤)", body)
         body = re.sub(r"[，,]\s*详见\s*[^。，,\n]+", "，具体步骤参见下文", body)
         body = re.sub(r"[。，,]\s*(详情请[见参阅参考]|详细内容请[见参见]|更多信息请[参见]|详细操作请[参见参考])[^。.\n]+", "。", body)
         part = f"{header}\n{body}"
@@ -2624,45 +2628,10 @@ class AgentService:
         image_terms: list[str] | None = None,
         image_features: dict[str, list[str]] | None = None,
     ) -> dict[str, Any]:
-        # === Step 0a: Query re-write — consolidate intent ===
-        # Prevents a single query from being treated as multiple questions
-        query = _rewrite_query(query, self.llm_client)
-        logger.info("Rewritten query: %s", query)
-
-        # === Step 0b: LLM query analysis — supplementary search terms ===
-        analysis = _llm_analyze_query(query, self.llm_client)
-        logger.info("LLM query analysis: %s", analysis)
-        search_parts: list[str] = []
-        if analysis.get("product"):
-            search_parts.append(analysis["product"])
-        if analysis.get("models"):
-            search_parts.extend(analysis["models"])
-        if analysis.get("keywords"):
-            search_parts.extend(analysis["keywords"])
-        enhanced_query = " ".join(search_parts) if search_parts else query
-
-        # 1. Retrieve — original query is primary, LLM-enhanced as supplement
+        # === 直接用原始查询检索，跳过 LLM 预处理 ===
         candidate_groups: list[tuple[str, list[dict[str, Any]]]] = [
             ("text_only", self.retriever.search(query, limit=RETRIEVAL_LIMIT))
         ]
-        if enhanced_query != query:
-            candidate_groups.append(
-                ("llm_enhanced", self.retriever.search(enhanced_query, limit=RETRIEVAL_LIMIT))
-            )
-
-        # Optional: LLM query expansion for better recall (Phase 4)
-        _enable_qe = os.getenv("INDUSTRY_AGENT_ENABLE_QUERY_EXPANSION", "1").strip().lower()
-        if _enable_qe in {"1", "true", "on"}:
-            try:
-                _expander = QueryExpander()
-                _expanded = _expander.expand(query)
-                for _eq in _expanded.get("queries", []):
-                    if _eq and _eq != query:
-                        candidate_groups.append(
-                            ("expanded", self.retriever.search(_eq, limit=RETRIEVAL_LIMIT))
-                        )
-            except Exception:
-                pass
 
         multimodal_query = query
         if image_terms:
@@ -2713,13 +2682,13 @@ class AgentService:
 
         # === Step 1a: Score gap filter — drop low-scoring chunks, skip for English ===
         if chunks and not _is_english_text(query):
-            _top_fusion = max(float(c.get("_fusion_score", 0)) for c in chunks)
-            chunks = [c for c in chunks if float(c.get("_fusion_score", 0)) >= _top_fusion - 40.0]
+            _top_fusion = max(float(c.get("_fusion_score") or 0) for c in chunks)
+            chunks = [c for c in chunks if float(c.get("_fusion_score") or 0) >= _top_fusion - 40.0]
             logger.warning("SCORE_GAP: top=%.1f kept=%d", _top_fusion, len(chunks))
 
         # === Step 1b: Ranking + LLM filter ===
         # English: sort by fusion_score (RRF-based) so keyword-only chunks also reach SPAN
-        _sort_key = (lambda c: float(c.get('_cross_encoder_score', 0))) if _is_english_text(query) else (lambda c: float(c.get('_vector_score', 0)))
+        _sort_key = (lambda c: float(c.get('_cross_encoder_score') or 0)) if _is_english_text(query) else (lambda c: float(c.get('_vector_score') or 0))
         ranked = sorted(chunks, key=_sort_key, reverse=True)
         _span_limit = 12 if _is_english_text(query) else 8
         evidence_chunks = [ranked[0]] if ranked else []
@@ -2733,8 +2702,8 @@ class AgentService:
 
         # === Step 1c: Supplement chunks referenced via "详见" but filtered out ===
         for chunk in list(evidence_chunks):
-            for m in re.finditer(r'详见\s*[（(]?[“""]?\s*([^）)\n。，,""""]{2,30}?)', str(chunk.get("text", ""))):
-                ref_topic = re.sub(r'^[\s"""""”\'"]+|[\s"""""”\'"]+$', '', m.group(1))
+            for m in re.finditer(r'详见\s*[（(]?["""]?\s*([^）)\n。，,""""]{2,30}?)', str(chunk.get("text", ""))):
+                ref_topic = re.sub(r'^[\s""""""\'"]+|[\s""""""\'"]+$', '', m.group(1))
                 if len(ref_topic) < 3:
                     continue
                 for rc in chunks:
@@ -2909,7 +2878,7 @@ class AgentService:
                 ),
                 "image_terms": image_terms or [],
                 "image_features": image_features or {},
-                "llm_analysis": analysis,
+                "llm_analysis": {},
                 "candidate_image_ids": grounded_image_ids,
                 "grounded_image_ids": grounded_image_ids,
                 "image_count": len(grounded_image_ids),

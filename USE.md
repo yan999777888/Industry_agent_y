@@ -141,20 +141,73 @@ python3 scripts/sample_kb_chunks.py --has-image yes --limit 6
 
 ## 5. 启动服务
 
+### 5.1 本地开发模式
+
 ```bash
-uvicorn industry_agent.api.app:create_app --factory --host 0.0.0.0 --port 8000
+export KAFU_API_TOKEN=your_token_here
+export DASHSCOPE_API_KEY=your_key
+export LLM_API_KEY=your_key
+export MILVUS_URI=your_uri
+export MILVUS_TOKEN=your_token
+
+uvicorn industry_agent.api.app:create_app --factory --host 0.0.0.0 --port 8080
 ```
 
-健康检查：
+### 5.2 Docker 部署（推荐比赛提交）
 
 ```bash
-curl http://127.0.0.1:8000/health
+# 1. 复制环境变量模板
+cp .env.example .env
+
+# 2. 编辑 .env 填入真实的 API Key 和 Token
+vim .env
+
+# 3. 构建并启动
+docker-compose up -d --build
+
+# 4. 查看日志
+docker-compose logs -f agent
+```
+
+### 5.3 Docker 单独构建
+
+```bash
+docker build -t industry-agent .
+docker run -p 8080:8080 \
+  -e KAFU_API_TOKEN=your_token \
+  -e LLM_API_KEY=your_key \
+  -e DASHSCOPE_API_KEY=your_key \
+  -e MILVUS_URI=your_uri \
+  -e MILVUS_TOKEN=your_token \
+  industry-agent
+```
+
+### 5.4 健康检查
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+### 5.5 认证测试
+
+```bash
+# 无 Token → 401
+curl -X POST http://127.0.0.1:8080/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "你好"}'
+
+# 带 Token → 200
+curl -X POST http://127.0.0.1:8080/chat \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_token_here" \
+  -d '{"question": "洗碗机安装有什么要求？"}'
 ```
 
 如果启动失败，先检查：
 
 - `LLM_API_KEY` / `LLM_BASE_URL` 是否配置正确
 - `data/processed/kb/index.sqlite` 是否已经生成
+- `KAFU_API_TOKEN` 是否设置（比赛评测必填）
 - 如果使用 Ollama，`OLLAMA_MODEL` 和 `OLLAMA_VISION_MODEL` 是否已拉取
 
 ## 6. 调用接口
